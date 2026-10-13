@@ -584,6 +584,10 @@ final class NativeLibraryRefreshHostedTests: XCTestCase {
                 XCTAssertGreaterThan(beforePixel[0], 180)
                 XCTAssertLessThan(beforePixel[1], 30)
                 XCTAssertLessThan(beforePixel[2], 30)
+                // Let neighbours finish their off-main composites first, so the probe samples
+                // the scroll itself rather than a main thread busy applying them.
+                try await Task.sleep(for: .milliseconds(500))
+                window.layoutIfNeeded()
                 let origin = collection.contentOffset.y
                 let target = origin + initialFrame.maxY - 80
                 let movement = ScrollMountProbe()

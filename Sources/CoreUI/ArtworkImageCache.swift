@@ -359,10 +359,10 @@ public final class ArtworkImageCache: NSObject, @unchecked Sendable {
         }
         super.init()
         cache.delegate = self
-        // Decoded landscape/poster thumbnails are small; cap retained pixels so the
-        // cache stays bounded on long seasons (NSCache evicts under memory pressure
-        // regardless).
-        cache.totalCostLimit = 96 * 1024 * 1024
+        // Cap retained pixels so the cache stays bounded on long seasons (NSCache
+        // evicts under memory pressure regardless). The budget holds a returning
+        // Browse traversal at 2x on Apple TV 4K.
+        cache.totalCostLimit = ArtworkMemoryBudget.current.decodedBytes
         // Belt-and-suspenders: NSCache already evicts under pressure, but a decoded
         // poster/hero wall can spike the footprint faster than that fires. Purge the
         // decoded cache on a real memory warning so we shed the biggest reclaimable

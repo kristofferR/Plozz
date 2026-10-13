@@ -164,6 +164,7 @@ struct NativeLibraryGrid<Header: View>: UIViewControllerRepresentable {
     let header: Header
     let onSelect: (MediaItem, Int) -> Void
     let onLoaded: (Int) -> Void
+    let onScroll: (CGFloat) -> Void
 
     func makeUIViewController(context: Context) -> NativeLibraryGridController {
         let controller = NativeLibraryGridController()
@@ -180,7 +181,7 @@ struct NativeLibraryGrid<Header: View>: UIViewControllerRepresentable {
             environment: context.environment, leadingInset: leadingInset, trailingInset: trailingInset,
             header: AnyView(header.environment(\.self, context.environment)),
             hidesScrollIndicator: hidesScrollIndicator,
-            onSelect: onSelect, onLoaded: onLoaded
+            onSelect: onSelect, onLoaded: onLoaded, onScroll: onScroll
         )
     }
 
@@ -204,6 +205,7 @@ final class NativeLibraryGridController: UIViewController, UICollectionViewDataS
     private var trailingInset: CGFloat = 0
     private var onSelect: ((MediaItem, Int) -> Void)?
     private var onLoaded: ((Int) -> Void)?
+    private var onScroll: ((CGFloat) -> Void)?
     private var bindings: [ObjectIdentifier: CellBinding] = [:]
     private var pendingNavigation: MediaItem?
     private var lastFocusedIndex: IndexPath?
@@ -248,7 +250,8 @@ final class NativeLibraryGridController: UIViewController, UICollectionViewDataS
         model: LibraryBrowseViewModel, total: Int, generation: Int, spoilerSettings: SpoilerSettings,
         environment: EnvironmentValues, leadingInset: CGFloat, trailingInset: CGFloat,
         header: AnyView, hidesScrollIndicator: Bool,
-        onSelect: @escaping (MediaItem, Int) -> Void, onLoaded: @escaping (Int) -> Void
+        onSelect: @escaping (MediaItem, Int) -> Void, onLoaded: @escaping (Int) -> Void,
+        onScroll: @escaping (CGFloat) -> Void = { _ in }
     ) {
         let reset = self.model !== model || self.generation != generation
         let previousCount = self.total
@@ -265,6 +268,7 @@ final class NativeLibraryGridController: UIViewController, UICollectionViewDataS
         self.trailingInset = trailingInset
         self.onSelect = onSelect
         self.onLoaded = onLoaded
+        self.onScroll = onScroll
         self.hidesScrollIndicator = hidesScrollIndicator
         headerHost.rootView = AnyView(
             header.fixedSize(horizontal: false, vertical: true)
@@ -369,7 +373,9 @@ final class NativeLibraryGridController: UIViewController, UICollectionViewDataS
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        scrollTarget?.moveHeader(with: scrollView.contentOffset.y + scrollView.adjustedContentInset.top)
+        let offset = scrollView.contentOffset.y + scrollView.adjustedContentInset.top
+        scrollTarget?.moveHeader(with: offset)
+        onScroll?(offset)
         scheduleViewportReport()
     }
 

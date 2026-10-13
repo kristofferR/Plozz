@@ -399,7 +399,8 @@ public struct LibraryBrowseView: View {
             hidesScrollIndicator: isRailVisible,
             header: scanBanner,
             onSelect: { item, index in select(item, at: index) },
-            onLoaded: { prefetchArtwork(aheadFrom: $0) }
+            onLoaded: { prefetchArtwork(aheadFrom: $0) },
+            onScroll: { artworkPrefetch.updateDirection(at: $0) }
         )
         .overlay(alignment: .trailing) {
             LibraryRailLayer(
@@ -486,13 +487,14 @@ public struct LibraryBrowseView: View {
             }
             // Never clip a focused card's lift, shadow or border.
             .scrollClipDisabled()
-            #if os(tvOS)
             .onScrollGeometryChange(for: CGFloat.self) {
                 $0.contentOffset.y + $0.contentInsets.top
             } action: { _, offset in
+                artworkPrefetch.updateDirection(at: offset)
+                #if os(tvOS)
                 nativeScrollTarget.moveHeader(with: offset)
+                #endif
             }
-            #endif
             // Rail + its "you are here" highlight live in a dedicated layer so
             // that tracking `topVisibleIndex` (which ticks on every cell that
             // scrolls in or out) re-renders only this small ~26-letter rail —
@@ -660,17 +662,23 @@ public struct LibraryBrowseView: View {
         )
     }
 
-    /// Warms decoded poster art for a short forward window once a cell appears so
-    /// rapid right-hold scrolling reuses ready thumbnails instead of flashing gray
-    /// placeholders.
+    /// Warms decoded poster art in the viewport's direction once a cell loads.
     private func prefetchArtwork(aheadFrom index: Int) {
         #if canImport(UIKit)
         guard index >= 0, index < viewModel.totalCount else { return }
-        let upper = min(index + 10, viewModel.totalCount - 1)
-        guard index <= upper else { return }
-        for candidateIndex in index...upper {
+        // Look ahead in the direction of travel. Rows scrolled past have usually left the
+        // memory cache, so scrolling back up needs the same warm-up as scrolling down.
+        let tracker = artworkPrefetch
+        let row = max(1, metrics.libraryPosterColumns.count)
+        let lookahead = row * 2
+        let range = tracker.forward
+            ? Array(index...min(index + lookahead, viewModel.totalCount - 1))
+            : Array((max(0, index - lookahead)...index).reversed())
+        for candidateIndex in range {
             guard let candidate = viewModel.item(at: candidateIndex) else { continue }
-            guard artworkPrefetch.seen.insert(candidate.id).inserted else { continue }
+            guard tracker.forward
+                ? tracker.seen.insert(candidate.id).inserted
+                : tracker.seenBackward.insert(candidate.id).inserted else { continue }
             for url in candidate.artworkCandidates(for: .poster).prefix(2) {
                 ArtworkImageCache.shared.prefetch(url, variant: .posterCard)
             }
@@ -855,8 +863,22 @@ private struct PosterPlaceholderView: View {
 /// invalidate the SwiftUI view body — a value-type `@State` `Set` would trigger a
 /// full-body re-render on every newly-seen item, hitching the scroll exactly when
 /// flying into not-yet-loaded content.
-private final class ArtworkPrefetchTracker {
+final class ArtworkPrefetchTracker {
     var seen: Set<String> = []
+    /// Prefetched while scrolling back up; separate, so the way back warms rows seen going down.
+    var seenBackward: Set<String> = []
+    private(set) var forward = true
+    private var viewportPosition: CGFloat?
+
+    /// Loading cells may finish in any order; only viewport movement changes direction.
+    func updateDirection(at position: CGFloat) {
+        defer { viewportPosition = position }
+        guard let viewportPosition, position != viewportPosition else { return }
+        let nextForward = position > viewportPosition
+        guard forward != nextForward else { return }
+        forward = nextForward
+        if forward { seen.removeAll() } else { seenBackward.removeAll() }
+    }
 }
 
 /// The alphabet rail plus its scroll-position highlight, isolated into its own

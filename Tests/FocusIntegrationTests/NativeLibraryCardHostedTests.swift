@@ -113,7 +113,7 @@ final class NativeLibraryCardHostedTests: XCTestCase {
                 _ = try render(count, layer: .foreground)
             }
             XCTAssertLessThanOrEqual(NativePosterArtworkBitmap.indicatorBytes, NativePosterArtworkBitmap.indicatorByteLimit)
-            XCTAssertLessThanOrEqual(NativePosterArtworkBitmap.indicatorCount, 64)
+            XCTAssertLessThanOrEqual(NativePosterArtworkBitmap.indicatorCount, NativePosterArtworkBitmap.indicatorCountLimit)
         }
     }
 
@@ -1244,6 +1244,38 @@ final class NativeLibraryCardHostedTests: XCTestCase {
         }
     }
 
+    func testCompositedLibraryBitmapsStayResidentWhenTheGridReturns() throws {
+        // Devices under 3 GB keep the small budget, which never held a returning grid.
+        guard NativeLibraryPosterBitmap.countLimit >= 42,
+              NativeLibraryPosterBitmap.byteLimit >= 42 * 520 * 780 * 4 else {
+            throw XCTSkip("This device keeps the small artwork budget.")
+        }
+        var environment = EnvironmentValues()
+        environment.themePalette = .dark
+        environment.colorScheme = .dark
+        // Seven six-column rows at Apple TV 4K's 2x: a 6 Down + 6 Up Browse traversal.
+        let size = CGSize(width: 260, height: 390)
+        let posters = try (0..<42).map { index in
+            (item: MediaItem(id: "grid-\(index)", title: "Movie \(index)", kind: .movie),
+             image: try XCTUnwrap(UIImage(data: artworkData(.blue))))
+        }
+        func renderGrid() throws {
+            for poster in posters {
+                let key = NativeLibraryPosterBitmap.Key(
+                    image: poster.image,
+                    presentation: .init(item: poster.item, spoilerSettings: .default, environment: environment),
+                    size: size, scale: 2
+                )
+                _ = try XCTUnwrap(NativeLibraryPosterBitmap.image(source: poster.image, key: key, environment: environment))
+            }
+        }
+        try renderGrid()
+        let rendered = NativeLibraryPosterBitmap.renderCount
+        try renderGrid()
+        XCTAssertEqual(NativeLibraryPosterBitmap.renderCount, rendered, "Returning rows must reuse their composites.")
+        XCTAssertLessThanOrEqual(NativeLibraryPosterBitmap.retainedBytes, NativeLibraryPosterBitmap.byteLimit)
+    }
+
     func testCompositedRealLibraryCellKeepsFocusDuringContentChanges() async throws {
         try await checkCompositedLibraryCell(cardStyle: .borderless)
     }
@@ -1383,7 +1415,13 @@ final class NativeLibraryCardHostedTests: XCTestCase {
         }
         update()
         let imageView = try XCTUnwrap(cell.subviews.compactMap { $0 as? NativePosterImageView }.first)
-        let before = try XCTUnwrap(imageView.image)
+        // A cache miss composites off the main thread; the decoded artwork stands in until then.
+        var before = try XCTUnwrap(imageView.image)
+        let compositeDeadline = Date().addingTimeInterval(2)
+        while before.size != imageView.bounds.size, Date() < compositeDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+            before = try XCTUnwrap(imageView.image)
+        }
         let beforeForeground = try XCTUnwrap(imageView.indicatorView.image)
         XCTAssertFalse(imageView.masksFocusEffectToContents, "Browse and rows must share the same native focus surface.")
         XCTAssertEqual(try rgba(XCTUnwrap(before.cgImage))[3], 255)
