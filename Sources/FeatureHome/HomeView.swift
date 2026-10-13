@@ -860,7 +860,10 @@ public struct HomeView: View {
                 perfSampler.start()
             }
         }
-        .onDisappear { perfSampler.stop() }
+        .onDisappear {
+            // The console stream keeps sampling screens pushed over Home, such as a library grid.
+            if !HomePerfDiagnostics.isStdoutMirrorEnabled { perfSampler.stop() }
+        }
         .onChange(of: homePerfOverlayEnabled) { _, enabled in
             if enabled || HomePerfDiagnostics.isStdoutMirrorEnabled {
                 perfSampler.start()

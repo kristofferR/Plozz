@@ -128,12 +128,22 @@ final class NativeLibraryPosterRemoteTests: XCTestCase {
         attachment.name = "controlled-\(arm)-calibrated-path"
         attachment.lifetime = .keepAlways
         add(attachment)
+        // Minutes of unchanging picture let the TV suspend the app (the screen saver, or the
+        // panel's static-image protection over HDMI-CEC). Step focus to the next poster and
+        // back every 45 seconds, stopping well before the idle measurement starts.
         while Date().timeIntervalSince1970 < measurementEpoch {
             let remaining = measurementEpoch - Date().timeIntervalSince1970
-            try await Task.sleep(for: .seconds(min(30, max(0, remaining))))
+            try await Task.sleep(for: .seconds(min(45, max(0, remaining))))
             XCTContext.runActivity(named: "Waiting for the recorded startup settling deadline") { _ in }
+            if measurementEpoch - Date().timeIntervalSince1970 > 30 {
+                // The calibrated start is the first poster, so Right always has a neighbor.
+                XCUIRemote.shared.press(.right)
+                XCUIRemote.shared.press(.left)
+                try await Task.sleep(for: .milliseconds(500))
+                XCTAssertEqual(try focusedPoster(in: app, arm: arm).label, initial)
+            }
         }
-        try measureControlled(app, arm: arm, path: path, idle: true)
+        try measureControlled(app, arm: arm, path: path, phase: .idle)
         Self.controlledArm = arm
         Self.controlledPath = path
     }
@@ -145,7 +155,29 @@ final class NativeLibraryPosterRemoteTests: XCTestCase {
         let arm = try XCTUnwrap(Self.controlledArm, "The matched idle test must finish in the same runner first.")
         addTeardownBlock { @MainActor in self.capture(app, name: "controlled-\(arm)-traversal") }
         Thread.sleep(forTimeInterval: 10)
-        try measureControlled(app, arm: arm, path: Self.controlledPath, idle: false)
+        try measureControlled(app, arm: arm, path: Self.controlledPath, phase: .scroll)
+    }
+
+    /// Back-to-back presses, as fast as the remote API delivers them (about four a second),
+    /// reach rows that have not been drawn yet and return to rows that have scrolled away.
+    func testControlledCRapidTraversal() throws {
+        guard #available(tvOS 26.0, *) else { throw XCTSkip("Native hitch metrics require tvOS 26.") }
+        let app = try existingApp(activate: false)
+        let arm = try XCTUnwrap(Self.controlledArm, "The matched idle test must finish in the same runner first.")
+        addTeardownBlock { @MainActor in self.capture(app, name: "controlled-\(arm)-rapid") }
+        Thread.sleep(forTimeInterval: 10)
+        try measureControlled(app, arm: arm, path: Self.controlledPath, phase: .rapid)
+    }
+
+    /// Holding a direction lets the focus engine repeat and accelerate, crossing about
+    /// twenty rows in two seconds. Holding Up for longer always stops on the first row.
+    func testControlledDHeldTraversal() throws {
+        guard #available(tvOS 26.0, *) else { throw XCTSkip("Native hitch metrics require tvOS 26.") }
+        let app = try existingApp(activate: false)
+        let arm = try XCTUnwrap(Self.controlledArm, "The matched idle test must finish in the same runner first.")
+        addTeardownBlock { @MainActor in self.capture(app, name: "controlled-\(arm)-held") }
+        Thread.sleep(forTimeInterval: 10)
+        try measureControlled(app, arm: arm, path: Self.controlledPath, phase: .held)
     }
 
     func testProfileRealLibraryTraversal() throws {
@@ -181,14 +213,33 @@ final class NativeLibraryPosterRemoteTests: XCTestCase {
         capture(app, name: "profiled-library-roundtrip")
     }
 
+    private enum Phase: String {
+        /// No input.
+        case idle
+        /// Six Down then six Up, one press every two seconds.
+        case scroll
+        /// Eighteen Down then eighteen Up, one press every 0.3 seconds.
+        case rapid
+        /// Down held for two seconds, then Up held for four, in five-second slots.
+        case held
+
+        var presses: (count: Int, interval: Double) {
+            switch self {
+            case .idle: (0, 0)
+            case .scroll: (12, 2)
+            case .rapid: (36, 0.3)
+            case .held: (0, 5)
+            }
+        }
+    }
+
     @available(tvOS 26.0, *)
-    private func measureControlled(_ app: XCUIApplication, arm: String, path: [String], idle: Bool) throws {
+    private func measureControlled(_ app: XCUIApplication, arm: String, path: [String], phase: Phase) throws {
         let initial = try XCTUnwrap(path.first)
         XCTAssertEqual(path.count, 7)
         let options = XCTMeasureOptions()
         options.iterationCount = 3
         options.invocationOptions = [.manuallyStart, .manuallyStop]
-        let phase = idle ? "idle" : "scroll"
         var iteration = 0
         var inputFailure: Error?
         measure(metrics: [
@@ -204,22 +255,31 @@ final class NativeLibraryPosterRemoteTests: XCTestCase {
                 startMeasuring()
                 let start = ProcessInfo.processInfo.systemUptime
                 let epoch = Date().timeIntervalSince1970
-                if idle {
-                    Thread.sleep(forTimeInterval: 24)
-                } else {
-                    for index in 0..<12 {
-                        let deadline = start + Double(index) * 2
+                let (count, interval) = phase.presses
+                for index in 0..<count {
+                    let deadline = start + Double(index) * interval
+                    Thread.sleep(forTimeInterval: max(0, deadline - ProcessInfo.processInfo.systemUptime))
+                    let sent = ProcessInfo.processInfo.systemUptime
+                    XCUIRemote.shared.press(index < count / 2 ? .down : .up)
+                    let completed = ProcessInfo.processInfo.systemUptime
+                    inputs.append(InputTiming(
+                        index: index, relativeSeconds: sent - start, lateSeconds: sent - deadline,
+                        durationSeconds: completed - sent
+                    ))
+                }
+                if phase == .held {
+                    for (index, (button, duration)) in [(XCUIRemote.Button.down, 2.0), (.up, 4.0)].enumerated() {
+                        let deadline = start + Double(index) * interval
                         Thread.sleep(forTimeInterval: max(0, deadline - ProcessInfo.processInfo.systemUptime))
                         let sent = ProcessInfo.processInfo.systemUptime
-                        XCUIRemote.shared.press(index < 6 ? .down : .up)
-                        let completed = ProcessInfo.processInfo.systemUptime
+                        XCUIRemote.shared.press(button, forDuration: duration)
                         inputs.append(InputTiming(
                             index: index, relativeSeconds: sent - start, lateSeconds: sent - deadline,
-                            durationSeconds: completed - sent
+                            durationSeconds: ProcessInfo.processInfo.systemUptime - sent
                         ))
                     }
-                    Thread.sleep(forTimeInterval: max(0, start + 24 - ProcessInfo.processInfo.systemUptime))
                 }
+                Thread.sleep(forTimeInterval: max(0, start + 24 - ProcessInfo.processInfo.systemUptime))
                 let stopCall = ProcessInfo.processInfo.systemUptime
                 let elapsed = stopCall - start
                 stopMeasuring()
@@ -232,14 +292,14 @@ final class NativeLibraryPosterRemoteTests: XCTestCase {
                     outerDurationSeconds: stopped - startCall
                 )
                 try attachTiming(WindowTiming(
-                    arm: arm, phase: phase, iteration: iteration, epoch: epoch,
+                    arm: arm, phase: phase.rawValue, iteration: iteration, epoch: epoch,
                     durationSeconds: elapsed, inputs: inputs, measurementBoundary: boundary
                 ))
-                print("LIBRARY_POSTER controlled-window arm=\(arm) phase=\(phase) iteration=\(iteration) epoch=\(epoch) duration=\(elapsed)")
+                print("LIBRARY_POSTER controlled-window arm=\(arm) phase=\(phase.rawValue) iteration=\(iteration) epoch=\(epoch) duration=\(elapsed)")
                 for input in inputs {
                     print("LIBRARY_POSTER controlled-input iteration=\(iteration) index=\(input.index) at=\(input.relativeSeconds) late=\(input.lateSeconds) duration=\(input.durationSeconds)")
                     XCTAssertLessThan(input.lateSeconds, 0.15, "Late remote delivery invalidates the matched cadence.")
-                    XCTAssertLessThan(input.durationSeconds, 1.95, "Remote delivery overran its two-second slot.")
+                    XCTAssertLessThan(input.durationSeconds, phase.presses.interval, "Remote delivery overran its slot.")
                 }
                 XCTAssertEqual(elapsed, 24, accuracy: 0.15)
                 XCTAssertEqual(try focusedPoster(in: app, arm: arm).label, initial)
