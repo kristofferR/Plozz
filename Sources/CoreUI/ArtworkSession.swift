@@ -74,6 +74,16 @@ public enum ArtworkSession {
         )
     }
 
+    /// Reads already-downloaded artwork for exports without starting another request.
+    @concurrent
+    public static func cachedData(for url: URL) async -> Data? {
+        guard !Task.isCancelled,
+              let response = byteCache.cachedResponse(for: URLRequest(url: url)),
+              let http = response.response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode) else { return nil }
+        return response.data
+    }
+
     /// Global cap on *concurrent background* artwork warms (season prewarm,
     /// loose-thumbnail prefetch). Foreground, on-screen artwork (`image(for:)`
     /// driven by a visible card / hero) is intentionally **not** gated by this —

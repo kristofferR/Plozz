@@ -7,15 +7,20 @@ public struct MediaArtworkSource: Sendable {
     public let fallbackURL: (@Sendable () async -> URL?)?
     public let policy: ArtworkPresentationPolicy
     public let itemIdentity: String
+    private let background: Bool
 
-    public init(item: MediaItem, placement: ArtworkPlacement, policy: ArtworkPresentationPolicy) {
-        self.init(item: item, placements: [placement], policy: policy)
+    public init(
+        item: MediaItem, placement: ArtworkPlacement, policy: ArtworkPresentationPolicy,
+        background: Bool = false
+    ) {
+        self.init(item: item, placements: [placement], policy: policy, background: background)
     }
 
     public init(
         item: MediaItem, placements: [ArtworkPlacement], policy: ArtworkPresentationPolicy,
-        router: ArtworkRouter = .shared
+        router: ArtworkRouter = .shared, background: Bool = false
     ) {
+        self.background = background
         self.policy = policy.forPlacement(placements.first)
         itemIdentity = CardArtworkPolicy.standard.pinIdentity(for: item)
         var seen = Set<ArtworkReference>()
@@ -26,8 +31,7 @@ public struct MediaArtworkSource: Sendable {
             return
         }
         fallbackURL = {
-            await ArtworkSession.artworkResolveLimiter.run {
-                guard !Task.isCancelled else { return nil }
+            await ArtworkSession.resolveArtwork(background: background) {
                 return await router.artworkURL(for: item, placements: placements)
             }
         }
@@ -44,7 +48,8 @@ public struct MediaArtworkSource: Sendable {
             variant: variant,
             maxAspectRatio: maxAspectRatio,
             asyncOnlineURL: fallbackURL,
-            prefersOnlineArtwork: policy.prefersOnlineArtwork
+            prefersOnlineArtwork: policy.prefersOnlineArtwork,
+            background: background
         )
     }
     #endif
