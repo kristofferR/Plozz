@@ -124,3 +124,23 @@ workspace as `home-baseline-{5,6}-*.log*` and `home-general-{1,2,3}-*.log*`.
 The image benchmarks use a photographic fixture and warm in-memory data, so they
 do not measure every poster, cache hit rate, or disk latency. UIKit and ImageIO
 JPEG timing was effectively equal. No private Infuse focus APIs were adopted.
+
+## Upstream integration, 14 October 2026
+
+The initial integration used upstream `00f72ecf`, incorporated into fork main by
+a history-preserving merge. The optimized app and hosted-test target
+built successfully on the full local Home stack. All 18 selected tests passed on
+the physical TV: the five export and eight native-focus tests above, plus four
+extended-artwork tests and one native-activity test from the unpublished follow-up.
+Architecture, test hygiene and localization guards passed after integration.
+
+The branches were then rebased onto upstream `a2270c65`, which changes Emby's
+native-section request filters. Fork main's code matches that upstream revision.
+The artwork, focus, export and selected hosted-test sources are unchanged from
+the tested local stack, so their integration evidence is reused. This is focused
+coverage; it is not a new full test sweep or a benchmark of the latest base.
+
+The timing and traversal tables above describe the pre-rebase binaries, not the
+new upstream base. The unpublished combined follow-up raised a first settled-pass
+regression concern in repeated normal-speed measurements and is held locally
+pending isolation. The epic tracks those results and remaining experiments.
