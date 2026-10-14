@@ -84,6 +84,45 @@ final class NativeLibraryCardHostedTests: XCTestCase {
         XCTAssertTrue(poster.image === placeholder)
     }
 
+    func testPosterLayoutReusesArtworkUntilInputsOrSizeChange() throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        let controller = UIViewController()
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKeyAndVisible()
+        }
+        let image = NativePosterArtworkBitmap.placeholder
+        let poster = NativePosterButton(image: image)
+        poster.frame = CGRect(x: 100, y: 100, width: 260, height: 390)
+        var preparations = 0
+        var overlays = 0
+        poster.prepareArtwork = { _ in preparations += 1; return image }
+        poster.prepareOverlay = { _ in overlays += 1; return nil }
+        controller.view.addSubview(poster)
+        poster.layoutIfNeeded()
+        XCTAssertEqual(preparations, 1)
+        for _ in 0..<10 {
+            poster.setNeedsLayout()
+            poster.layoutIfNeeded()
+        }
+        XCTAssertEqual(preparations, 1)
+        XCTAssertEqual(overlays, 1)
+
+        poster.prepareArtwork = { _ in preparations += 1; return image }
+        poster.layoutIfNeeded()
+        XCTAssertEqual(preparations, 2, "New content must prepare even at the same size.")
+        poster.bounds.size = CGSize(width: 280, height: 420)
+        poster.layoutIfNeeded()
+        XCTAssertEqual(preparations, 3)
+        XCTAssertEqual(overlays, 3)
+    }
+
     func testSharedStatusBitmapsReusePixelsAndBoundTheirCache() throws {
         var environment = EnvironmentValues()
         environment.displayScale = 2

@@ -247,10 +247,22 @@ struct HomeTab: View {
                         resolveArtwork: { item in
                             let source = MediaArtworkSource(
                                 item: item, placement: item.kind == .episode ? .seriesPoster : .poster,
-                                policy: policy
+                                policy: policy, background: true
                             )
-                            return await source.resolve(variant: .posterCard, maxAspectRatio: 1)?
-                                .image.pngData()
+                            guard let artwork = await source.resolve(variant: .posterCard, maxAspectRatio: 1) else {
+                                return nil
+                            }
+                            let cachedData: Data?
+                            if case let .remote(url) = artwork.reference {
+                                cachedData = await ArtworkSession.cachedData(
+                                    for: artwork.variant.requestURL(for: url)
+                                )
+                            } else {
+                                cachedData = nil
+                            }
+                            return await TopShelfPosterComposer.encodedArtwork(
+                                artwork.image, cachedData: cachedData
+                            )
                         }
                     )
                 }

@@ -328,7 +328,7 @@ final class NativePosterImageView: UIImageView {
         layoutIndicator()
     }
 
-    private func layoutIndicator() {
+    fileprivate func layoutIndicator() {
         let overlayView = overlayContentView
         guard let indicatorPlacement, !overlayView.bounds.isEmpty, !bounds.isEmpty else { return }
         // UIKit lifts overlays onto a nearer plane. Align only our badge to the
@@ -374,8 +374,14 @@ final class NativePosterButton: UIButton {
     var hostedOverlay: (UIView & UIContentView)?
     var onFocus: ((Bool) -> Void)?
     var onAvailable: (() -> Void)?
-    var prepareArtwork: ((CGSize) -> UIImage?)?
-    var prepareOverlay: ((CGSize) -> NativePosterOverlay?)?
+    var prepareArtwork: ((CGSize) -> UIImage?)? {
+        didSet { invalidateArtwork() }
+    }
+    var prepareOverlay: ((CGSize) -> NativePosterOverlay?)? {
+        didSet { invalidateArtwork() }
+    }
+    private var artworkNeedsUpdate = true
+    private var preparedSize = CGSize.zero
 
     init(image: UIImage, masksFocusEffectToContents: Bool = true) {
         artworkView = NativePosterImageView(masksFocusEffectToContents: masksFocusEffectToContents)
@@ -416,10 +422,29 @@ final class NativePosterButton: UIButton {
 
     private func refreshArtwork() {
         guard window != nil, bounds.width > 0, bounds.height > 0 else { return }
+        // Focus lays out the native surface repeatedly without changing its pixels.
+        // Badge projection still follows every parent layout and focus transition.
+        guard artworkNeedsUpdate || preparedSize != bounds.size else {
+            artworkView.layoutIndicator()
+            return
+        }
+        artworkNeedsUpdate = false
+        preparedSize = bounds.size
         autoreleasepool {
-            if let image = prepareArtwork?(bounds.size) { updateImage(image) }
+            if let prepareArtwork {
+                if let image = prepareArtwork(bounds.size) {
+                    updateImage(image)
+                } else {
+                    artworkNeedsUpdate = true
+                }
+            }
             artworkView.updateIndicator(prepareOverlay?(bounds.size), focused: isFocused)
         }
+    }
+
+    private func invalidateArtwork() {
+        artworkNeedsUpdate = true
+        setNeedsLayout()
     }
 }
 
@@ -591,7 +616,7 @@ struct NativeTVPoster<Overlay: View>: UIViewRepresentable {
     func makeUIView(context: Context) -> Container {
         let size = CGSize(width: fallbackWidth, height: fallbackWidth / aspectRatio)
         let view = NativePosterButton(image: NativePosterArtworkBitmap.placeholder(
-            size: size, scale: context.environment.displayScale
+            size: size, scale: context.environment.displayScale, clipsToArtwork: size.height <= size.width
         ), masksFocusEffectToContents: aspectRatio >= 1)
         view.defaultAccessibilityElement = view.isAccessibilityElement
         view.contentSize = size

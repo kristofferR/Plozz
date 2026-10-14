@@ -3,7 +3,9 @@ import CryptoKit
 import os
 
 #if canImport(UIKit)
+import ImageIO
 import UIKit
+import UniformTypeIdentifiers
 #endif
 
 /// Renders Continue-Watching poster artwork with the in-app progress bar
@@ -24,24 +26,80 @@ import UIKit
 /// fractions of the image width so the burned-in bar stays visually identical to
 /// the in-app one at any resolution.
 public enum TopShelfPosterComposer {
+    #if canImport(UIKit)
+    /// Exports off-main. Cached bytes must belong to this unmodified, policy-approved image.
+    @concurrent
+    public static func encodedArtwork(_ image: UIImage, cachedData: Data? = nil) async -> Data? {
+        guard !Task.isCancelled else { return nil }
+        return autoreleasepool {
+            if let cachedData, let source = stillImageSource(cachedData),
+               let pixels = image.cgImage,
+               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+               properties[kCGImagePropertyPixelWidth] as? Int == pixels.width,
+               properties[kCGImagePropertyPixelHeight] as? Int == pixels.height,
+               (properties[kCGImagePropertyOrientation] as? Int ?? 1) == 1,
+               image.imageOrientation == .up {
+                return cachedData
+            }
+            switch image.cgImage?.alphaInfo {
+            case .none?, .noneSkipFirst?, .noneSkipLast?:
+                return image.jpegData(compressionQuality: 0.8)
+            default:
+                return image.pngData()
+            }
+        }
+    }
+
+    private static func stillImageSource(_ data: Data) -> CGImageSource? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetStatus(source) == .statusComplete,
+              CGImageSourceGetCount(source) == 1,
+              let type = CGImageSourceGetType(source),
+              type == UTType.jpeg.identifier as CFString || type == UTType.png.identifier as CFString
+        else { return nil }
+        return source
+    }
+    #endif
+
     public static func selectedPosterURL(
         id: String, data: Data, progress: Double?, chip: String?
     ) -> URL? {
         #if canImport(UIKit)
-        guard !Task.isCancelled, let directory = TopShelfStore.artworkDirectoryURL,
-              let image = UIImage(data: data) else { return nil }
+        guard let directory = TopShelfStore.artworkDirectoryURL else { return nil }
+        return selectedPosterURL(id: id, data: data, progress: progress, chip: chip, directory: directory)
+        #else
+        return nil
+        #endif
+    }
+
+    #if canImport(UIKit)
+    static func selectedPosterURL(
+        id: String, data: Data, progress: Double?, chip: String?, directory: URL
+    ) -> URL? {
+        guard !Task.isCancelled else { return nil }
+        let hasProgress = progress.map { $0 > 0.01 && $0 < 0.99 } ?? false
+        let source = stillImageSource(data)
+        let reusesBytes = !hasProgress && source != nil
+        let fileExtension = hasProgress || (reusesBytes && source.flatMap(CGImageSourceGetType) == UTType.jpeg.identifier as CFString)
+            ? "jpg" : "png"
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         let bucket = Int(((progress ?? 0) * 100).rounded())
         let chipKey = chip.map { String(fnv1a($0), radix: 16) } ?? "n"
         let destination = directory.appendingPathComponent(
-            "\(sanitize(id))_\(bucket)_\(digest)_\(chipKey)_v\(barStyleGeneration).png"
+            "\(sanitize(id))_\(bucket)_\(digest)_\(chipKey)_v\(barStyleGeneration).\(fileExtension)"
         )
         if FileManager.default.fileExists(atPath: destination.path) { return destination }
         let output: Data?
-        if let progress, progress > 0.01, progress < 0.99 {
-            output = render(base: image, progress: CGFloat(progress), chip: chip)
+        if reusesBytes {
+            output = data
+        } else if let image = UIImage(data: data) {
+            if let progress, hasProgress {
+                output = render(base: image, progress: CGFloat(progress), chip: chip)
+            } else {
+                output = image.pngData()
+            }
         } else {
-            output = image.pngData()
+            output = nil
         }
         guard let output, !Task.isCancelled else { return nil }
         do {
@@ -53,10 +111,8 @@ public enum TopShelfPosterComposer {
                 .error("Unable to save selected Top Shelf artwork: \(String(describing: error))")
             return nil
         }
-        #else
-        return nil
-        #endif
     }
+    #endif
 
     /// In-app bar proportions, taken from `PosterCardView` / `PlozzTheme` base
     /// metrics (poster width 280, bar height 12, inset 22, scrim = height*8.5,
@@ -150,7 +206,7 @@ public enum TopShelfPosterComposer {
         // render. Without it a title whose label changed — an episode gaining its
         // numbering, a remaining time crossing a minute — would serve the old file.
         let chipKey = chip.map { String(fnv1a($0), radix: 16) } ?? "n"
-        let fileName = "\(sanitize(id))_\(bucket)_\(artKey)_\(chipKey)_v\(barStyleGeneration).png"
+        let fileName = "\(sanitize(id))_\(bucket)_\(artKey)_\(chipKey)_v\(barStyleGeneration).jpg"
         let destination = directory.appendingPathComponent(fileName)
 
         // Reuse an identical prior render (same item + same rounded percentage).
@@ -227,7 +283,7 @@ public enum TopShelfPosterComposer {
         }
     }
 
-    /// Draws `base` with the progress bar overlaid, returning PNG data. The bar's
+    /// Draws `base` with the progress bar overlaid, returning opaque JPEG data. The bar's
     /// scrim → track → fill layering and every colour/scale factor mirror
     /// `PosterCardView.progressBar` so the shelf and Home rows read identically.
     private static func render(base: UIImage, progress: CGFloat, chip: String? = nil) -> Data? {  // l10n:content — pre-formatted label drawn via Core Graphics
@@ -237,9 +293,10 @@ public enum TopShelfPosterComposer {
         let format = UIGraphicsImageRendererFormat.preferred()
         format.scale = 1
         format.opaque = true
+        format.preferredRange = .standard
         let renderer = UIGraphicsImageRenderer(size: size, format: format)
 
-        return renderer.pngData { context in
+        return renderer.jpegData(withCompressionQuality: 0.8) { context in
             base.draw(in: CGRect(origin: .zero, size: size))
             drawScrim(in: context.cgContext, size: size)
             drawResumeChip(in: context.cgContext, size: size, progress: progress, chip: chip)

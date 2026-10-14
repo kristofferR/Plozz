@@ -28,6 +28,14 @@ container, where the Top Shelf extension reads it.
   imports above `Foundation` to `TopShelfSnapshot` / `TopShelfStore`.
 - **Idempotent.** Republishing the same snapshot is cheap and side-effect
   free.
+- **Artwork export stays off the main actor.** Home resolves artwork with its active
+  policy, then awaits `TopShelfPosterComposer.encodedArtwork` before publishing.
+  Resolving an image on the main actor must not also encode it there.
+- **Reuse before encoding.** Matching cached JPEG/PNG bytes pass through; opaque
+  images use JPEG at quality 0.8 and alpha images retain PNG. Plain shelf posters
+  copy those bytes directly. Resume artwork is composited once into opaque JPEG.
+- **Visible artwork has priority.** Top Shelf uses the existing background lanes
+  for metadata lookup and image decoding.
 
 ## Where to look first
 
