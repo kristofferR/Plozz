@@ -39,6 +39,14 @@ supported capability remains at parity.
 
 ## Library recommendations
 
+Emby's native Home section endpoint owns each section's media selection. Requests
+to `/Users/{userID}/Sections/{sectionID}/Items` must not override `IncludeItemTypes`
+or `MediaTypes`: doing so can replace an audio section's contents with videos.
+The video Home importer filters unsupported returned item types locally, including
+when an unknown section has no collection or item-type metadata. Audio/reading-only
+results therefore produce no Home row, even with a retained custom arrangement.
+This applies on both platforms and does not change tvOS's separate Music area.
+
 Provider-style Home separates `/Items/Resume` from each TV library's
 `/Shows/NextUp`, and starts with per-library Latest rather than five movie
 recommendation shelves per library. Resume-only Home requests do not call Next

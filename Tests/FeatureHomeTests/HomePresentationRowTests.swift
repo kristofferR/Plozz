@@ -106,6 +106,27 @@ final class HomePresentationRowTests: XCTestCase {
         )
     }
 
+    func testEmptyNativeAudioRowDisappearsEvenWhenItsSavedDefinitionIsShown() {
+        let definition = HomeServerRowDefinition(
+            accountID: "a", serverName: "Server", providerKind: .emby,
+            section: .init(id: "emby:listening", kind: .recommendations, title: "Continue Listening")
+        )
+        let visibility = HomeLibraryVisibility(rowCustomization: .init(
+            defaults: .custom, order: [definition.id], shown: [definition.id]
+        ))
+        let staleVideo = MediaItem(id: "movie", title: "Movie", kind: .movie).taggingSource("a")
+        let before = HomeViewModel.Content(serverRows: [.init(definition: definition, items: [staleVideo])])
+        XCTAssertEqual(
+            HomePresentationRow.resolve(rows: [], content: before, visibility: visibility).map(\.id),
+            [definition.id]
+        )
+        let refreshed = HomeViewModel.Content(serverRows: [.init(definition: definition, items: [])])
+        XCTAssertTrue(
+            HomePresentationRow.resolve(rows: [], content: refreshed, visibility: visibility).isEmpty,
+            "A saved native-row preference must not preserve an empty heading after refresh."
+        )
+    }
+
     private func library(_ account: String) -> AggregatedLibrary {
         AggregatedLibrary(
             accountID: account, accountName: account, serverName: "Server",

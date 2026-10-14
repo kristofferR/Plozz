@@ -247,8 +247,49 @@ final class JellyfinHomeLayoutTests: XCTestCase {
         XCTAssertTrue(query.contains(.init(name: "Limit", value: "100")))
         XCTAssertTrue(query.contains(.init(name: "StartIndex", value: "0")))
         XCTAssertTrue(query.contains(.init(name: "ParentId", value: "shows")))
-        XCTAssertTrue(query.contains(.init(name: "IncludeItemTypes", value: "Movie,Series,Season,Episode,Video")))
+        XCTAssertFalse(query.contains { ["IncludeItemTypes", "MediaTypes"].contains($0.name) })
         XCTAssertEqual(stub.sentPaths.count, 2)
+    }
+
+    func testNativeAudioSectionsCannotBeRetargetedToDuplicateVideoResumeItems() async throws {
+        let stub = StubHTTPClient()
+        stub.stub(pathSuffix: "/Users/selected-user/HomeSections", json: """
+        [
+          {"Id":"watching","Name":"Continue Watching","Query":{"IsResumable":true}},
+          {"Id":"listening","Name":"Continue Listening","SectionType":"ServerOwnedAudio"},
+          {"Id":"reading","Name":"Continue Reading","SectionType":"ServerOwnedBooks"}
+        ]
+        """)
+        stub.stub(pathSuffix: "/Users/selected-user/Views", json: views)
+        let video = #"{"Items":[{"Id":"movie","Type":"Movie"}],"TotalRecordCount":1}"#
+        stub.stub(pathSuffix: "/Sections/watching/Items", json: video)
+        for (id, type) in [("listening", "Audio"), ("reading", "Book")] {
+            let path = "/Sections/\(id)/Items"
+            stub.stub(pathSuffix: path, requiring: [
+                .init(name: "IncludeItemTypes", value: "Movie,Series,Season,Episode,Video")
+            ], json: video)
+            stub.stub(pathSuffix: path, json: """
+            {"Items":[{"Id":"\(id)-item","Type":"\(type)"}],"TotalRecordCount":1}
+            """)
+        }
+        let provider = JellyfinProvider(session: session(.emby), http: stub)
+        let fetchedLayout = try await provider.serverHomeLayout()
+        let layout = try XCTUnwrap(fetchedLayout)
+        XCTAssertEqual(layout.sections.map(\.id), ["emby:watching", "emby:listening", "emby:reading"])
+        for limit in [20, Int.max] {
+            let results = await provider.serverHomeItems(
+                sections: layout.sections, limit: limit, excludingLibraryIDs: []
+            )
+            XCTAssertEqual(try XCTUnwrap(results["emby:watching"]).get().map(\.id), ["movie"])
+            for id in ["listening", "reading"] {
+                XCTAssertTrue(try XCTUnwrap(results["emby:\(id)"]).get().isEmpty,
+                              "Unsupported native sections must not become video resume rows.")
+            }
+        }
+        XCTAssertFalse(stub.sentPaths.contains { $0.hasSuffix("/Items/Resume") })
+        XCTAssertTrue(stub.sentQueryItems.allSatisfy { query in
+            !query.contains { ["IncludeItemTypes", "MediaTypes"].contains($0.name) }
+        })
     }
 
     func testEmby404FallsBackToWebPreferencesButOtherFailuresNeverDo() async throws {

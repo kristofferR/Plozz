@@ -235,11 +235,12 @@ public struct JellyfinClient: Sendable {
         // A section ID is a path component, never a server-provided URL/query.
         guard !sectionID.isEmpty, !sectionID.contains("/"),
               sectionID != ".", sectionID != ".." else { throw AppError.invalidResponse }
+        // Emby owns the section's media filters. Overriding them can turn an audio
+        // section into a duplicate video row; filter unsupported DTOs after loading.
         var query = [
             URLQueryItem(name: "Limit", value: String(limit)),
             URLQueryItem(name: "StartIndex", value: String(startIndex)),
             URLQueryItem(name: "EnableTotalRecordCount", value: "true"),
-            URLQueryItem(name: "IncludeItemTypes", value: "Movie,Series,Season,Episode,Video"),
             URLQueryItem(name: "Fields", value: "Overview,OriginalTitle,PrimaryImageAspectRatio,ProviderIds")
         ]
         if let parentID { query.append(URLQueryItem(name: "ParentId", value: parentID)) }
