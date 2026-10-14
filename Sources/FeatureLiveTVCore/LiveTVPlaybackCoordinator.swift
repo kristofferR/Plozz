@@ -101,17 +101,23 @@ public final class LiveTVPlaybackCoordinator {
         let task = Task { @MainActor [weak self] in
             guard let self, self.canAutoPreview, self.previewTaskID == id,
                   self.interactionRevision == interaction, !Task.isCancelled else { return false }
-            return await self.preparation.prepare(
-                channel, serverReference: serverReference,
-                isAuthorized: self.authorization(for: channel, reference: serverReference, boundary: boundary)
-            ) { [weak self] in
+            let accepts = { [weak self] in
                 guard let self, self.canAutoPreview, self.previewTaskID == id,
                       self.lifecycle == boundary, self.interactionRevision == interaction,
                       !Task.isCancelled else { return false }
-                let committed = self.preview.commitPreview(request)
-                if !committed { self.model.clearTuneFailure() }
-                return committed
+                return self.preview.canCommitPreview(request)
             }
+            return await self.preparation.prepare(
+                channel, serverReference: serverReference,
+                isAuthorized: self.authorization(for: channel, reference: serverReference, boundary: boundary),
+                commit: { [weak self] in
+                    guard accepts(), let self else { return false }
+                    let committed = self.preview.commitPreview(request)
+                    if !committed { self.model.clearTuneFailure() }
+                    return committed
+                },
+                accept: accepts
+            )
         }
         previewTask = task
         let accepted = await withTaskCancellationHandler {
@@ -360,19 +366,25 @@ public final class LiveTVPlaybackCoordinator {
             if isGuideOnly {
                 committed = false
             } else {
-                committed = await self.preparation.prepare(
-                    target.channel, serverReference: target.reference, isAuthorized: authorized
-                ) { [weak self] in
+                let accepts = { [weak self] in
                     guard let self, self.watchID == id, self.isActive, self.isInteractionActive,
                           self.lifecycle == boundary, self.interactionRevision == interaction,
                           !Task.isCancelled else { return false }
-                    self.preview.watch(target.channel.id, origin: target.origin)
-                    guard !self.model.tuneFailed else {
-                        self.model.clearTuneFailure()
-                        return false
-                    }
                     return true
                 }
+                committed = await self.preparation.prepare(
+                    target.channel, serverReference: target.reference, isAuthorized: authorized,
+                    commit: { [weak self] in
+                        guard accepts(), let self else { return false }
+                        self.preview.watch(target.channel.id, origin: target.origin)
+                        guard !self.model.tuneFailed else {
+                            self.model.clearTuneFailure()
+                            return false
+                        }
+                        return true
+                    },
+                    accept: accepts
+                )
             }
             guard self.watchID == id else { return false }
             self.finishWatch(id)

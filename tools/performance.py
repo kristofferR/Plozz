@@ -29,6 +29,11 @@ FLAGS = [
     "ONLY_ACTIVE_ARCH=YES", "CODE_SIGNING_ALLOWED=NO",
 ]
 METRICS = ("wallMilliseconds", "cpuMilliseconds", "residentBytes", "residentDeltaBytes")
+HOME_HOST_FITTING_COUNTERS = [
+    "motionSizeThatFitsCalls", "rowHostFitCalls", "columnHostFitCalls", "maskSizeThatFitsCalls",
+    "rowHostFittingNanoseconds", "columnHostFittingNanoseconds",
+    "hostFittingMaxNanoseconds", "hostFittingReentrantCalls",
+]
 SCENARIOS = {
     "sync-unchanged": {
         "suite": "core", "target": "FeatureSyncCloudTests",
@@ -51,6 +56,35 @@ SCENARIOS = {
         "description": "Fresh local SQLite import of 10,000 generated records per sample.",
         "counters": ["records"],
     },
+    "catalog-cached-refresh": {
+        "suite": "network", "target": "ProviderIPTVTests",
+        "test": "IPTVPerformanceProbeTests/testPerformanceCachedPlaylistRefresh",
+        "file": "Tests/ProviderIPTVTests/IPTVPerformanceProbeTests.swift",
+        "description": "1,000-channel loopback import, then held expired-catalog refresh; cached reads must not await replacement.",
+        "counters": ["channels", "cachedReads", "replacementChannels", "httpRequests", "refreshRequests",
+                     "coldForegroundNanoseconds", "cachedForegroundNanoseconds"],
+    },
+    "diagnostics-disabled": {
+        "suite": "diagnostics", "target": "CoreModelsTests",
+        "test": "PerformanceDiagnosticsProbeTests/testPerformanceDisabledOperations",
+        "file": "Tests/CoreModelsTests/PerformanceDiagnosticsProbeTests.swift",
+        "description": "10,000 begin/finish attempts with diagnostic consent disabled.",
+        "counters": ["attempts", "accepted", "retained", "dropped"],
+    },
+    "diagnostics-enabled": {
+        "suite": "diagnostics", "target": "CoreModelsTests",
+        "test": "PerformanceDiagnosticsProbeTests/testPerformanceEnabledOperations",
+        "file": "Tests/CoreModelsTests/PerformanceDiagnosticsProbeTests.swift",
+        "description": "10,000 recorded operations with fixed in-memory retention; no Sentry upload.",
+        "counters": ["attempts", "accepted", "retained", "dropped"],
+    },
+    "diagnostics-snapshot": {
+        "suite": "diagnostics", "target": "CoreModelsTests",
+        "test": "PerformanceDiagnosticsProbeTests/testPerformanceSnapshotSerialization",
+        "file": "Tests/CoreModelsTests/PerformanceDiagnosticsProbeTests.swift",
+        "description": "100 full bounded snapshots including serialization at event-capture boundaries.",
+        "counters": ["snapshots", "records", "serializedBytes"],
+    },
     "cards-idle": {
         "suite": "ui", "test": "CardPerformanceTests/testPerformanceIdle",
         "file": "Tests/PerformancePresentationSupport/CardPerformanceTests.swift",
@@ -68,6 +102,70 @@ SCENARIOS = {
         "file": "Tests/PerformancePresentationSupport/CardPerformanceTests.swift",
         "description": "Repeated mount/unmount; weak host and view checks must release.",
         "counters": ["cycles", "survivingHosts"],
+    },
+    "home-artwork-layout": {
+        "suite": "ui", "platforms": ["tvOS"],
+        "test": "HomeLayoutInvalidationPerformanceTests/testPerformanceArtworkPublicationLayout",
+        "file": "Tests/FocusIntegrationTests/HomeLayoutInvalidationPerformanceTests.swift",
+        "description": "Production Showcase artwork changes across eight populated rows; observe nested sizing and placement.",
+        "counters": ["artworkPublications", "backgroundSamples", "paletteUpdates",
+                     "rowContentSizeQueries", "rowContentPlacements", "cardInputBuilds",
+                     "outerHostLayoutPasses"] + HOME_HOST_FITTING_COUNTERS,
+    },
+    "home-artwork-layout-duplicate": {
+        "suite": "ui", "platforms": ["tvOS"],
+        "test": "HomeLayoutInvalidationPerformanceTests/testPerformanceDuplicateArtworkPublicationLayout",
+        "file": "Tests/FocusIntegrationTests/HomeLayoutInvalidationPerformanceTests.swift",
+        "description": "Repeat the same Showcase artwork report; verify duplicate suppression and downstream layout work.",
+        "counters": ["artworkPublications", "backgroundSamples", "paletteUpdates",
+                     "rowContentSizeQueries", "rowContentPlacements", "cardInputBuilds",
+                     "outerHostLayoutPasses"] + HOME_HOST_FITTING_COUNTERS,
+    },
+    "home-artwork-layout-cold": {
+        "suite": "ui", "platforms": ["tvOS"],
+        "test": "HomeLayoutInvalidationPerformanceTests/testPerformanceColdHomeArtworkLayout",
+        "file": "Tests/FocusIntegrationTests/HomeLayoutInvalidationPerformanceTests.swift",
+        "description": "New Home view graph with warm artwork; observe actual nested host fitting and automatic artwork publication.",
+        "counters": ["realizedArtworkHosts", "rowContentSizeQueries", "rowContentPlacements",
+                     "cardInputBuilds", "outerHostLayoutPasses"] + HOME_HOST_FITTING_COUNTERS,
+    },
+    "home-metadata-publication": {
+        "suite": "ui", "test": "HomeMetadataPerformanceTests/testPerformanceHomeMetadataPublication",
+        "file": "Tests/PerformancePresentationSupport/HomeMetadataPerformanceTests.swift",
+        "description": "Silent Home reloads with independently decoded equal media metadata; observe publication and persistence.",
+        "counters": ["refreshes", "providerRequests", "snapshotSaves", "contentPublications",
+                     "stateNotifications", "continueWatchingItems", "metadataPeople",
+                     "mainActorSchedulingSamples", "mainActorMaxSchedulingDelayMicroseconds"],
+    },
+    "home-observed-metadata-publication": {
+        "suite": "ui", "test": "HomeMetadataPerformanceTests/testPerformanceObservedHomeMetadataPublication",
+        "file": "Tests/PerformancePresentationSupport/HomeMetadataPerformanceTests.swift",
+        "description": "Changed Home metadata published to an observing production media row; verify completed visible updates.",
+        "counters": ["refreshes", "providerRequests", "snapshotSaves", "contentPublications",
+                     "stateNotifications", "continueWatchingItems", "metadataPeople",
+                     "mainActorSchedulingSamples", "mainActorMaxSchedulingDelayMicroseconds",
+                     "observedRowUpdates", "parentBodies", "cardInputBuilds"],
+    },
+    "home-observed-metadata-diagnostics": {
+        "suite": "ui", "test": "HomeMetadataPerformanceTests/testPerformanceObservedHomeMetadataWithDiagnostics",
+        "file": "Tests/PerformancePresentationSupport/HomeMetadataPerformanceTests.swift",
+        "description": "The same observed Home publication workload with bounded diagnostics enabled; no Sentry upload.",
+        "counters": ["refreshes", "providerRequests", "snapshotSaves", "contentPublications",
+                     "stateNotifications", "continueWatchingItems", "metadataPeople",
+                     "mainActorSchedulingSamples", "mainActorMaxSchedulingDelayMicroseconds",
+                     "observedRowUpdates", "parentBodies", "cardInputBuilds"],
+    },
+    "home-row-metadata-updates": {
+        "suite": "ui", "test": "HomeMetadataPerformanceTests/testPerformanceProductionRowMetadataUpdates",
+        "file": "Tests/PerformancePresentationSupport/HomeMetadataPerformanceTests.swift",
+        "description": "Production media-row updates alternating independently decoded equal snapshots.",
+        "counters": ["rootUpdates", "parentBodies", "cardInputBuilds", "rowItems", "metadataPeople"],
+    },
+    "home-row-metadata-reuse": {
+        "suite": "ui", "test": "HomeMetadataPerformanceTests/testPerformanceProductionRowMetadataReuse",
+        "file": "Tests/PerformancePresentationSupport/HomeMetadataPerformanceTests.swift",
+        "description": "Production media-row updates reusing existing media values with complete metadata.",
+        "counters": ["rootUpdates", "parentBodies", "cardInputBuilds", "rowItems", "metadataPeople"],
     },
     "runtime-matrix": {
         "suite": "matrix", "target": "AppRuntimeTests",
@@ -97,14 +195,20 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n")
 
 
-def select(suite, names):
+def select(suite, names, platform=None):
     if names:
         if suite:
             raise Failure("Choose --suite or --scenario, not both.")
         if len(names) != len(set(names)) or not set(names) <= SCENARIOS.keys():
             raise Failure("Unknown or duplicate scenario. Run 'list' for supported names.")
+        unsupported = [name for name in names
+                       if platform and platform not in SCENARIOS[name].get("platforms", ("tvOS", "iOS"))]
+        if unsupported:
+            raise Failure(f"Scenarios not supported on {platform}: {', '.join(sorted(unsupported))}.")
         return sorted(names)
-    return [name for name, spec in SCENARIOS.items() if suite == "all" or spec["suite"] == (suite or "core")]
+    return [name for name, spec in SCENARIOS.items()
+            if (suite == "all" or spec["suite"] == (suite or "core"))
+            and (not platform or platform in spec.get("platforms", ("tvOS", "iOS")))]
 
 
 def expected_reports(names):
@@ -666,7 +770,7 @@ def main(argv=None):
     run = commands.add_parser("run", help="Run bounded optimized tests on an explicit owned simulator.")
     run.add_argument("--platform", choices=("tvOS", "iOS"), required=True)
     run.add_argument("--sim-id", required=True)
-    run.add_argument("--suite", choices=("core", "ui", "matrix", "all"))
+    run.add_argument("--suite", choices=("core", "ui", "matrix", "diagnostics", "network", "all"))
     run.add_argument("--scenario", nargs="+")
     run.add_argument("--timeout", type=int, default=2400)
     profile = commands.add_parser("profile", help="Profile native Home navigation on an owned tvOS simulator.")
@@ -703,7 +807,7 @@ def main(argv=None):
         for row in result["rows"]:
             print(f"{row['scenario']} {row['metric']}: {row['baselineMedian']:.3f} -> {row['candidateMedian']:.3f} [{row['verdict']}]")
         return {"within-budget": 0, "regression": 1, "inconclusive": 2}[result["verdict"]]
-    args.names = [] if args.operation == "profile" else select(args.suite, args.scenario)
+    args.names = [] if args.operation == "profile" else select(args.suite, args.scenario, args.platform)
     if not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", args.sim_id):
         raise Failure("--sim-id must be an explicit owned simulator UUID.")
     if not 60 <= args.timeout <= 7200:

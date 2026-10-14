@@ -53,12 +53,26 @@ final class PlozzigenLiveFailureTests: XCTestCase {
         let cases: [(Int, AppError)] = [
             (401, .unauthorized), (403, .unauthorized), (404, .notFound),
             (410, .notFound), (429, .rateLimited(retryAfter: nil)),
+            (451, .accessRestricted),
             (503, .rateLimited(retryAfter: nil)), (500, .invalidResponse)
         ]
         for (code, expected) in cases {
             let info = PlaybackErrorInfo(kind: .sourceRefused, message: "localized failure", underlyingCode: code)
             XCTAssertEqual(PlozzigenLiveFailure.appError(info), expected)
         }
+    }
+
+    func testRelayRefusalSurvivesGenericNativePlaybackFailure() {
+        let generic = PlaybackErrorInfo(kind: .liveSourceUnavailable, message: "unavailable")
+        XCTAssertEqual(
+            PlozzigenLiveFailure.appError(generic, deliveryFailure: .accessRestricted), .accessRestricted
+        )
+        XCTAssertEqual(
+            PlozzigenLiveFailure.appError(generic, deliveryFailure: .rateLimited(retryAfter: 30)),
+            .rateLimited(retryAfter: 30)
+        )
+        XCTAssertFalse(AppError.accessRestricted.requiresSignIn)
+        XCTAssertFalse(CredentialRejection.discardsStoredCredential(AppError.accessRestricted))
     }
 
     private final class LiveFailureBuffer: @unchecked Sendable {

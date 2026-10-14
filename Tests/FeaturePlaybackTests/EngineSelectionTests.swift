@@ -33,14 +33,16 @@ final class EngineSelectionTests: XCTestCase {
         _ request: PlaybackRequest,
         forceTranscode: Bool = false,
         plozzigenAvailable: Bool,
-        rule: SubtitlePolicy.Rule = SubtitlePolicy.Rule()
+        rule: SubtitlePolicy.Rule = SubtitlePolicy.Rule(),
+        airPlay: Bool = false
     ) -> PlaybackEngineKind {
         EngineSelection.route(
             request: request,
             forceTranscode: forceTranscode,
             plozzigenAvailable: plozzigenAvailable,
             capabilities: .detected(),
-            subtitleRule: rule)
+            subtitleRule: rule,
+            audioRouteIsAirPlay: airPlay)
     }
 
     // MARK: Network file
@@ -138,6 +140,18 @@ final class EngineSelectionTests: XCTestCase {
         let req = request(subtitleTracks: [textSub])
         let rule = SubtitlePolicy.Rule(mode: .all, preferredLanguages: ["en"])
         XCTAssertEqual(route(req, plozzigenAvailable: true, rule: rule), .native)
+    }
+
+    func testAirPlayRoutesDirectPlayToPlozzigen() {
+        let mp4 = request(streamURL: URL(string: "https://example.test/episode.mp4")!)
+        XCTAssertEqual(route(mp4, plozzigenAvailable: true), .native)
+        XCTAssertEqual(route(mp4, plozzigenAvailable: true, airPlay: true), .plozzigen)
+        XCTAssertEqual(route(mp4, plozzigenAvailable: false, airPlay: true), .native)
+    }
+
+    func testAirPlayLeavesServerTranscodeNative() {
+        let hls = request(isTranscoding: true)
+        XCTAssertEqual(route(hls, plozzigenAvailable: true, airPlay: true), .native)
     }
 
     func testTranscodedSourceStaysNative() {

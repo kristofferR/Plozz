@@ -4,6 +4,7 @@ import Foundation
 import os
 
 final class IPTVHTTP: Sendable {
+    @TaskLocal static var performanceMetrics: IPTVPerformanceMetrics?
     private let session: URLSession
     private let redirects: IPTVRedirects
     private typealias RequestTask = Task<(URLSession.AsyncBytes, URLResponse), Error>
@@ -68,6 +69,7 @@ final class IPTVHTTP: Sendable {
             guard !state.closed else { throw CancellationError() }
             let task = RequestTask { [session, request] in
                 try Task.checkCancellation()
+                Self.performanceMetrics?.requested()
                 let result = try await session.bytes(for: request)
                 if Task.isCancelled {
                     result.0.task.cancel()
@@ -106,6 +108,36 @@ final class IPTVHTTP: Sendable {
             throw IPTVError.httpStatus(response.statusCode)
         }
         return (bytes, response)
+    }
+}
+
+/// One aggregate per import or guide batch, never a record per channel or byte.
+final class IPTVPerformanceMetrics: @unchecked Sendable {
+    private let lock = NSLock()
+    private var requests = 0
+    private var items = 0
+    private var bytes = 0
+
+    func requested() {
+        lock.withLock { requests += 1 }
+    }
+
+    func record(items: Int = 0, bytes: Int = 0) {
+        lock.withLock {
+            self.items += items
+            self.bytes += bytes
+        }
+    }
+
+    var snapshot: PerformanceDiagnostics.Metrics {
+        lock.withLock { .init(items: items, bytes: bytes, requests: requests) }
+    }
+
+    static func outcome(for error: any Error) -> PerformanceDiagnostics.Outcome {
+        let errorCode = error as NSError
+        return error is CancellationError || error as? LiveTVSourceImportError == .cancelled
+            || (errorCode.domain == NSURLErrorDomain && errorCode.code == NSURLErrorCancelled)
+            ? .cancelled : .failed
     }
 }
 

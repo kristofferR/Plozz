@@ -907,6 +907,26 @@ final class PlayerViewModelEOFTests: XCTestCase {
         await viewModel.stop()
     }
 
+    func testTrueHDAtmosPreferenceReachesInitialAndHandoffLoads() async throws {
+        for enabled in [false, true] {
+            let (viewModel, engine, _) = makeViewModel(
+                playbackSettings: .init(trueHDAtmosEnabled: enabled)
+            )
+            await viewModel.load()
+            XCTAssertEqual(engine.lastLoadedRequest?.trueHDAtmosEnabled, enabled)
+            var handoff = try XCTUnwrap(engine.lastLoadedRequest)
+            handoff.trueHDAtmosEnabled = !enabled
+            handoff.preferredAudioLanguages = ["ja"]
+            handoff.preferredAudioTrackID = 3
+            await viewModel.handoffPlayResolved(handoff, engineKind: .native, startPosition: 10)
+            XCTAssertEqual(engine.loadCount, 2)
+            XCTAssertEqual(engine.lastLoadedRequest?.trueHDAtmosEnabled, enabled)
+            XCTAssertEqual(engine.lastLoadedRequest?.preferredAudioLanguages, ["ja"])
+            XCTAssertEqual(engine.lastLoadedRequest?.preferredAudioTrackID, 3)
+            await viewModel.stop()
+        }
+    }
+
     func testBackgroundAudioPreferenceReachesEngineAndPreservesPlatformDefault() async {
         let publisher = VideoNowPlayingPublisherSpy()
         let (viewModel, engine, _) = makeViewModel(
@@ -2344,9 +2364,11 @@ private final class SpyVideoEngine: VideoEngine {
     var drainGate: PreCommitYieldGate?
     var failureDuringLoad: AppError?
     var cancelDuringLoad = false
+    var lastLoadedRequest: PlaybackRequest?
 
     func load(request: PlaybackRequest, startPosition: TimeInterval) async {
         loadCount += 1
+        lastLoadedRequest = request
         if let failureDuringLoad { status = .failed(failureDuringLoad) }
         else { status = .ready }
         currentTime = startPosition

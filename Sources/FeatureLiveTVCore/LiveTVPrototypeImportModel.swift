@@ -449,9 +449,24 @@ public final class LiveTVPrototypeImportModel {
         return .unmatched
     }
 
+    enum ReloadResult: Equatable {
+        case completed, failed, cancelled
+
+        func merging(_ other: Self) -> Self {
+            if self == .cancelled || other == .cancelled { return .cancelled }
+            if self == .failed || other == .failed { return .failed }
+            return .completed
+        }
+    }
+
     public func reload(into model: LiveTVPrototypeModel, forceServerRefresh: Bool = true) async {
         publishedModel = model
         guard ensureCatalogAuthorization(into: model) else { return }
+        let performance = PerformanceDiagnostics.shared.begin(.liveTVRefresh)
+        var outcome = PerformanceDiagnostics.Outcome.cancelled
+        defer {
+            performance?.finish(outcome, metrics: .init(items: model.channels.count, accounts: configuration.servers.count))
+        }
         beforeSourceRefresh?(Set(
             configuration.playlists.filter(\.isEnabled).map(\.id)
                 + configuration.servers.filter(\.isEnabled).map(\.id)
@@ -460,12 +475,17 @@ public final class LiveTVPrototypeImportModel {
         let request = reloadGeneration
         await restoreCachedCatalog(into: model, now: model.now)
         guard request == reloadGeneration, !Task.isCancelled, ensureCatalogAuthorization(into: model) else { return }
-        await reloadPlaylists(into: model)
+        let playlistResult = await reloadPlaylists(into: model)
         guard request == reloadGeneration, !Task.isCancelled, ensureCatalogAuthorization(into: model) else { return }
-        await reloadServers(into: model, forceRefresh: forceServerRefresh)
+        let serverResult = await reloadServersResult(into: model, forceRefresh: forceServerRefresh)
+        guard request == reloadGeneration, !Task.isCancelled else { return }
+        let result = playlistResult.merging(serverResult)
+        guard result != .cancelled else { return }
+        outcome = result == .failed || playlistFailure != nil || guideFailure != nil
+            || serverSources.contains { $0.failure != nil || $0.guideFailure != nil } ? .failed : .succeeded
     }
 
-    private func reloadPlaylists(into model: LiveTVPrototypeModel) async {
+    private func reloadPlaylists(into model: LiveTVPrototypeModel) async -> ReloadResult {
         revision &+= 1
         let request = revision
         do {
@@ -474,7 +494,7 @@ public final class LiveTVPrototypeImportModel {
             playlistPhase = .failed
             playlistFailure = .invalidPlaylist
             guidePhase = .idle
-            return
+            return .completed
         }
         let enabledPlaylists = playlistSources.filter { $0.source.isEnabled }
         guard !enabledPlaylists.isEmpty else {
@@ -487,7 +507,7 @@ public final class LiveTVPrototypeImportModel {
             catch { playlistFailure = .invalidPlaylist }
             playlistPhase = .idle
             guidePhase = .idle
-            return
+            return .completed
         }
         guidePhase = enabledSourceIDs.isEmpty ? .idle : .loading
         for index in guideSources.indices where guideSources[index].phase == .loading {
@@ -501,7 +521,7 @@ public final class LiveTVPrototypeImportModel {
             playlistSources[index].failure = nil
         }
         for index in playlistSources.indices where playlistSources[index].source.isEnabled {
-            guard revision == request, ensureCatalogAuthorization(into: model) else { return }
+            guard revision == request, ensureCatalogAuthorization(into: model) else { return .cancelled }
             let source = playlistSources[index].source
             playlistSources[index].phase = .loading
             do {
@@ -514,12 +534,12 @@ public final class LiveTVPrototypeImportModel {
                     imported = try await loader.loadPlaylist(from: source.playlistURL)
                 }
                 try Task.checkCancellation()
-                guard revision == request, ensureCatalogAuthorization(into: model) else { return }
+                guard revision == request, ensureCatalogAuthorization(into: model) else { return .cancelled }
                 let playlist: LiveTVPlaylistImport
                 if let cache, source.id != legacySourceID {
                     let resolution = try await cache.reconcile(imported, sourceID: source.id)
                     let updatedMappings = try await cache.mappingOverrides()
-                    guard revision == request, !Task.isCancelled, ensureCatalogAuthorization(into: model) else { return }
+                    guard revision == request, !Task.isCancelled, ensureCatalogAuthorization(into: model) else { return .cancelled }
                     replaceMappingOverrides(updatedMappings)
                     guard model.migrateChannelIDs(resolution.migratedIDs) else {
                         throw LiveTVSourceImportError.cacheFailed
@@ -528,7 +548,7 @@ public final class LiveTVPrototypeImportModel {
                     playlist = resolution.playlist
                     identityReviews[source.id] = resolution.reviews
                     try await cache.storePlaylist(playlist, source: source, now: Date())
-                    guard revision == request, !Task.isCancelled, ensureCatalogAuthorization(into: model) else { return }
+                    guard revision == request, !Task.isCancelled, ensureCatalogAuthorization(into: model) else { return .cancelled }
                 } else {
                     playlist = source.id == legacySourceID ? imported : LiveTVConfiguredSources.scope(
                         imported, to: source.id, preservesChannelIDs: preservesChannelIDs(for: source.id)
@@ -549,12 +569,12 @@ public final class LiveTVPrototypeImportModel {
                 playlistSources[index].phase = .loaded
                 try await discoverGuides(in: playlist, source: source)
             } catch {
-                guard revision == request else { return }
+                guard revision == request else { return .cancelled }
                 if isCancellation(error) {
                     playlistSources[index].phase = .idle
                     playlistPhase = .idle
                     guidePhase = .idle
-                    return
+                    return .cancelled
                 }
                 let failure = error as? LiveTVSourceImportError ?? (cache == nil ? .invalidPlaylist : .cacheFailed)
                 playlistSources[index].failure = failure
@@ -573,7 +593,7 @@ public final class LiveTVPrototypeImportModel {
         let now = model.now
         for index in guideSources.indices where enabledSourceIDs.contains(guideSources[index].id)
             && loadedPlaylists.contains(guideSources[index].playlistSourceID) {
-            guard revision == request, ensureCatalogAuthorization(into: model) else { return }
+            guard revision == request, ensureCatalogAuthorization(into: model) else { return .cancelled }
             let source = guideSources[index].source
             let owner = guideSources[index].playlistSourceID
             let channels = cachedPlaylists[owner]?.channels ?? []
@@ -592,7 +612,7 @@ public final class LiveTVPrototypeImportModel {
                     imported = try await loader.loadGuide(from: source.url, channels: channels, now: now)
                 }
                 try Task.checkCancellation()
-                guard revision == request, ensureCatalogAuthorization(into: model) else { return }
+                guard revision == request, ensureCatalogAuthorization(into: model) else { return .cancelled }
                 let guide = preservesChannelIDs(for: owner)
                     ? imported : LiveTVConfiguredSources.scope(imported, to: owner)
                 let previous = cachedGuides[source.id]
@@ -611,7 +631,7 @@ public final class LiveTVPrototypeImportModel {
                             channelIDs: window.channelIDs.filter { playlistSourceIDByChannel[$0] == owner },
                             range: window.range, sourceURL: source.url
                         )
-                        guard revision == request, !Task.isCancelled, ensureCatalogAuthorization(into: model) else { return }
+                        guard revision == request, !Task.isCancelled, ensureCatalogAuthorization(into: model) else { return .cancelled }
                         if windowRevision == windowRequest { cachedGuideWindows[source.id] = programs }
                     } else {
                         cachedGuideWindows[source.id] = nil
@@ -628,11 +648,11 @@ public final class LiveTVPrototypeImportModel {
                 guideSources[index].phase = .loaded
                 lastGuideRefresh = guideSources[index].lastRefresh
             } catch {
-                guard revision == request else { return }
+                guard revision == request else { return .cancelled }
                 if isCancellation(error) {
                     guideSources[index].phase = .idle
                     guidePhase = .idle
-                    return
+                    return .cancelled
                 }
                 let failure = error as? LiveTVSourceImportError ?? (cache == nil ? .invalidGuide : .cacheFailed)
                 guideSources[index].failure = failure
@@ -646,10 +666,11 @@ public final class LiveTVPrototypeImportModel {
                 channelIDs: Array(model.visibleChannels.prefix(LiveTVIndexedCache.maximumWindowChannels).map(\.id)),
                 range: DateInterval(start: model.now, duration: 3 * 3_600)
             )
-            await loadGuideWindow(
+            return await loadGuideWindowResult(
                 channelIDs: window.channelIDs, range: window.range, into: model
             )
         }
+        return .completed
     }
 
     private func preservesChannelIDs(for sourceID: String) -> Bool {
@@ -874,7 +895,13 @@ public final class LiveTVPrototypeImportModel {
     public func loadGuideWindow(
         channelIDs: [String], range: DateInterval, into model: LiveTVPrototypeModel
     ) async {
-        guard ensureCatalogAuthorization(into: model), let cache, !channelIDs.isEmpty else { return }
+        _ = await loadGuideWindowResult(channelIDs: channelIDs, range: range, into: model)
+    }
+
+    private func loadGuideWindowResult(
+        channelIDs: [String], range: DateInterval, into model: LiveTVPrototypeModel
+    ) async -> ReloadResult {
+        guard ensureCatalogAuthorization(into: model), let cache, !channelIDs.isEmpty else { return .completed }
         windowRevision &+= 1
         requestedGuideWindow = (channelIDs, range)
         let windowRequest = windowRevision
@@ -907,14 +934,16 @@ public final class LiveTVPrototypeImportModel {
                     windows[status.id] = programs
                 }
                 guard windowRequest == windowRevision, catalogRequest == revision, !Task.isCancelled,
-                      ensureCatalogAuthorization(into: model) else { return }
+                      ensureCatalogAuthorization(into: model) else { return .cancelled }
             }
             cachedGuideWindows = windows
             try publishGuides(into: model)
             cacheFailure = nil
         } catch {
-            if !isCancellation(error) { cacheFailure = .cacheFailed }
+            if isCancellation(error) { return .cancelled }
+            cacheFailure = .cacheFailed
         }
+        return .completed
     }
 
     public func searchPrograms(
@@ -1173,7 +1202,7 @@ public final class LiveTVPrototypeImportModel {
     }
 
     @discardableResult
-    private func ensureCatalogAuthorization(into model: LiveTVPrototypeModel) -> Bool {
+    func ensureCatalogAuthorization(into model: LiveTVPrototypeModel) -> Bool {
         guard !catalogIsAuthorized() else { return true }
         revision &+= 1
         reloadGeneration &+= 1

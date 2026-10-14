@@ -77,6 +77,13 @@ and focus eligibility; lazy tab evaluations must not rebuild it per destination.
 Recompute from current account visibility and profile layout when the shell
 updates, rather than retaining a cache that could expose removed libraries.
 
+Horizontal navigation offers individual libraries and All Libraries in the same
+profile-scoped arranger as the sidebars. These shortcuts start in Hidden to keep
+the top bar compact; Show opts them in using the existing saved visibility and
+order. Automatic hiding is never persisted as a manual Hide choice. Each tab
+retains its account-qualified destination and library root, so same-named
+libraries remain distinct and only the visible stack consumes pending routes.
+
 Home, Search, and Watchlist use shared, profile-scoped automatic visibility.
 Live-only IPTV opens Live TV; IPTV movies and series expose Home and Search.
 Search also remains available for configured Seerr discovery, and Plex keeps its

@@ -276,6 +276,12 @@ public final class LibraryChannelService {
         let previous = definitions
         guard try store.load() == previous else { throw LibraryChannelError.publicationConflict }
         let providerContexts = Array(contexts.values)
+        let performance = PerformanceDiagnostics.shared.begin(
+            .automaticChannels, metrics: .init(accounts: providerContexts.count)
+        )
+        var outcome = PerformanceDiagnostics.Outcome.failed
+        var metrics = PerformanceDiagnostics.Metrics()
+        defer { performance?.finish(Task.isCancelled ? .cancelled : outcome, metrics: metrics) }
         let profileID = profileID
         let cachedSnapshots = snapshots
         let cachedSchedules = schedules
@@ -300,8 +306,8 @@ public final class LibraryChannelService {
                     guard catalog.queriedItemCount <= LibraryChannelPortableState.maximumItems else {
                         throw LibraryChannelError.catalogTooLarge
                     }
-                } catch is CancellationError {
-                    throw CancellationError()
+                } catch let error as CancellationError {
+                    throw error
                 } catch let error as LibraryChannelError {
                     throw error
                 } catch {
@@ -312,11 +318,19 @@ public final class LibraryChannelService {
             }
             return (catalog, failures)
         }
-        let (catalog, sourceFailures) = try await withTaskCancellationHandler {
-            try await catalogTask.value
-        } onCancel: {
-            catalogTask.cancel()
+        let fetched: (LibraryChannelAutomaticCatalog, [LibraryChannelSourceFailure])
+        do {
+            fetched = try await withTaskCancellationHandler {
+                try await catalogTask.value
+            } onCancel: {
+                catalogTask.cancel()
+            }
+        } catch {
+            if error is CancellationError { outcome = .cancelled }
+            throw error
         }
+        let (catalog, sourceFailures) = fetched
+        metrics.items = catalog.queriedItemCount
         try checkAutomatic(stamp: stamp, automaticStamp: automaticStamp)
         let missingAccounts = unavailableAccountIDs.union(sourceFailures.map(\.accountID))
         let formerlyAccessible = discoveredLibraries ?? Set(providerContexts.flatMap { context in
@@ -365,11 +379,14 @@ public final class LibraryChannelService {
         )
         libraryChoices = catalog.libraries
         issue = definitions.flatMap(\.revisions).contains { snapshots[$0.snapshotID] == nil } ? .snapshotUnavailable : nil
-        return LibraryChannelAutomaticGenerationSummary(
+        let summary = LibraryChannelAutomaticGenerationSummary(
             channelCount: definitions.filter { $0.isAutomatic && $0.isEnabled && isSourceAllowed($0.sourceID) }.count,
             eligibleItemCount: catalog.entries.count, skippedItemCount: catalog.skippedItemCount,
             unavailableSources: sourceFailures
         )
+        metrics.rows = summary.channelCount
+        outcome = sourceFailures.isEmpty && unavailableAccountIDs.isEmpty ? .succeeded : .failed
+        return summary
     }
 
     public func preview(

@@ -10,6 +10,91 @@ import XCTest
 
 @MainActor
 final class SiloAuthViewModelTests: XCTestCase {
+    func testFirstPairingFailureCanRecoverInPlaceLikeReopeningSavedServer() async throws {
+        let http = SiloOnboardingHTTP(failFirstStart: true)
+        let diagnostics = SiloSetupDiagnostics()
+        let buffer = SiloAuthDiagnosticBuffer()
+        diagnostics.start { buffer.append($0) }
+        let url = URL(string: "https://silo.test")!
+        let model = SiloAuthViewModel(
+            server: .init(id: "silo", name: "Silo", baseURL: url, provider: .silo), deviceID: "test",
+            service: .init(baseURL: url, http: http), diagnostics: diagnostics,
+            onAuthenticated: { _ in XCTFail("Unexpected sign-in") }
+        )
+        defer { model.cancel() }
+        model.start()
+        try await wait { if case .error = model.phase { return true }; return false }
+        XCTAssertEqual(buffer.values.first?.stage, .start)
+        XCTAssertEqual(buffer.values.first?.httpStatus, 502)
+        XCTAssertEqual(buffer.values.first?.response, .html)
+        model.retry()
+        try await wait { if case .profiles = model.phase { return true }; return false }
+        let starts = await http.count("/api/v2/auth/device/start")
+        XCTAssertEqual(starts, 2)
+    }
+
+    func testCanceledPairingOffersANewCodeInsteadOfUnexpectedResponse() async throws {
+        let http = SiloOnboardingHTTP(pollStatus: "canceled")
+        let model = makeModel(http)
+        defer { model.cancel() }
+        model.start()
+        try await wait { model.phase == .expired }
+        model.retry()
+        try await wait { if case .pairing = model.phase { return true }; return false }
+    }
+
+    func testPendingResponseExtendsDeadlineAndAllowsApproval() async throws {
+        let http = SiloOnboardingHTTP(expiresIn: 2, extendsExpiry: true)
+        let model = makeModel(http)
+        defer { model.cancel() }
+        model.start()
+        try await wait { if case .profiles = model.phase { return true }; return false }
+        let polls = await http.count("/api/v2/auth/device/poll")
+        XCTAssertEqual(polls, 2)
+    }
+
+    func testEmptyLegacyMatchPhraseDoesNotRejectValidSignIn() async throws {
+        let http = SiloOnboardingHTTP(emptyMatch: true)
+        let model = makeModel(http)
+        defer { model.cancel() }
+        model.start()
+        try await wait { if case .profiles = model.phase { return true }; return false }
+    }
+
+    func testConfiguredPublicAliasUsesSelectedServerWithoutForwardingForeignQuery() throws {
+        let challenge = try JSONDecoder().decode(SiloDeviceChallenge.self, from: Data("""
+            {"device_code":"device-secret","user_code":"4821-7730","match_code":"",
+             "verification_uri":"https://public.invalid/silo/activate",
+             "verification_uri_complete":"https://public.invalid/silo/activate?code=48217730&token=do-not-forward",
+             "expires_in":900,"interval":5}
+            """.utf8))
+        let base = URL(string: "http://192.168.1.2:8090/base")!
+        let (manual, approval) = try SiloAuthViewModel.approvalURLs(challenge, baseURL: base)
+        XCTAssertEqual(manual.absoluteString, "http://192.168.1.2:8090/base/activate")
+        XCTAssertEqual(approval.host, base.host)
+        XCTAssertEqual(approval.path, "/base/activate")
+        XCTAssertEqual(URLComponents(url: approval, resolvingAgainstBaseURL: false)?.queryItems,
+                       [URLQueryItem(name: "code", value: "4821-7730")])
+    }
+
+    func testApprovalLinksRejectEmbeddedCredentialsInEitherURL() throws {
+        let base = URL(string: "https://silo.test")!
+        for host in ["silo.test", "public.invalid"] {
+            for credentialInManual in [true, false] {
+                let manual = "https://\(credentialInManual ? "user:password@" : "")\(host)/activate"
+                let complete = "https://\(credentialInManual ? "" : "user:password@")\(host)/activate?code=48217730"
+                let challenge = try JSONDecoder().decode(SiloDeviceChallenge.self, from: Data("""
+                    {"device_code":"device-secret","user_code":"4821-7730","match_code":"",
+                     "verification_uri":"\(manual)","verification_uri_complete":"\(complete)",
+                     "expires_in":900,"interval":5}
+                    """.utf8))
+                XCTAssertThrowsError(try SiloAuthViewModel.approvalURLs(challenge, baseURL: base)) { error in
+                    XCTAssertEqual((error as? SiloSetupFailure)?.diagnostic.reason, .addressMismatch)
+                }
+            }
+        }
+    }
+
     func testSignInPreservesTheSelectedServerNameInsteadOfSavingItsHost() async throws {
         for (selectedName, expectedName) in [("Silo", "Silo"), ("Living Room Movies", "Living Room Movies"), ("silo.test", "Silo")] {
             let http = SiloOnboardingHTTP()
@@ -206,13 +291,17 @@ private actor SiloOnboardingHTTP: HTTPClient {
     let pollStatus: String
     let foreignManual: Bool
     let foreignApproval: Bool
+    let failFirstStart: Bool
+    let extendsExpiry: Bool
+    let emptyMatch: Bool
     private var requests: [Endpoint] = []
     private var finish: CheckedContinuation<Void, Never>?
     var isFinishHeld: Bool { finish != nil }
 
     init(failFirstProfiles: Bool = false, holdFinish: Bool = false, expiresIn: Int = 600,
          interval: Int = 1, pollStatus: String = "approved",
-         foreignManual: Bool = false, foreignApproval: Bool = false) {
+         foreignManual: Bool = false, foreignApproval: Bool = false,
+         failFirstStart: Bool = false, extendsExpiry: Bool = false, emptyMatch: Bool = false) {
         self.failFirstProfiles = failFirstProfiles
         self.holdFinish = holdFinish
         self.expiresIn = expiresIn
@@ -220,6 +309,9 @@ private actor SiloOnboardingHTTP: HTTPClient {
         self.pollStatus = pollStatus
         self.foreignManual = foreignManual
         self.foreignApproval = foreignApproval
+        self.failFirstStart = failFirstStart
+        self.extendsExpiry = extendsExpiry
+        self.emptyMatch = emptyMatch
     }
 
     func count(_ path: String) -> Int { requests.filter { $0.path == path }.count }
@@ -234,13 +326,24 @@ private actor SiloOnboardingHTTP: HTTPClient {
         case "/api/v2/auth/device/capability":
             body = #"{"state":"available","protocol_versions":[2],"allowed":true}"#
         case "/api/v2/auth/device/start":
+            if failFirstStart, count(endpoint.path) == 1 {
+                return (Data("<html>private proxy response</html>".utf8),
+                        HTTPURLResponse(url: baseURL, statusCode: 502, httpVersion: nil,
+                                        headerFields: ["Content-Type": "text/html"])!)
+            }
             body = """
-            {"device_code":"device-secret","user_code":"ABCD12","match_code":"57",
+            {"device_code":"device-secret","user_code":"ABCD12","match_code":"\(emptyMatch ? "" : "57")",
              "verification_uri":"https://\(foreignManual ? "other" : "silo").test/pair",
              "verification_uri_complete":"https://\(foreignApproval ? "other" : "silo").test/pair?code=ABCD12",
              "expires_in":\(expiresIn),"interval":\(interval)}
             """
         case "/api/v2/auth/device/poll":
+            if extendsExpiry, count(endpoint.path) == 1 {
+                let expiry = ISO8601DateFormatter().string(from: Date().addingTimeInterval(20))
+                return (Data("""
+                    {"status":"pending","poll_after":1,"temporary":false,"expires_at":"\(expiry)"}
+                    """.utf8), HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            }
             body = """
             {"status":"\(pollStatus)","poll_after":1,"temporary":false,
              "tokens":{"access_token":"test-access","refresh_token":"test-refresh",
@@ -264,6 +367,14 @@ private actor SiloOnboardingHTTP: HTTPClient {
             """
         default: throw AppError.notFound
         }
+
         return (Data(body.utf8), HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!)
     }
+}
+
+private final class SiloAuthDiagnosticBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [SiloSetupDiagnostic] = []
+    var values: [SiloSetupDiagnostic] { lock.withLock { storage } }
+    func append(_ value: SiloSetupDiagnostic) { lock.withLock { storage.append(value) } }
 }

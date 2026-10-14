@@ -10,6 +10,127 @@ import XCTest
 
 @MainActor
 final class IPTVPerformanceProbeTests: XCTestCase {
+    func testPerformanceCachedPlaylistRefresh() async throws {
+        try PerformanceProbe.requireEnabled()
+        let count = 1_000
+        func playlist(_ prefix: String) -> Data {
+            Data(("#EXTM3U\n" + (0..<count).map {
+                "#EXTINF:-1,\(prefix) \($0)\nhttps://fixture.invalid/\(prefix)/\($0).ts\n"
+            }.joined()).utf8)
+        }
+        let savedBody = playlist("Saved")
+        let updatedBody = playlist("Updated")
+        let fixtureRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(".build/iptv-performance-fixtures")
+        try await PerformanceProbe.measure(self, scenario: "catalog-cached-refresh") {
+            let root = fixtureRoot.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer {
+                do { try FileManager.default.removeItem(at: root) }
+                catch { XCTFail("Could not remove the owned cached-refresh fixture.") }
+            }
+            let started = self.expectation(description: "Expired playlist response is held")
+            let readable = self.expectation(description: "Cached reads complete before releasing the response")
+            let release = DispatchSemaphore(value: 0)
+            defer { release.signal() }
+            let requests = RefreshRequestCounter()
+            let server = try IPTVTestHTTPServer { _ in
+                let request = requests.next()
+                if request == 1 {
+                    return .init(data: savedBody, headerDelay: .milliseconds(100))
+                }
+                if request == 2 {
+                    started.fulfill()
+                    guard release.wait(timeout: .now() + 5) == .success else {
+                        return .init(status: 500)
+                    }
+                }
+                return .init(data: updatedBody)
+            }
+            let base: URL
+            do { base = try await server.start() }
+            catch { await server.stop(); throw error }
+            let credential: IPTVCredential
+            let client: IPTVClient
+            do {
+                credential = try IPTVCredential(
+                    mode: .playlist, address: base.appendingPathComponent("playlist.m3u"),
+                    discoversPlaylistGuides: false
+                )
+                client = try IPTVClient(credential: credential, directory: root)
+            } catch {
+                await server.stop()
+                throw error
+            }
+            do {
+                let coldStart = DispatchTime.now().uptimeNanoseconds
+                let cold = try await client.liveChannels()
+                let coldNanoseconds = DispatchTime.now().uptimeNanoseconds - coldStart
+                XCTAssertEqual(cold.count, count)
+                XCTAssertTrue(cold.allSatisfy { $0.name.hasPrefix("Saved ") })
+                do {
+                    let catalog = try IPTVCatalog(
+                        url: root.appendingPathComponent(credential.identity.uuidString + ".sqlite"),
+                        key: credential.catalogKey
+                    )
+                    try catalog.setState(
+                        "playlist-v4", String(Date().addingTimeInterval(-3_600).timeIntervalSince1970)
+                    )
+                }
+                let foreground = Task { @MainActor in
+                    let start = DispatchTime.now().uptimeNanoseconds
+                    for _ in 0..<3 {
+                        let channels = try await client.liveChannels()
+                        XCTAssertEqual(channels.count, count)
+                        XCTAssertTrue(channels.allSatisfy { $0.name.hasPrefix("Saved ") })
+                    }
+                    let elapsed = DispatchTime.now().uptimeNanoseconds - start
+                    readable.fulfill()
+                    return elapsed
+                }
+                await self.fulfillment(of: [started, readable], timeout: 3)
+                release.signal()
+                let cachedNanoseconds = try await foreground.value
+                let deadline = ContinuousClock.now + .seconds(5)
+                var replacement: [ServerLiveTVChannel] = []
+                repeat {
+                    replacement = try await client.liveChannels()
+                    if replacement.count == count,
+                       replacement.allSatisfy({ $0.name.hasPrefix("Updated ") }) { break }
+                    try await Task.sleep(for: .milliseconds(10))
+                } while ContinuousClock.now < deadline
+                XCTAssertEqual(replacement.count, count)
+                XCTAssertTrue(replacement.allSatisfy { $0.name.hasPrefix("Updated ") })
+                XCTAssertNotEqual(replacement.map(\.id), cold.map(\.id))
+                let requestCount = await server.requestCount
+                XCTAssertEqual(requestCount, 2, "One cold import and exactly one shared background refresh.")
+                await client.cancel()
+                await server.stop()
+                return [
+                    "channels": count, "cachedReads": 3, "replacementChannels": replacement.count,
+                    "httpRequests": requestCount, "refreshRequests": requestCount - 1,
+                    "coldForegroundNanoseconds": Int(coldNanoseconds),
+                    "cachedForegroundNanoseconds": Int(cachedNanoseconds)
+                ]
+            } catch {
+                release.signal()
+                await client.cancel()
+                await server.stop()
+                throw error
+            }
+        }
+    }
+
+    private final class RefreshRequestCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+
+        func next() -> Int {
+            lock.withLock { count += 1; return count }
+        }
+    }
+
     func testPerformanceCatalogImport() async throws {
         try PerformanceProbe.requireEnabled()
         let records = (0..<10_000).map { index in

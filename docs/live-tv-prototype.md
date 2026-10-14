@@ -77,9 +77,9 @@ navigation. Apple TV supports the top tabs, native sidebar and custom
 navigation rail variations; iPhone/iPad expose the same destination in their
 tab shell. Device installation must be authorized; a build alone does not
 install anything.
-tvOS navigation marks the destination **Experimental**: the pinned rail uses a
-subtitle within the existing row height, and native tabs/sidebar qualify the
-title. The pinned row also announces that status to accessibility.
+Navigation uses the plain **Live TV** label in every style. The source-setup
+introduction carries a small, secondary **Experimental** note on both platforms,
+without a warning dialog or an extra confirmation step.
 
 For isolated physical-TV iteration, build a branded Debug app using the existing
 per-branch build configuration. It has its own bundle ID, preferences and data;
@@ -305,6 +305,21 @@ first; delivered response bodies are cancelled by final invalidation. Late
 callers receive cancellation, not an Objective-C invalidated-session exception.
 Cancelling one caller does not close the session for other callers.
 
+Opening Settings also restores each authorized IPTV account's committed channel
+catalogue, not just standalone playlist caches. This cache-only operation does
+not authenticate, refresh channels, fetch programme listings, or tune a stream.
+It distinguishes a missing catalogue from a successfully imported empty lineup
+and rechecks profile/account authority after asynchronous work. Reopening
+Settings therefore shows the saved channel count rather than "Ready to load"
+after a successful account import. Upstream authentication/access refusals are
+reported as provider permission failures rather than missing profile membership;
+local account/profile authorization checks are unchanged.
+
+The mounted Live TV destination suspends catalogue loading while profile
+authorization is unavailable and resumes it when setup or unlocking completes.
+New account enrollment and saved channels recover without reopening the tab,
+while genuine profile, parental-approval, and server-permission checks remain.
+
 The shared live-channel publication path normalizes each matching name once,
 rather than during every sort comparison, and collects language/country facets
 from distinct metadata values. It avoids full-lineup copies for absent overrides
@@ -331,6 +346,31 @@ path rather than its HLS-only native bypass; HLS retains native playback,
 including fragmented MP4. Hosted tests require a rendered frame and advancing
 time through the authenticated proxy on both platforms. Extensionless raw
 streams are not classified by this suffix-based correction.
+The proxy observes player disconnects while waiting for upstream headers or
+body data, cancels its native HTTP tasks, and drains owned request work on close.
+Within one live proxy, root requests are serialized so duplicate player probes
+cannot open two long-lived channel streams. HLS child resources remain
+independent. An IPTV channel replacement waits for prior owned lease cleanup
+before publishing its URL to the player; intentional multiview panes keep their
+separate ownership.
+
+Preview/Watch admission is separate from its presentation commit. Admission
+rejects stale intent before stopping an existing stream; after cleanup, current
+intent and authority are rechecked, then the UI commit and replacement
+publication run without an intervening suspension. In particular, clearing a
+preview's `pendingRequest` must not cancel its SwiftUI task during cleanup or
+let an old-player teardown erase the replacement's selected channel.
+
+Upstream HTTP failures retain their status with an empty, sanitized response.
+Authentication, access-block, and rate-limit refusals are latched for that proxy
+so native retries cannot repeatedly contact a rejecting provider. HTTP 451 is
+an access restriction, not evidence of an invalid password or a codec failure.
+The live engine retains this typed refusal for the current playback attempt
+even if AVFoundation later reports a generic load failure. These safeguards do
+not add automatic channel reconnects or guess another output format, guarantee
+that the provider immediately releases its connection slot, or enforce a
+subscription limit across different devices.
+
 Ambient cookies and credential stores are disabled. HTTP remains unencrypted;
 use HTTPS when available. HLS/file playback does not establish DRM, DASH,
 browser-login, or remote AirPlay receiver support. Credential-protected artwork

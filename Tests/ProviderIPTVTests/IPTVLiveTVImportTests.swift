@@ -66,6 +66,8 @@ final class IPTVLiveTVImportTests: XCTestCase {
     }
 
     func testAutomaticGuideEnrollmentReusesImportButExplicitRefreshFetchesAgain() async throws {
+        PerformanceDiagnostics.shared.start()
+        defer { PerformanceDiagnostics.shared.stop() }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {
             IPTVFixture.state.reset()
@@ -81,6 +83,18 @@ final class IPTVLiveTVImportTests: XCTestCase {
             credential: credential, name: "Fixture", deviceID: "fixture",
             cacheDirectory: root, configuration: IPTVFixture.configuration()
         )
+        let imported = try XCTUnwrap(PerformanceDiagnostics.shared.snapshot())
+        let records = imported.recent + imported.slow
+        let importRecord = try XCTUnwrap(records.first { $0.operation == .playlistImport })
+        let commitRecord = try XCTUnwrap(records.first { $0.operation == .playlistCommit })
+        XCTAssertEqual(importRecord.outcome, .succeeded)
+        XCTAssertEqual(importRecord.provider, .iptv)
+        XCTAssertEqual(importRecord.metrics.items, 1)
+        XCTAssertEqual(importRecord.metrics.requests, 1)
+        XCTAssertGreaterThan(importRecord.metrics.bytes ?? 0, 0)
+        XCTAssertEqual(commitRecord.outcome, .succeeded)
+        XCTAssertEqual(commitRecord.metrics.rows, 1)
+        XCTAssertTrue(imported.active.isEmpty)
         let provider = try IPTVProvider(
             context: .init(session: session, accountID: "account", credentialRevision: .init(),
                            localMediaContext: .init(accountID: "account", profileID: "fixture", profileNamespace: nil)),
@@ -97,6 +111,13 @@ final class IPTVLiveTVImportTests: XCTestCase {
         )
         let model = LiveTVPrototypeModel(channels: [])
         await imports.reload(into: model, forceServerRefresh: false)
+        let refreshed = try XCTUnwrap(PerformanceDiagnostics.shared.snapshot())
+        let refreshRecord = try XCTUnwrap(
+            (refreshed.recent + refreshed.slow).first { $0.operation == .liveTVRefresh }
+        )
+        XCTAssertEqual(refreshRecord.outcome, .succeeded)
+        XCTAssertEqual(refreshRecord.metrics.accounts, 1)
+        XCTAssertEqual(refreshRecord.metrics.items, 1)
         XCTAssertEqual(model.channels.count, 1)
         XCTAssertEqual(IPTVFixture.state.requests.count, 1, "Automatic guide loading must not reimport the account.")
         XCTAssertEqual(imports.serverSources.first?.availability?.supportsGuide, false)
@@ -142,9 +163,17 @@ final class IPTVLiveTVImportTests: XCTestCase {
         let credential = try IPTVCredential(
             mode: .file, address: XCTUnwrap(URL(string: "https://imported-playlist.invalid"))
         )
+        PerformanceDiagnostics.shared.start()
+        defer { PerformanceDiagnostics.shared.stop() }
         let session = try await IPTVProvider.importFile(
             file, credential: credential, name: "Playlist", deviceID: "fixture", cacheDirectory: root
         )
+        let snapshot = try XCTUnwrap(PerformanceDiagnostics.shared.snapshot())
+        let imported = try XCTUnwrap((snapshot.recent + snapshot.slow).first { $0.operation == .playlistImport })
+        XCTAssertEqual(imported.outcome, .succeeded)
+        XCTAssertEqual(imported.metrics.items, 2_080)
+        XCTAssertEqual(imported.metrics.requests, 0, "A local file import must not be reported as network fetching.")
+        XCTAssertEqual(imported.metrics.bytes, playlist.utf8.count)
         let provider = try IPTVProvider(
             context: .init(
                 session: session, accountID: "iptv-account", credentialRevision: .init(),

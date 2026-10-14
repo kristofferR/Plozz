@@ -64,6 +64,37 @@ Numeric SDK memory measurements and its low-memory flag survive redaction;
 device names, installation IDs and arbitrary contexts do not.
 The `PLZLTVSYNC` local log uses the same non-secret vocabulary.
 
+Opted-in reports also carry a bounded, in-memory performance snapshot. It records
+coarse operation/provider categories, elapsed time, start-thread identity,
+overlapping work, and available item/row/credit/account/request/byte counts.
+Home fetching, merging and state publication are distinguished from HTTP
+transport/JSON decoding, share scans, playlist imports, guide batches and
+automatic-channel work. Active operations remain visible if a hang prevents
+their completion. Slow completed operations are retained separately from recent
+work so a burst of fast requests cannot immediately erase them.
+Terminal outcomes include failures in requested individual Home rows and earlier
+guide batches, even when global feeds or later batches succeed. These outcomes
+do not replace the existing per-row or per-window UI status.
+The `performance_operations` context holds at most 32 active operations, 16
+recent fast completions and 16 slow completions (at least 250 ms), plus bounded
+drop/overlap counters. Home's optional credit count is omitted above 2,048 media
+entries; item/row counts remain available without walking the larger metadata feed.
+
+This adds no automatic tracing, timer, polling task, file logging, or additional
+Sentry events. Serialization happens only when an existing report is captured.
+Opting out clears the buffer and invalidates old spans, including across a later
+opt-in. The final scrub accepts only the typed schema and bounded numeric values;
+URLs, request paths, server/profile names, credentials, media identities/titles,
+and response bodies are never part of the snapshot.
+
+Elapsed time is not CPU time: a request can be waiting on a server, and a task
+that starts on the main thread can suspend without blocking it. Streaming
+playlist import includes overlapping transport, parsing and staging; it is not
+an isolated parser or socket benchmark. Correlate active operations and slow
+records with the hang stack and screen history rather than assigning the whole
+hang to the last operation. Missing records can reflect disabled reporting or
+the bounded buffer; inspect its drop/retention counters before drawing conclusions.
+
 Playlist import limit warnings contain only a closed limit category and numeric
 observed/maximum counts. Header size, received bytes, parser input, header-line
 size and entry count are distinguishable without uploading an address, channel
@@ -502,19 +533,31 @@ target confirmation, optimized-app confirmation and renderer arm are explicit
 Use an actual populated TV Shows Browse grid with **All** watch states and
 **Name** sorting, including visible episode counts and progress. Unwatched-only
 Movies and a synthetic poster grid do not exercise the same overlay workload.
-Record the seven focused titles during calibration, then require that same path
-for every arm. Keep the existing profile and all its servers enabled.
+Record the nineteen focused titles during calibration, then require that same
+eighteen-row path for every arm (`PLOZZ_LIBRARY_EXPECTED_PATH`). Keep the existing
+profile and all its servers enabled. Calibration warms that route; these are
+matched return-traversal measurements, not cold-first-open evidence.
+
+Launch the **app** with `PLOZZ_LIBRARY_TRAVERSAL_RECORDING=1`. This enables a
+controller-local, 512-event native-focus journal and a nonfocusable diagnostic
+accessibility element. The focus callback only records indices, metadata readiness
+and uptime. The runner reads/encodes snapshots outside measurement, then validates
+events inside each measured interval. Missing history, overflow, changed grid,
+unloaded destinations, excursions and incomplete traversals invalidate a window.
 
 Run `testControlledAIdle`, `testControlledBTraversal`, `testControlledCRapidTraversal` and
 `testControlledDHeldTraversal` together, in that order, in one runner and app process. Each phase has one XCTest warm-up and three
 recorded observations around a 24-second input loop. Scrolling sends six Down followed by six Up, one
 press every two seconds. Rapid traversal sends eighteen Down followed by eighteen Up, one press every
-0.3 seconds, so it reaches rows that have not been drawn yet and returns to rows that scrolled away;
-the slower traversal rarely hitches on a warm grid. Held traversal holds Down for two seconds, which
-the focus engine repeats and accelerates across about twenty rows, then holds Up for four seconds,
-which always stops on the first row. Accessibility assertions, screenshots and JSON timing
+0.3 seconds; native-focus evidence must match all 36 transitions on the calibrated path.
+Held traversal holds Down for two seconds, then Up for four seconds. Declare
+`TEST_RUNNER_PLOZZ_LIBRARY_HELD_MINIMUM_ROWS` before comparing arms (default 18);
+the journal must prove at least that depth and return to the starting item.
+Repeat throughput may legitimately differ between arms and is retained as evidence,
+not assumed to be twenty rows. Accessibility assertions, screenshots and JSON timing
 attachments stay outside the metric windows. Retained timing attachments include
-epoch, elapsed duration, each input's lateness and remote-call duration; do not
+epoch, elapsed duration, each input's lateness and remote-call duration, and both
+focus snapshots; do not
 depend on live stdout surviving a long asynchronous wait.
 
 Collect `XCTClockMetric` alongside the application metrics, and retain runner-only
@@ -553,8 +596,10 @@ above, and Instruments' Animation Hitches template recorded no display data. Whe
 that happens, read frame pacing from the app instead: launch with
 `PLZPERF_STDOUT=1` through `devicectl device process launch --console` and keep
 the `PLZPERF ... hitch/s=... worst=...ms` lines `HomePerfSampler` prints each
-second. The sampler keeps running while a screen such as a library grid is pushed
-over Home. Faster input than XCTest can send (about four presses a second) comes
+second. These are display-link callback gaps, not proof of presented-frame hitches.
+The sampler keeps running while a screen such as a library grid is pushed
+over Home, and releases its display link and observers when its owner is destroyed.
+Faster input than XCTest can send (about four presses a second) comes
 from pyatv over one Companion connection; ten Down or Up presses a second on TV
 Shows Browse reproduce the stutter seen with fast clicking.
 

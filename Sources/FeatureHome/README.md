@@ -176,7 +176,11 @@ fallback when the user's server has no attached trailer.
   The sidebar's mask changes without replacing the scroll view, preserving
   browse position and restoring the normal feather when navigation returns.
 - **Library browsing** — `LibraryBrowseView` + `LibraryBrowseViewModel`
-  show Recommended by default for server-backed video libraries, with
+  own a bounded, directional `ArtworkPrefetchWindow`. Its URL/variant requests
+  preserve overlapping work across reversals and cancel obsolete queued work.
+  Admission rechecks decoded residency; content, density, lifecycle and background
+  generation changes cannot keep stale warming alive or suppress a later pass.
+  They show Recommended by default for server-backed video libraries, with
   library-scoped Continue Watching and Recently Added plus native Plex hubs
   or Jellyfin/Emby movie recommendation categories. TV uses Showcase, showing
   its mode tabs only while the first row is active; mobile uses touch-sized rows.

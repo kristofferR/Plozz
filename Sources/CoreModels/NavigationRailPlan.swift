@@ -1,11 +1,7 @@
 import Foundation
 
-/// A top-level destination in the custom navigation rail.
-///
-/// Unlike the native tab styles — where the compact destinations are fixed — the
-/// rail treats each of the viewer's libraries as a first-class destination, so a
-/// library grid is a *root* screen with chrome rather than a page pushed on top of
-/// Home.
+/// A top-level destination shared by every TV navigation style. Library grids
+/// are root screens, rather than pages pushed on top of Home.
 public enum NavigationRailDestination: Hashable, Sendable {
     case home
     case search
@@ -116,6 +112,10 @@ public enum NavigationDestinationDefaults {
             NavigationLibraryLayout.searchKey,
         ]
     }
+
+    /// The profile button opens Settings; its optional tab must not force a
+    /// sixth default destination into More.
+    public static let iOSAutomaticallyHiddenKeys: Set<String> = [NavigationLibraryLayout.settingsKey]
 }
 
 public enum NavigationRailPlan {
@@ -129,8 +129,8 @@ public enum NavigationRailPlan {
     ) -> [String] {
         let keys: [String]
         switch style {
-        case .tabBar: keys = NavigationDestinationDefaults.compact(hasMusic: true)
-        case .sidebar: keys = NavigationDestinationDefaults.sidebar(visibleLibraries: visibleLibraries, hasMusic: true)
+        case .tabBar, .sidebar:
+            keys = NavigationDestinationDefaults.sidebar(visibleLibraries: visibleLibraries, hasMusic: true)
         case .rail: keys = NavigationDestinationDefaults.rail(visibleLibraries: visibleLibraries, hasMusic: true)
         }
         return deduplicated(keys)
@@ -140,6 +140,14 @@ public enum NavigationRailPlan {
     /// non-music library in discovery order.
     public static func availableKeys(visibleLibraries: [AggregatedLibrary]) -> [String] {
         [NavigationLibraryLayout.allLibrariesKey] + browsableLibraries(visibleLibraries).map(\.key)
+    }
+
+    /// Keep the horizontal bar compact until the profile explicitly shows a
+    /// library. This is resolved presentation, not a persisted Hide choice.
+    public static func automaticallyHiddenLibraryKeys(
+        visibleLibraries: [AggregatedLibrary], style: NavigationStyle
+    ) -> Set<String> {
+        style == .tabBar ? Set(availableKeys(visibleLibraries: visibleLibraries)) : []
     }
 
     /// The libraries the rail can offer: everything that is not a music library.
@@ -180,10 +188,9 @@ public enum NavigationRailPlan {
     /// Resolves the complete ordered destination list for one navigation style.
     ///
     /// `availableKeys` is both the style's supported set and its historical
-    /// default order. A compact top bar therefore omits libraries, while the
-    /// native sidebar and custom rail include them. Once a profile has explicitly
-    /// arranged built-ins, that saved order wins wherever the style supports the
-    /// destination.
+    /// default order. The horizontal bar resolves library visibility as opt-in;
+    /// the sidebars include libraries by default. Once a profile has explicitly
+    /// arranged built-ins, that saved order wins in every style.
     public static func destinations(
         visibleLibraries: [AggregatedLibrary],
         layout: NavigationLibraryLayout,

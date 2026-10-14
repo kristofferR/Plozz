@@ -1318,6 +1318,51 @@ struct FocusHeroColumnMotion<Content: View>: View {
     }
 }
 
+#if DEBUG
+/// Hosted tests opt in per view tree; shipping builds have no recorder or clock reads.
+@MainActor
+final class FocusHeroLayoutMeasurement {
+    enum Surface: Equatable { case column, mask, row }
+
+    struct Sample {
+        let surface: Surface
+        let proposedSize: CGSize
+        let fittedSize: CGSize
+        let fittingNanoseconds: UInt64
+        let nestingDepth: Int
+    }
+
+    var onMeasure: ((Sample) -> Void)?
+    private var nestingDepth = 0
+
+    func measure(surface: Surface, proposal: CGSize, operation: () -> CGSize) -> CGSize {
+        guard let onMeasure else { return operation() }
+        let depth = nestingDepth
+        nestingDepth += 1
+        defer { nestingDepth -= 1 }
+        let start = DispatchTime.now().uptimeNanoseconds
+        let result = operation()
+        let elapsed = DispatchTime.now().uptimeNanoseconds &- start
+        onMeasure(Sample(
+            surface: surface, proposedSize: proposal, fittedSize: result,
+            fittingNanoseconds: surface == .mask ? 0 : elapsed, nestingDepth: depth
+        ))
+        return result
+    }
+}
+
+private struct FocusHeroLayoutMeasurementKey: EnvironmentKey {
+    static let defaultValue: FocusHeroLayoutMeasurement? = nil
+}
+
+extension EnvironmentValues {
+    var focusHeroLayoutMeasurement: FocusHeroLayoutMeasurement? {
+        get { self[FocusHeroLayoutMeasurementKey.self] }
+        set { self[FocusHeroLayoutMeasurementKey.self] = newValue }
+    }
+}
+#endif
+
 /// Scroll callers expand the leading viewport and reserve matching safe area.
 /// SwiftUI otherwise hides native cards in the visible overscan gutter even
 /// with clipping disabled; expanding only the child hosting view is insufficient.
@@ -1344,12 +1389,28 @@ private struct FocusHeroMotionSurface<Content: View>: UIViewControllerRepresenta
         // internal accessibility environment, which hides this tree's children.
         AnyView(content.transformEnvironment(\.self) { target in
             target.copyHostedPresentation(from: source)
+            #if DEBUG
+            target.focusHeroLayoutMeasurement = source.focusHeroLayoutMeasurement
+            #endif
         })
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiViewController: Controller, context: Context) -> CGSize? {
         let size = CGSize(width: proposal.width ?? FocusHeroLayout.screenWidth,
                           height: proposal.height ?? FocusHeroLayout.screenHeight)
+        #if DEBUG
+        if let measurement = context.environment.focusHeroLayoutMeasurement {
+            let surface: FocusHeroLayoutMeasurement.Surface
+            switch kind {
+            case .column: surface = .column
+            case .mask: surface = .mask
+            case .row: surface = .row
+            }
+            return measurement.measure(surface: surface, proposal: size) {
+                kind == .mask ? size : uiViewController.host.sizeThatFits(in: size)
+            }
+        }
+        #endif
         return kind == .mask ? size : uiViewController.host.sizeThatFits(in: size)
     }
 

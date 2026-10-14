@@ -141,7 +141,13 @@ and the single place caption customization lives.
   the column and stack at accessibility text sizes; long profile/user names
   wrap without widening the scroll content. TV retains its bounded settings
   layout with contained row focus.
-- **Mobile Settings is a presentation action.** Its tab or More entry opens
+- **Mobile Settings is a presentation action.** The profile button is the default
+  entry point. Its navigation shortcut starts hidden on iPhone and iPad, keeping
+  the default navigation at five destinations or fewer even with Watchlist.
+  The arranger can explicitly Show it; this profile-scoped override survives
+  relaunches, while Reset Navigation restores the hidden default. Automatic
+  hiding is not saved as a manual preference and does not hide Settings on TV.
+  Its optional tab or More entry opens
   the drawer over the current page without selecting a replacement destination.
   Keep the active content stack and overflow navigation intact on dismissal;
   destination normalization still retains the Settings-only recovery screen.

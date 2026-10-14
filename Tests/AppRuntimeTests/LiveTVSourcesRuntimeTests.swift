@@ -104,11 +104,37 @@ final class LiveTVSourcesRuntimeTests: XCTestCase {
         XCTAssertEqual(runtime.catalog.imports.configuration.servers, [source])
         XCTAssertNil(runtime.catalog.issue)
         XCTAssertTrue(runtime.isCurrent)
+        XCTAssertEqual(runtime.catalog.catalog.channels.map(\.name), ["IPTV channel"])
+        XCTAssertEqual(runtime.catalog.imports.serverSources.first?.phase, .loaded)
+        XCTAssertEqual(runtime.catalog.imports.serverSources.first?.channelCount, 1)
         await runtime.restore()
         let checks = await fixture.provider.checks
         let loads = await fixture.loader.loads
         XCTAssertEqual(checks, 1, "Opening an already configured source must remain cache-only.")
         XCTAssertEqual(loads, 0)
+    }
+
+    func testReopeningSettingsRestoresSavedIPTVWithoutAuthenticationGuideOrPlaybackRequests() async throws {
+        let fixture = try SourcesRuntimeFixture()
+        defer { fixture.removeOwnedFiles() }
+        try fixture.addIPTVChoice()
+        let initial = fixture.runtime()
+        await initial.restore()
+        initial.invalidate()
+
+        let reopened = fixture.runtime()
+        await reopened.restore()
+        defer { reopened.invalidate() }
+
+        XCTAssertEqual(reopened.catalog.catalog.channels.map(\.name), ["IPTV channel"])
+        XCTAssertEqual(reopened.catalog.imports.serverSources.first?.phase, .loaded)
+        XCTAssertNil(reopened.catalog.imports.serverSources.first?.failure)
+        let checks = await fixture.provider.checks
+        let refreshes = await fixture.provider.refreshes
+        let guides = await fixture.provider.guides
+        XCTAssertEqual(checks, 1)
+        XCTAssertEqual(refreshes, 0)
+        XCTAssertEqual(guides, 0)
     }
 
     func testSettingsRetriesFailedIPTVRegistrationAndPublishesItsChannels() async throws {
@@ -509,11 +535,16 @@ private actor SourcesRuntimeProvider: ServerLiveTVProviding {
     let gate: SourcesRuntimeLoadGate?
     private(set) var checks = 0
     private(set) var refreshes = 0
+    private(set) var guides = 0
     private var channels: [ServerLiveTVChannel] = [.init(id: "channel", name: "IPTV channel")]
 
     init(gate: SourcesRuntimeLoadGate?) { self.gate = gate }
 
     func setChannels(_ channels: [ServerLiveTVChannel]) { self.channels = channels }
+
+    func cachedLiveTVCatalog() -> ServerLiveTVCatalogSnapshot? {
+        .init(channels: channels, supportsGuide: true)
+    }
 
     func liveTVAvailability() async throws -> ServerLiveTVAvailability {
         checks += 1
@@ -530,7 +561,10 @@ private actor SourcesRuntimeProvider: ServerLiveTVProviding {
         channels
     }
 
-    func liveTVGuide(channelIDs: [String], from: Date, to: Date) async throws -> [ServerLiveTVProgramme] { [] }
+    func liveTVGuide(channelIDs: [String], from: Date, to: Date) async throws -> [ServerLiveTVProgramme] {
+        guides += 1
+        return []
+    }
     func openLiveTVChannel(id: String) async throws -> any LiveTVStreamLease {
         throw ServerLiveTVError.tunerUnavailable
     }

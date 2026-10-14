@@ -17,6 +17,8 @@ actor IPTVTestHTTPServer {
     private var connections: [UUID: (NWConnection, Task<Void, Never>)] = [:]
     private var stopped = false
     private(set) var requestCount = 0
+    private(set) var activeRequestCount = 0
+    private(set) var peakActiveRequestCount = 0
 
     init(respond: @escaping @Sendable (String) -> Response) throws {
         self.respond = respond
@@ -67,14 +69,19 @@ actor IPTVTestHTTPServer {
         let id = UUID()
         connection.start(queue: DispatchQueue.global())
         let task = Task {
-            await serve(connection)
+            await serve(connection, id: id)
             connections.removeValue(forKey: id)
             connection.cancel()
         }
         connections[id] = (connection, task)
     }
 
-    private func serve(_ connection: NWConnection) async {
+    private func cancelConnection(_ id: UUID) {
+        connections[id]?.1.cancel()
+        connections[id]?.0.cancel()
+    }
+
+    private func serve(_ connection: NWConnection, id: UUID) async {
         do {
             var request = Data()
             while request.range(of: Data("\r\n\r\n".utf8)) == nil {
@@ -88,6 +95,12 @@ actor IPTVTestHTTPServer {
                 request.append(part)
             }
             requestCount += 1
+            activeRequestCount += 1
+            peakActiveRequestCount = max(peakActiveRequestCount, activeRequestCount)
+            defer { activeRequestCount -= 1 }
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { [weak self] _, _, _, _ in
+                Task { await self?.cancelConnection(id) }
+            }
             let text = String(decoding: request, as: UTF8.self)
             let response = respond(text)
             if response.headerDelay != .zero { try await Task.sleep(for: response.headerDelay) }

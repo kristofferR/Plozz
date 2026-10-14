@@ -699,6 +699,12 @@ public final class HomeViewModel {
             wantsReloadAfterCurrent = true
             return
         }
+        let diagnostic = PerformanceDiagnostics.shared.begin(
+            .homeLoad, metrics: .init(accounts: accounts.count)
+        )
+        var diagnosticOutcome = PerformanceDiagnostics.Outcome.cancelled
+        var diagnosticMetrics = PerformanceDiagnostics.Metrics()
+        defer { diagnostic?.finish(diagnosticOutcome, metrics: diagnosticMetrics) }
         isLoading = true
         isRefreshing = true
         loadGeneration &+= 1
@@ -905,6 +911,13 @@ public final class HomeViewModel {
         // is what kept a switched-off server's library on screen. With no sources
         // the emptiness IS the answer, so fall through and let it stand (which
         // also republishes the Top Shelf, rather than leaving it on the old rows).
+        if diagnostic != nil {
+            let failures = Array(loadFailures.values)
+                + content.librarySections.flatMap { $0.failures.values }
+                + content.serverRows.compactMap(\.failure)
+            diagnosticOutcome = failures.isEmpty ? .succeeded
+                : failures.allSatisfy { $0 == .cancelled } ? .cancelled : .failed
+        }
         content.serverRows = retainingServerRowContent(
             content.serverRows, previous: previousContent?.serverRows ?? []
         )
@@ -919,7 +932,10 @@ public final class HomeViewModel {
             lastLoadedAt = Date()
             // The live sources were unavailable. Reveal the cached row rather than
             // leaving a permanent loading placeholder with no refresh in flight.
+            let publication = PerformanceDiagnostics.shared.begin(.homePublish)
             state = .loaded(previousContent)
+            publication?.finish(.succeeded)
+            if diagnosticOutcome == .succeeded { diagnosticOutcome = .failed }
             hasReceivedLiveContent = hadLiveContent
             isShowingCachedSnapshot = false
             return
@@ -927,9 +943,12 @@ public final class HomeViewModel {
         hasReceivedLiveContent = true
         hasCompletedHomeLoad = true
         isShowingCachedSnapshot = false
+        let publication = PerformanceDiagnostics.shared.begin(.homePublish)
         state = content.isEmpty && watchlistLoadingPlaceholderCount == 0 && rowFailures.isEmpty
             ? .empty
             : .loaded(content)
+        publication?.finish(.succeeded)
+        if diagnostic != nil { diagnosticMetrics = Self.performanceMetrics(content) }
         // Record what this content was aggregated for so a later reappearance with
         // an unchanged visibility snapshot is recognised as a no-op (see
         // `loadIfNeeded(for:)`).
@@ -949,6 +968,33 @@ public final class HomeViewModel {
         // leak into Top Shelf. `content.latest` is the global Recently Added feed
         // in both merged and unmerged mode, so Top Shelf is identical either way.
         publishCurrentContent()
+    }
+
+    private static func performanceMetrics(_ content: Content) -> PerformanceDiagnostics.Metrics {
+        var itemCount = 0
+        var rowCount = 0
+        var creditCount: Int? = 0
+        // Large feeds keep exact row/item counts without an unbounded metadata walk.
+        var remainingCreditItems = 2_048
+        func count(_ items: [MediaItem]) {
+            guard !items.isEmpty else { return }
+            rowCount += 1
+            itemCount += items.count
+            if let current = creditCount, items.count <= remainingCreditItems {
+                remainingCreditItems -= items.count
+                creditCount = items.reduce(current) { $0 + $1.people.count }
+            } else {
+                creditCount = nil
+            }
+        }
+        count(content.continueWatching)
+        count(content.latest)
+        count(content.watchlist)
+        for group in content.librarySections {
+            for section in group.sections { count(section.items) }
+        }
+        for row in content.serverRows { count(row.items) }
+        return .init(items: itemCount, rows: rowCount, credits: creditCount)
     }
 
     public func publishCurrentContent() {
@@ -1061,7 +1107,9 @@ public final class HomeViewModel {
         // could replace a focused loading row before its usable cards arrive.
         rowFailures = progress.failures
         loadingRows = progress.loadingRows
+        let publication = PerformanceDiagnostics.shared.begin(.homePublish)
         if state.value != content { state = .loaded(content) }
+        publication?.finish(.succeeded)
         let libraryRowCount = content.librarySections.reduce(0) { $0 + $1.sections.count }
         if libraryRowCount > previousLibraryRowCount {
             PlozzLog.boot("HomeVM.libraryRowReady rows=\(libraryRowCount)")

@@ -260,6 +260,69 @@ final class HomeAggregatorUnmergedTests: XCTestCase {
         XCTAssertEqual(content.serverRows.first?.isLoading, false)
     }
 
+    func testHomeLoadDiagnosticsIncludeLibraryRowFailures() async throws {
+        try await checkRowFailureDiagnostics(serverRow: false)
+    }
+
+    func testHomeLoadDiagnosticsIncludeServerRowFailures() async throws {
+        try await checkRowFailureDiagnostics(serverRow: true)
+    }
+
+    private func checkRowFailureDiagnostics(serverRow: Bool) async throws {
+        let cases: [(AppError?, PerformanceDiagnostics.Outcome)] = [
+            (.serverUnreachable, .failed), (.cancelled, .cancelled), (nil, .succeeded)
+        ]
+        for (failure, outcome) in cases {
+            let definition = HomeServerRowDefinition(
+                accountID: "acct", serverName: "Server", providerKind: .jellyfin,
+                section: .init(id: "picks", kind: .recommendations, libraryID: "L1")
+            )
+            let visibility: HomeLibraryVisibility
+            if serverRow {
+                visibility = .init(rowCustomization: .init(
+                    defaults: .custom,
+                    shown: [definition.id, .global(.continueWatching), .global(.recentlyAdded)],
+                    serverRows: [definition]
+                ))
+            } else {
+                visibility = vis([("acct:L1", .recentlyAdded)])
+            }
+            let provider = UnmergedStub(
+                libraries: [lib("L1", "Movies", .movie)],
+                continueWatching: [cw("resume", library: "L1")],
+                latest: [cw("latest", library: "L1")],
+                itemsByContainer: ["L1": [item("library-pick")]],
+                itemsError: serverRow ? nil : failure,
+                nativeItems: ["picks": [item("server-pick")]],
+                nativeError: serverRow ? failure : nil
+            )
+            let model = HomeViewModel(
+                accounts: [resolved("acct", provider: provider)],
+                layoutStore: InMemoryHomeLayoutStore(),
+                contentStore: InMemoryHomeContentStore(),
+                currentVisibility: { visibility }
+            )
+            PerformanceDiagnostics.shared.start()
+            defer { PerformanceDiagnostics.shared.stop() }
+            await model.load()
+            let content = try XCTUnwrap(model.state.value)
+            XCTAssertEqual(content.continueWatching.map(\.id), ["resume"])
+            XCTAssertEqual(content.latest.map(\.id), ["latest"])
+            XCTAssertTrue(model.rowFailures.isEmpty, "Global feeds remain healthy.")
+            if serverRow {
+                XCTAssertEqual(content.serverRows.first?.failure, failure)
+                XCTAssertEqual(content.serverRows.first?.isLoading, false)
+            } else {
+                XCTAssertEqual(content.librarySections.first?.failures[.recentlyAdded], failure)
+                XCTAssertTrue(content.librarySections.first?.loadingRows.isEmpty == true)
+            }
+            let snapshot = try XCTUnwrap(PerformanceDiagnostics.shared.snapshot())
+            let load = try XCTUnwrap((snapshot.recent + snapshot.slow).last { $0.operation == .homeLoad })
+            XCTAssertEqual(load.outcome, outcome)
+            XCTAssertTrue(snapshot.active.isEmpty)
+        }
+    }
+
     func testNativeNextUpSuppliesDetailHintsAndRespondsToWatchMutations() async {
         let definition = HomeServerRowDefinition(
             accountID: "acct", serverName: "Server", providerKind: .jellyfin,
@@ -381,6 +444,7 @@ private final class UnmergedStub: MediaProvider, @unchecked Sendable {
     private let itemsByContainer: [String: [MediaItem]]
     private let hubsByLibrary: [String: [LibrarySection]]
     private let libraryError: AppError?
+    private let itemsError: AppError?
     private let nativeItems: [String: [MediaItem]]
     private let nativeError: AppError?
     private let nativeCalls = Mutex<[String]>([])
@@ -400,6 +464,7 @@ private final class UnmergedStub: MediaProvider, @unchecked Sendable {
         itemsByContainer: [String: [MediaItem]] = [:],
         hubsByLibrary: [String: [LibrarySection]] = [:],
         libraryError: AppError? = nil,
+        itemsError: AppError? = nil,
         nativeItems: [String: [MediaItem]] = [:],
         nativeError: AppError? = nil
     ) {
@@ -409,6 +474,7 @@ private final class UnmergedStub: MediaProvider, @unchecked Sendable {
         self.itemsByContainer = itemsByContainer
         self.hubsByLibrary = hubsByLibrary
         self.libraryError = libraryError
+        self.itemsError = itemsError
         self.nativeItems = nativeItems
         self.nativeError = nativeError
         self.session = UserSession(
@@ -450,6 +516,7 @@ private final class UnmergedStub: MediaProvider, @unchecked Sendable {
     func children(of itemID: String) async throws -> [MediaItem] { [] }
     func items(in containerID: String, kind: MediaItemKind, page: PageRequest) async throws -> MediaPage {
         itemsRequested = true
+        if let itemsError { throw itemsError }
         let items = itemsByContainer[containerID] ?? []
         return MediaPage(items: items, startIndex: 0, totalCount: items.count)
     }

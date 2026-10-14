@@ -35,8 +35,9 @@ final class IPTVPlaybackDiagnosticsTests: XCTestCase {
         }
     }
 
-    func testProxyRetainsOriginalHTTPFailureBeforeReturningGenericGatewayError() async throws {
-        for status in [401, 403, 404, 429, 503] {
+    func testProxyPreservesHTTPRefusalsWithoutTheirPrivateResponseBody() async throws {
+        for status in [401, 403, 404, 429, 451, 503] {
+            IPTVFixture.state.reset()
             IPTVFixture.state.handler = { _ in (status, ["Content-Type": "text/html"], Data("private".utf8)) }
             let buffer = ProxyDiagnosticBuffer()
             let diagnostics = PlaybackFailureDiagnostics()
@@ -51,8 +52,12 @@ final class IPTVPlaybackDiagnosticsTests: XCTestCase {
             let session = URLSession(configuration: .ephemeral)
             defer { session.invalidateAndCancel() }
             for _ in 0..<2 {
-                let (_, response) = try await session.data(from: url)
-                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 502)
+                let (body, response) = try await session.data(from: url)
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, status)
+                XCTAssertTrue(body.isEmpty)
+            }
+            if [401, 403, 429, 451].contains(status) {
+                XCTAssertEqual(IPTVFixture.state.requests.count, 1, "Native fallback must not retry a provider refusal.")
             }
 
             let failure = try XCTUnwrap(buffer.values.first)
@@ -62,7 +67,15 @@ final class IPTVPlaybackDiagnosticsTests: XCTestCase {
             XCTAssertEqual(failure.format, .html)
             XCTAssertNil(failure.code)
             XCTAssertFalse(String(decoding: try JSONEncoder().encode(failure), as: UTF8.self).contains("private"))
+            let state = try XCTUnwrap(PlaybackDeliveryFailure.state(for: url))
+            if status == 451 { XCTAssertEqual(state.error, .accessRestricted) }
             await proxy.stop()
+            XCTAssertNil(PlaybackDeliveryFailure.state(for: url))
+            if [401, 403, 429, 451].contains(status) {
+                XCTAssertNotNil(state.error, "The active player retains evidence through proxy cleanup.")
+            } else {
+                XCTAssertNil(state.error, "Recoverable failures must not poison a successful native fallback.")
+            }
         }
     }
 

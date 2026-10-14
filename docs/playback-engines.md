@@ -13,6 +13,14 @@ extra probe connection. This keeps declared MPEG-TS on the ingest/remux path
 instead of the HLS-only native bypass. Explicit stream extensions take
 precedence; the hint never applies to movies, episodes, or HLS child resources.
 
+Authenticated IPTV relay refusals are retained by exact loopback URL for the
+current live attempt. This preserves HTTP 451 access restrictions, authentication
+rejections, and rate limits when native playback reports only a generic load
+failure. Teardown removes the registry entry; the current engine can retain its
+evidence until that attempt ends. Recoverable request failures are not latched
+as terminal engine errors. The relay does not automatically retry a provider
+refusal or substitute an unadvertised stream format.
+
 Raw live transport streams (`ts`, `m2ts`, `mts`) use Aether's supported `fastZap`
 join profile. Unlike HLS, these sources have no existing playlist window to
 fetch: the standard full-holdback gate can wait longer than AVPlayer's initial
@@ -67,14 +75,26 @@ ships the upstream and transitive-library notices. Preserve all upstream license
 headers when updating the vendored sources, and update sources, public headers,
 binary checksums, and bundled notices together.
 
-Plozz pins the subtitle-corrected
-[AetherEngine fork](https://github.com/brandomoore/AetherEngine/tree/4b7552a06c4cf646bb94eb7eb273946f8b916a70)
-at commit `4b7552a06c4cf646bb94eb7eb273946f8b916a70`, based on upstream
+Plozz pins the playback-corrected
+[AetherEngine fork](https://github.com/brandomoore/AetherEngine/tree/af350b9bf35be106e3f97ecd521e1ab32be0bdd3)
+at commit `af350b9bf35be106e3f97ecd521e1ab32be0bdd3`, based on upstream
 release **7.34.1** (`cc070bf8d7bd7004547283cf1dc0c70ccd00d616`).
 ASS/SSA packets with neither a decoded end nor a packet duration are now discarded
 instead of lingering for a fabricated five seconds. This also applies to sidecars;
 other subtitle codecs retain their established fallback. Upstream 7.34.1 does not
 include this correction; the fork retains it and its regression tests.
+
+The fork also corrects accumulating AAC-LC audio drift in indexed MP4 VOD
+([#89](https://github.com/brandomoore/Plozz/issues/89)). When the existing audio
+sample index demonstrates a different clock from the decoded samples, the native
+HLS path selectively enables timestamp-aware resampling through its audio bridge.
+Ordinary AAC and nonaccumulating timing jitter still stream-copy. Stereo uses
+FLAC without an extra lossy encoding generation; surround retains the configured
+bridge mode. Compensation resets on restart and drains at EOF. The correction
+applies independently of provider or transport on tvOS and iOS/iPadOS; it does
+not modify SMB reads, video timestamps or Match Frame Rate. Synthetic regressions
+cover both drift directions, late-onset drift, 44.1/48 kHz, restart/resume and
+decoded HLS timing. The original reporter's media has not been supplied.
 
 The fork exports **AetherEngine as a dynamic framework**. LibDovi and LibTrueHD
 each bring a Rust exception personality; statically combining both with Plozz's
@@ -91,10 +111,46 @@ E-AC-3 JOC stream copies advertise object audio in the HLS master, including
 untagged tracks. FFmpegBuild **3.7.x** fixes dependent-substream Atmos signaling;
 LibDovi remains **2.1.x** and LibTrueHD **2.2.x** is newly linked into the engine.
 
-TrueHD object-audio rendering (`LoadOptions.objectAudioRendering`) stays `.off`,
-and progressive segment delivery stays disabled. The new APAC performance gains
-only apply when object-audio rendering is enabled; this update does not enable
-it or change Plozz's routing/track preferences. Both apps bundle the unmodified
+On **tvOS 26 and later**, ordinary on-demand playback automatically requests
+TrueHD Atmos object rendering with `LoadOptions.objectAudioRendering = .apac(.l714)`.
+The 7.1.4 layout is an **intermediate spatial bed**, not a detected physical speaker
+configuration. tvOS and the receiver handle final output; there is no speaker
+setup prompt or mandatory opt-in. **Settings > Playback > Dolby Atmos from TrueHD**
+provides an on-by-default switch on supported Apple TVs. It is saved per profile,
+including profile settings transfer, and applies when the next playback session
+starts. Keep it on for overhead sound from eligible TrueHD Atmos tracks on
+compatible equipment. Turning it off retains the ordinary channel bridge
+described below: the TrueHD channel presentation still plays, but does not carry
+the original Atmos height positioning. Avoiding the extra spatial conversion may
+help when those tracks stutter or seek slowly; it is not a guaranteed remedy for
+unrelated playback problems. This is not a global Atmos switch: Dolby Digital Plus
+(E-AC-3/JOC) Atmos remains unaffected.
+Older saved profiles default to on. HDMI channel counts and the current rendering
+mode are not used as Atmos capability gates: neither reliably describes the room's speakers.
+
+Aether only converts **48 kHz TrueHD Atmos** on its native/HLS VOD path. It decodes
+the objects into the spatial bed and encodes Apple Positional Audio (APAC), which
+tvOS can deliver as Dolby MAT to compatible equipment. This is **lossy conversion**,
+not TrueHD bitstream passthrough or preservation of the original dynamic object
+stream. It adds decoding/encoding work during eligible playback, not library
+scanning or idle sync. Shared live players and muted previews stay off to avoid
+additional spatial encoding in those background/concurrent paths.
+
+Live stream loading, iOS/iPadOS and older tvOS keep object rendering off. Plain
+TrueHD, DTS/DTS-HD MA (including DTS:X), ineligible sources and APAC initialization
+failures retain the existing bridge: FLAC for source layouts above six channels,
+otherwise the E-AC-3 compatibility bridge. Software-video playback does not use
+this conversion. E-AC-3/JOC Atmos remains stream-copied. Explicit track selections
+and language preferences are still passed to Aether; its automatic selection can
+prefer TrueHD Atmos within the same language/dub when rendering is enabled.
+
+Progressive segment delivery remains disabled. The upstream Apple TV reports in
+[AetherEngine #731](https://github.com/superuser404notfound/AetherEngine/issues/731)
+support this output path, but are not verification of every receiver/speaker
+configuration. An Atmos receiver label alone does not prove discrete height
+mapping, particularly with tvOS Continuous Audio.
+
+Both apps bundle the unmodified
 MIT license, Apache-2.0 license and NOTICE from
 [LibTrueHD 2.2.0](https://github.com/superuser404notfound/LibTrueHD/tree/2.2.0)
 as `LibTrueHDLicense.txt`, `LibTrueHDApacheLicense.txt` and `LibTrueHDNotices.txt`,
@@ -331,8 +387,9 @@ Plozzigen accepts content when ALL of these are true:
 
 - **Container:** MKV / Matroska
 - **Video codec:** HEVC, H.264, VP9, or AV1
-- **Audio codec:** Any (fMP4-legal codecs are stream-copied; incompatible ones
-  like TrueHD/DTS are bridged to lossless FLAC internally)
+- **Audio codec:** Any (fMP4-legal codecs are stream-copied; eligible TrueHD Atmos
+  is spatially rendered on tvOS 26+; other incompatible audio uses the existing
+  FLAC/E-AC-3 bridge)
 - **Byte-range readable:** HTTP range requests or local file access
 - **NOT Dolby Vision Profile 7** (dual-layer BL+EL+RPU — unsupported everywhere)
 
@@ -362,12 +419,12 @@ Native handles content the server has already prepared:
 | Feature | Plozzigen | Native |
 |---------|-----------|--------|
 | Dolby Vision | ✅ (Profile 5/8) | ✅ (if server delivers DV) |
-| Dolby Atmos | ✅ (passthrough) | ✅ (if stream has E-AC3 JOC) |
+| Dolby Atmos | ✅ (E-AC-3 JOC stream-copy; TrueHD Atmos converted to APAC on tvOS 26+ VOD) | ✅ (if stream has E-AC3 JOC) |
 | HDR10 / HLG | ✅ | ✅ |
 | Full-timeline seek | ✅ | ✅ (if not live transcode) |
 | PGS subtitles | ❌ | ❌ |
-| DTS bitstream | ❌ (bridged to FLAC) | ❌ |
-| TrueHD bitstream | ❌ (bridged to FLAC) | ❌ |
+| DTS bitstream / DTS:X heights | ❌ (channel audio uses FLAC/E-AC-3 bridge) | ❌ |
+| TrueHD bitstream | ❌ (eligible Atmos uses APAC; otherwise FLAC/E-AC-3 bridge) | ❌ |
 
 ## AirPlay 2 / HomePod Audio Recovery
 

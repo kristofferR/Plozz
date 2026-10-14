@@ -8,6 +8,7 @@ final class PlozzigenLiveOutputTests: XCTestCase {
             let url = try XCTUnwrap(URL(string: "http://127.0.0.1/opaque.\(suffix)"))
             let options = PlozzigenVideoEngine.liveLoadOptions(httpHeaders: [:], url: url)
             XCTAssertTrue(options.isLive)
+            XCTAssertEqual(options.objectAudioRendering, .off)
             XCTAssertFalse(options.nativeRemoteHLS, suffix)
             XCTAssertEqual(options.liveJoinProfile, .fastZap, suffix)
         }
@@ -15,6 +16,7 @@ final class PlozzigenLiveOutputTests: XCTestCase {
             let url = try XCTUnwrap(URL(string: "http://127.0.0.1/\(path)"))
             let options = PlozzigenVideoEngine.liveLoadOptions(httpHeaders: [:], url: url)
             XCTAssertTrue(options.nativeRemoteHLS)
+            XCTAssertEqual(options.objectAudioRendering, .off)
             XCTAssertEqual(options.liveJoinProfile, .standard)
         }
     }

@@ -208,7 +208,7 @@ private struct SiloPairingCard: View {
                 SiloPairingInstructions(
                     code: code, verificationURL: verificationURL, expiresAt: expiresAt, lifetime: lifetime
                 ) {
-                    SiloMatchPhrase(match: match)
+                    SiloMatchPhrase(match: code)
                 }
                 .padding(.horizontal, 36)
                 .padding(.vertical, 32)
@@ -242,7 +242,7 @@ private struct SiloPairingCard: View {
                         .foregroundStyle(.red)
                         .multilineTextAlignment(.center)
                 }
-                SiloMatchPhrase(match: match)
+                SiloMatchPhrase(match: code)
                 DisclosureGroup("Use another device") {
                     VStack(spacing: 24) {
                         SiloPairingQRCode(url: approvalURL, size: 220)

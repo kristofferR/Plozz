@@ -4,6 +4,11 @@ Thanks for your interest in Plozz — a free, open source client for Jellyfin,
 Plex, Emby, Silo, and local shares, on Apple TV, iPhone, and iPad. It's a small,
 solo-maintained project, so this guide stays lightweight.
 
+Agent-assisted contributions are welcome. Read the repository's
+[agent guidance](../AGENTS.md) for implementation, verification, and safety
+expectations. You remain responsible for reviewing and understanding the changes
+you submit; no particular assistant or model is required.
+
 ## Reporting bugs & requesting features
 
 Everything starts with an issue. [**Open one**](https://github.com/thatcube/Plozz/issues/new/choose)
@@ -27,15 +32,30 @@ limits](../docs/discord-bridge.md); ordinary chat channels are not mirrored.
 ## Development pipeline
 
 The habit here: when a **real** bug turns up — a genuine defect, not a flaky
-test — file a bug-report issue first, then fix it and reference the issue in your
-commit or PR (e.g. `Fixes #123`). That keeps a searchable trail of what broke and
-why. Keep it lightweight, but do file the issue.
+test — file a bug-report issue first, then fix it. Keep it lightweight, but do
+file the issue.
+
+### Commit issue references
+
+When work addresses a GitHub issue, include its reference in the fixing commit's
+subject or body before committing. Use `Refs #123` for an issue in the same
+repository, or `Refs owner/repo#123` when the fix lives in another repository.
+Plain text such as `issue 123` is not a GitHub issue reference.
+
+The pushed commit should create GitHub's built-in "added a commit that references
+this issue" timeline entry. A PR reference alone is not a substitute. Do not post
+a separate issue comment just to link the commit.
+
+Use `Fixes #123` (or the fully qualified equivalent) only when the commit fully
+resolves the issue and automatic closure on landing in the default branch is
+intended. Otherwise use the non-closing `Refs` form.
 
 ## Building & running
 
 ### Requirements
 
-- macOS with **Xcode 16+** (tvOS 18.0 deployment target)
+- macOS with the Xcode/SDK configuration supported by [CI](workflows/ci.yml)
+  (currently Xcode 26.2). The app deployment targets are iOS 18.0 and tvOS 18.0.
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen): `brew install xcodegen`
 
 ### Generate the project and run
@@ -82,8 +102,10 @@ servers — see [`docs/per-branch-builds.md`](../docs/per-branch-builds.md).
 tools/run-tests.sh [SchemeName]
 ```
 
-Tests run on a tvOS Simulator. **`swift test` is not usable here** — the
-playback engine's frameworks are tvOS-only.
+Tests run on a tvOS Simulator. Use the repository's Apple-platform test runners,
+not desktop `swift test`: the package depends on platform frameworks and UIKit.
+See the [testing policy](../docs/testing-policy.md) for affected-suite selection,
+separate app-hosted coverage, and evidence reuse.
 
 ### Screenshots
 
@@ -128,12 +150,12 @@ fastlane build --env fastlane   # archive a signed .ipa locally, no upload
 PLOZZ_RELEASE_ID=release/NNN fastlane release --env fastlane
 ```
 
-**Versioning:** the marketing version is CalVer (`YYYY.M.D`), or an explicit
-`PLOZZ_MARKETING_VERSION`. The build number is one greater than the highest
-TestFlight build across both platforms. Both are fixed before archiving.
-Distribution requires the selected `App/Resources/ReleaseNotes.json` entry to
-match that version and build. Obtain approval for the exact rendered notes and
-candidate before running a distribution lane.
+**Versioning:** [release identity and delivery](../docs/release-versioning.md)
+defines the public date, the separate Apple marketing version, and the selected
+build number (including dotted hotfix builds). The committed
+`App/Resources/ReleaseNotes.json` entry owns that identity. Obtain approval for
+the exact rendered platform notes and candidate before running a distribution
+lane.
 
 **Package resolution:** Fastlane's supported `build_app` options carry the same
 package paths and locked-version policy through dependency resolution, build

@@ -147,19 +147,24 @@ public final class NavigationStyleSettingsModel {
     }
 
     /// The editable enabled/hidden split for the Settings reorder control.
-    public func librarySections(available: [String]) -> OrderedVisibilityList.Sections<String> {
-        resolvedLibraryLayout.sections(available: available, requiredEnabled: requiredNavigationKeys)
+    public func librarySections(
+        available: [String], automaticallyHiddenKeys additionalHiddenKeys: Set<String> = []
+    ) -> OrderedVisibilityList.Sections<String> {
+        libraryLayout.resolvingAutomaticVisibility(
+            hidden: automaticallyHiddenKeys.union(additionalHiddenKeys)
+        ).sections(available: available, requiredEnabled: requiredNavigationKeys)
     }
 
     /// Applies an edit from the reorder control and persists it.
     public func applyLibrarySections(
         _ sections: OrderedVisibilityList.Sections<String>,
-        available: [String]
+        available: [String],
+        automaticallyHiddenKeys additionalHiddenKeys: Set<String> = []
     ) {
         var next = libraryLayout
         next.apply(
             sections, available: available, requiredEnabled: requiredNavigationKeys,
-            automaticallyHiddenKeys: automaticallyHiddenKeys
+            automaticallyHiddenKeys: automaticallyHiddenKeys.union(additionalHiddenKeys)
         )
         guard next != libraryLayout else { return }
         libraryLayout = next

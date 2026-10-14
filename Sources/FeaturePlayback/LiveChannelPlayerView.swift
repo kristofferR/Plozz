@@ -2515,6 +2515,8 @@ enum LiveChannelPlaybackFailure: Equatable {
             "The channel provider could not find this stream. Its playlist link may be outdated, or the feed may be temporarily off air."
         case .unauthorized, .invalidCredentials:
             "The channel provider refused access to this stream. It may require authorization or be unavailable in your region."
+        case .accessRestricted:
+            error.userMessage
         case .serverUnreachable:
             "Plozz could not reach the channel's streaming server. Check your internet connection or try again later."
         case .rateLimited:

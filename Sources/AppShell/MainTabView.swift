@@ -99,6 +99,30 @@ private struct RootNavigationTabLabel: View {
     }
 }
 
+struct NativeTopBarNavigation: View {
+    let destinations: [NavigationRailDestination]
+    @Binding var selection: NavigationRailDestination
+    let preventsAccidentalExit: Bool
+    let content: (NavigationRailDestination, Bool) -> AnyView
+    let label: (NavigationRailDestination) -> AnyView
+
+    var body: some View {
+        let current = selection
+        TabView(selection: $selection) {
+            ForEach(destinations, id: \.storageValue) { destination in
+                Tab(value: destination) {
+                    AnyView(content(destination, current == destination)
+                        .tvNavigationExitProtectionContent())
+                } label: {
+                    label(destination)
+                }
+            }
+        }
+        .tabViewStyle(.tabBarOnly)
+        .tvNavigationExitProtection(isEnabled: preventsAccidentalExit)
+    }
+}
+
 struct MainTabView: View {
     /// Stable identifiers for the root tabs, used to persist and restore the
     /// selected tab across MainTabView being rebuilt (see `selectedTab`).
@@ -128,7 +152,7 @@ struct MainTabView: View {
             case .settings: return activeLibraryNavigationDestination == .settings
             }
         }
-        return resolvedSelectedTab == tab
+        return mainTab(for: resolvedSelectedTab) == tab
     }
 
     private enum MainTab: String {
@@ -171,7 +195,7 @@ struct MainTabView: View {
 
     private var liveTVTabLabel: some View {
         RootNavigationTabLabel(
-            title: Text("Live TV (Experimental)"),
+            title: Text("Live TV"),
             systemImage: "antenna.radiowaves.left.and.right",
             usesCompactSidebarText: navigationStyle == .sidebar
         )
@@ -483,8 +507,7 @@ struct MainTabView: View {
     /// the onboarding chooser, and on return we want to land back on the tab the
     /// user left from (usually Settings), not reset to Home.
     @SceneStorage("mainTab.selection") private var selectedTabRaw = MainTab.home.rawValue
-    /// The rail's selected destination, persisted separately from the TabView's so
-    /// switching chrome never lands on a destination the other style can't show.
+    /// Each chrome retains its selected destination across style changes.
     @SceneStorage("navigationRail.selection")
     private var railSelectionRaw = NavigationRailDestination.home.storageValue
     @SceneStorage("mainTab.processLaunch") private var recordedProcessLaunch = ""
@@ -522,7 +545,7 @@ struct MainTabView: View {
     /// pushes do not invalidate this large shell body.
     @State private var settingsNavigation = SettingsNavigationModel()
 
-    private var selectedTab: Binding<MainTab> {
+    private var selectedTab: Binding<NavigationRailDestination> {
         Binding(
             get: { resolvedSelectedTab },
             // Top-bar selection is deliberately separate. A viewer can leave a
@@ -530,39 +553,37 @@ struct MainTabView: View {
             // without that library destination being erased.
             set: {
                 hasChosenNavigationDestination = true
-                HandoffDiagnostics.emit("NAVIGATION event=topTabSelection previous=\(resolvedSelectedTab.rawValue) requested=\($0.rawValue)")
+                HandoffDiagnostics.emit("NAVIGATION event=topTabSelection previous=\(resolvedSelectedTab.storageValue) requested=\($0.storageValue)")
                 recordedProcessLaunch = Self.processLaunch
-                releaseExplicitLiveTVEntry(ifLeavingFor: destination(for: $0))
-                selectedTabRaw = resolvedTopBarTab($0).rawValue
+                releaseExplicitLiveTVEntry(ifLeavingFor: $0)
+                selectedTabRaw = resolvedTopBarTab($0).storageValue
             }
         )
     }
 
-    private var resolvedSelectedTab: MainTab {
-        let stored = mainTab(for: Self.launchDestination(
-            stored: destination(for: MainTab(rawValue: selectedTabRaw) ?? .home),
+    private var resolvedSelectedTab: NavigationRailDestination {
+        let stored = Self.launchDestination(
+            stored: NavigationRailDestination(storageValue: selectedTabRaw) ?? .home,
             recordedProcess: recordedProcessLaunch, currentProcess: Self.processLaunch
-        ))
+        )
         if let startup = standaloneStartupDestination(
-            current: destination(for: stored),
+            current: stored,
             destinations: topBarDestinations
         ) {
-            return mainTab(for: startup)
+            return startup
         }
         return resolvedTopBarTab(stored)
     }
 
-    private func resolvedTopBarTab(_ tab: MainTab) -> MainTab {
-        mainTab(
-            for: NavigationRailPlan.resolvedSelection(
-                destination(for: tab),
-                destinations: topBarDestinations
-            )
+    private func resolvedTopBarTab(_ tab: NavigationRailDestination) -> NavigationRailDestination {
+        NavigationRailPlan.resolvedSelection(
+            tab, destinations: topBarDestinations
         )
     }
 
     private func persistPrunedTopBarSelection() {
-        let resolved = resolvedSelectedTab.rawValue
+        guard railLibrariesLoaded else { return }
+        let resolved = resolvedSelectedTab.storageValue
         if selectedTabRaw != resolved {
             selectedTabRaw = resolved
         }
@@ -614,7 +635,7 @@ struct MainTabView: View {
         let tab = resolvedSelectedTab
         let rail = activeLibraryNavigationDestination
         retainsExplicitLiveTVEntry = pendingStandaloneLiveTVEntry
-        selectedTabRaw = tab.rawValue
+        selectedTabRaw = tab.storageValue
         railSelectionRaw = rail.storageValue
         libraryNavigationEntryOverride = nil
         hasResolvedStandaloneStartup = true
@@ -687,7 +708,7 @@ struct MainTabView: View {
                 releaseExplicitLiveTVEntry(ifLeavingFor: destination)
                 libraryNavigationEntryOverride = nil
                 railSelectionRaw = destination.storageValue
-                selectedTabRaw = mainTab(for: destination).rawValue
+                selectedTabRaw = destination.storageValue
             }
         )
     }
@@ -712,8 +733,8 @@ struct MainTabView: View {
         )
     }
 
-    /// Top-bar equivalent of a library-aware destination. Library roots map to
-    /// Home because the compact top bar intentionally has no library tabs.
+    /// The feature stack owning a destination. Each library is Home-backed, but
+    /// keeps its own selection identity in every navigation style.
     private func mainTab(for destination: NavigationRailDestination) -> MainTab {
         switch destination {
         case .home, .library, .allLibraries: return .home
@@ -771,7 +792,7 @@ struct MainTabView: View {
         // the viewer's remembered library selection on a Top Shelf launch.
         guard !isActiveTab(.home) else { return }
         if navigationStyle == .tabBar {
-            selectedTabRaw = resolvedTopBarTab(.home).rawValue
+            selectedTabRaw = resolvedTopBarTab(.home).storageValue
         } else {
             libraryNavigationSelection.wrappedValue = NavigationRailPlan.resolvedSelection(
                 .home,
@@ -858,6 +879,14 @@ struct MainTabView: View {
         )
     }
 
+    private var topBarNavigationLayout: NavigationLibraryLayout {
+        effectiveNavigationLayout.resolvingAutomaticVisibility(
+            hidden: NavigationRailPlan.automaticallyHiddenLibraryKeys(
+                visibleLibraries: availableRailLibraries, style: .tabBar
+            )
+        )
+    }
+
     private func refreshWatchlistNavigation() {
         if let hasItems = watchlistHasItems() {
             navigationStyleModel.hasWatchlistItems = hasItems
@@ -889,8 +918,8 @@ struct MainTabView: View {
     private var topBarDestinations: [NavigationRailDestination] {
         includingExplicitLiveTVEntry(NavigationRailPlan.destinations(
             visibleLibraries: availableRailLibraries,
-            layout: effectiveNavigationLayout,
-            availableKeys: compactDestinationKeys
+            layout: topBarNavigationLayout,
+            availableKeys: sidebarDestinationKeys
         ))
     }
 
@@ -911,11 +940,11 @@ struct MainTabView: View {
     }
 
     private var activeNavigationDestinations: [NavigationRailDestination] {
-        navigationStyle == .sidebar ? sidebarDestinations : customRailDestinations
-    }
-
-    private var compactDestinationKeys: [String] {
-        NavigationDestinationDefaults.compact(hasMusic: musicAvailability.hasMusic)
+        switch navigationStyle {
+        case .tabBar: topBarDestinations
+        case .sidebar: sidebarDestinations
+        case .rail: customRailDestinations
+        }
     }
 
     private var sidebarDestinationKeys: [String] {
@@ -1242,7 +1271,7 @@ struct MainTabView: View {
     /// copy of those rules.
     private var activeDestinationKey: String {
         navigationStyle == .tabBar
-            ? resolvedSelectedTab.rawValue
+            ? resolvedSelectedTab.storageValue
             : activeLibraryNavigationDestination.storageValue
     }
 
@@ -1275,15 +1304,21 @@ struct MainTabView: View {
         navigationChrome.setStackDepth(expanded ? 1 : 0)
     }
 
-    private func topBarDestinationContent(
+    private func nativeDestinationContent(
         _ destination: NavigationRailDestination,
-        isActive: Bool
+        isActive: Bool,
+        libraryEntry: NavigationRailLibraryEntry?,
+        libraries: [AggregatedLibrary]
     ) -> AnyView {
         switch destination {
         case .home:
-            return AnyView(homeTabContent(isActive: isActive))
+            return AnyView(
+                homeTabContent(isActive: isActive)
+            )
         case .watchlist:
-            return AnyView(watchlistTabContent(isActive: isActive))
+            return AnyView(watchlistTabContent(
+                isActive: isActive
+            ))
         case .liveTV:
             return AnyView(LiveTVShellDestination(
                 isActive: isActive,
@@ -1305,51 +1340,11 @@ struct MainTabView: View {
         case .settings:
             return AnyView(settingsTabContent)
         case .allLibraries, .library:
-            return AnyView(homeTabContent(isActive: isActive))
-        }
-    }
-
-    private func sidebarDestinationContent(
-        _ destination: NavigationRailDestination,
-        selection: NavigationRailDestination,
-        libraryEntry: NavigationRailLibraryEntry?,
-        libraries: [AggregatedLibrary]
-    ) -> AnyView {
-        switch destination {
-        case .home:
-            return AnyView(
-                homeTabContent(isActive: selection == .home)
-            )
-        case .watchlist:
-            return AnyView(watchlistTabContent(
-                isActive: selection == .watchlist
-            ))
-        case .liveTV:
-            return AnyView(LiveTVShellDestination(
-                isActive: selection == .liveTV,
-                profileID: activeProfile.id,
-                preferencesNamespace: liveTVPreferencesNamespace,
-                accountsProviders: accountsProviders,
-                authenticatedHTTPResolver: authenticatedHTTPResolver,
-                connectServer: onAddAccount,
-                didConfigurePlaylist: onConfiguredIPTVPlaylist,
-                completeLibraryChannelPlayback: completeLibraryChannelPlayback,
-                isProfileAuthorized: isLiveTVProfileAuthorized,
-                usesNativeNavigation: true,
-                onOpenTitle: openTitleFromLiveTV
-            ))
-        case .search:
-            return AnyView(searchTabContent(isActive: selection == .search))
-        case .music:
-            return AnyView(musicTabContent)
-        case .settings:
-            return AnyView(settingsTabContent)
-        case .allLibraries, .library:
             guard let libraryEntry else {
-                return AnyView(homeTabContent(isActive: selection == destination))
+                return AnyView(homeTabContent(isActive: isActive))
             }
             return AnyView(libraryDestination(
-                libraryEntry, isActive: selection == destination, libraries: libraries
+                libraryEntry, isActive: isActive, libraries: libraries
             ))
         }
     }
@@ -1375,27 +1370,42 @@ struct MainTabView: View {
             guard let libraryEntry else {
                 return AnyView(EmptyView())
             }
-            return AnyView(Self.navigationLibraryLabel(libraryEntry))
+            return AnyView(Self.navigationLibraryLabel(
+                libraryEntry, usesCompactSidebarText: navigationStyle == .sidebar
+            ))
         }
     }
 
-    /// Native top bar keeps a compact set of destinations rather than expanding
-    /// every library across the top.
+    /// Capture the same library plan used by the sidebar before lazy tab content
+    /// is evaluated. Horizontal library shortcuts are explicitly opted in.
     private var nativeTopBarShell: some View {
-        let selection = resolvedSelectedTab
-        return TabView(selection: selectedTab) {
-            ForEach(topBarDestinations, id: \.storageValue) { destination in
-                Tab(value: mainTab(for: destination)) {
-                    AnyView(topBarDestinationContent(
-                        destination, isActive: selection == mainTab(for: destination)
-                    ).tvNavigationExitProtectionContent())
-                } label: {
-                    rootNavigationLabel(for: destination)
-                }
+        let libraries = availableRailLibraries
+        let entries = NavigationRailPlan.entries(
+            visibleLibraries: libraries, layout: topBarNavigationLayout,
+            offlineAccountIDs: navigationStyleModel.offlineAccountIDs
+                .union(shareScanStatusModel.offlineShareIDs)
+        )
+        let entriesByDestination = Dictionary(
+            uniqueKeysWithValues: entries.map { ($0.destination, $0) }
+        )
+        let browsableLibraries = NavigationRailPlan.browsableLibraries(libraries)
+        return NativeTopBarNavigation(
+            destinations: topBarDestinations,
+            selection: selectedTab,
+            preventsAccidentalExit: navigationStyleModel.preventsAccidentalExit,
+            content: { destination, isActive in
+                nativeDestinationContent(
+                    destination, isActive: isActive,
+                    libraryEntry: entriesByDestination[destination],
+                    libraries: browsableLibraries
+                )
+            },
+            label: { destination in
+                rootNavigationLabel(
+                    for: destination, libraryEntry: entriesByDestination[destination]
+                )
             }
-        }
-        .tabViewStyle(.tabBarOnly)
-        .tvNavigationExitProtection(isEnabled: navigationStyleModel.preventsAccidentalExit)
+        )
     }
 
     /// Native tvOS sidebar. Uses the same ordered/hidden library plan as custom
@@ -1445,9 +1455,9 @@ struct MainTabView: View {
                         destination: destination,
                         selection: selection,
                         handoff: nativeSidebarFocus,
-                        content: sidebarDestinationContent(
+                        content: nativeDestinationContent(
                             destination,
-                            selection: selection,
+                            isActive: selection == destination,
                             libraryEntry: entriesByDestination[destination],
                             libraries: browsableLibraries
                         )
@@ -1574,7 +1584,7 @@ struct MainTabView: View {
         )
     }
 
-    /// One library root shared by custom rail and native sidebar.
+    /// One library root shared by all navigation styles.
     @ViewBuilder
     private func libraryDestination(
         _ entry: NavigationRailLibraryEntry,
@@ -1587,7 +1597,7 @@ struct MainTabView: View {
                 // A cross-server library's source set can change under a stable key.
                 id: "\(homeScopeKey)|\(entry.key)|"
                     + librarySourceSignature(library.library),
-                // Native sidebar owns one HomeTab per library Tab. Only the visible
+                // Native navigation owns one HomeTab per library Tab. Only the visible
                 // one may consume pending player routes; custom rail renders exactly
                 // one destination, so it is always active.
                 isActive: isActive
@@ -1604,20 +1614,20 @@ struct MainTabView: View {
         }
     }
 
-    /// Native sidebar label for a real or synthetic library destination.
+    /// Native navigation label for a real or synthetic library destination.
     static func navigationLibraryLabel(
-        _ entry: NavigationRailLibraryEntry
+        _ entry: NavigationRailLibraryEntry,
+        usesCompactSidebarText: Bool = true
     ) -> some View {
         let title = entry.library?.library.displayName ?? Text(AllLibrariesBrowse.title)
         let symbol = entry.library?.library.navigationSymbolName
             ?? "square.stack.3d.up.fill"
         // Native tabs extract one title; sibling Text views are discarded.
         let label = entry.isOffline ? title + Text(verbatim: " · ") + Text("Offline") : title
-        return Label {
-            label.font(.system(size: 26, weight: .regular))
-        } icon: {
-            Image(systemName: symbol)
-        }
+        return RootNavigationTabLabel(
+            title: label, systemImage: symbol,
+            usesCompactSidebarText: usesCompactSidebarText
+        )
     }
 
     private var contentAwareShell: some View {
@@ -1652,7 +1662,7 @@ struct MainTabView: View {
             hasPendingLiveTVEntry: pendingStandaloneLiveTVEntry,
             prefersLiveTV: navigationAvailability.prefersLiveTV
         )
-        selectedTabRaw = mainTab(for: initial).rawValue
+        selectedTabRaw = initial.storageValue
         railSelectionRaw = initial.storageValue
         libraryNavigationEntryOverride = nil
     }
@@ -1715,7 +1725,7 @@ struct MainTabView: View {
                 onSelect: { name in
                     guard let tab = MainTab(rawValue: name) else { return }
                     if navigationStyle == .tabBar {
-                        selectedTab.wrappedValue = tab
+                        selectedTab.wrappedValue = destination(for: tab)
                     } else {
                         // Sidebar and custom rail are driven by library navigation
                         // selection, not `selectedTabRaw`. Capture routing must use
@@ -1743,7 +1753,7 @@ struct MainTabView: View {
                 // visible in top bar into the new leading-edge shell, but do not
                 // overwrite a separately remembered library destination.
                 let tab = resolvedSelectedTab
-                libraryNavigationEntryOverride = destination(for: tab)
+                libraryNavigationEntryOverride = tab
             } else if current == .tabBar {
                 libraryNavigationEntryOverride = nil
                 persistPrunedTopBarSelection()
@@ -1757,8 +1767,11 @@ struct MainTabView: View {
         // so a stored library already resolves to Home; when discovery completes
         // without it, the resolved value is Home before and after — no value edge.
         .onChange(of: railLibrariesLoaded) { _, _ in
-            guard navigationStyle != .tabBar else { return }
-            persistPrunedRailSelection()
+            if navigationStyle == .tabBar {
+                persistPrunedTopBarSelection()
+            } else {
+                persistPrunedRailSelection()
+            }
         }
         .onChange(of: activeDestinationKey, initial: true) { _, destination in
             if let selected = NavigationRailDestination(storageValue: destination) {

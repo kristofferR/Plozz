@@ -3,6 +3,8 @@ import Foundation
 /// Optional capability of an authenticated media provider. Discovery never
 /// opens a tuner; playback is a separate, explicitly owned operation.
 public protocol ServerLiveTVProviding: Sendable {
+    /// Read an already committed lineup without authentication, refresh, guide requests, or tuning.
+    func cachedLiveTVCatalog() async throws -> ServerLiveTVCatalogSnapshot?
     func liveTVAvailability() async throws -> ServerLiveTVAvailability
     /// Explicit source refreshes must not reuse an adapter's still-fresh channel catalog.
     func refreshLiveTVAvailability() async throws -> ServerLiveTVAvailability
@@ -19,8 +21,20 @@ public protocol ServerLiveTVProviding: Sendable {
 }
 
 public extension ServerLiveTVProviding {
+    func cachedLiveTVCatalog() async throws -> ServerLiveTVCatalogSnapshot? { nil }
+
     func refreshLiveTVAvailability() async throws -> ServerLiveTVAvailability {
         try await liveTVAvailability()
+    }
+}
+
+public struct ServerLiveTVCatalogSnapshot: Sendable {
+    public let channels: [ServerLiveTVChannel]
+    public let supportsGuide: Bool
+
+    public init(channels: [ServerLiveTVChannel], supportsGuide: Bool) {
+        self.channels = channels
+        self.supportsGuide = supportsGuide
     }
 }
 

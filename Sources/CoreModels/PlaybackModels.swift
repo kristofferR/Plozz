@@ -370,6 +370,9 @@ public struct PlaybackRequest: Hashable, Sendable {
     /// express no preference (engine uses the container default). Not part of the
     /// memberwise init so the many provider construction sites stay untouched.
     public var preferredAudioLanguages: [String] = []
+    /// Profile preference attached by the player, not inferred from provider metadata.
+    /// Unsupported platforms and playback paths ignore this request.
+    public var trueHDAtmosEnabled: Bool = PlaybackSettings.default.trueHDAtmosEnabled
     /// Explicit provider/container stream index used only when a resolved
     /// language cannot match because every audio track is untagged. Language
     /// matching remains authoritative whenever tags exist; this deterministic

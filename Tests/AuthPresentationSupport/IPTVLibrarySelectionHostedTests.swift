@@ -5,6 +5,7 @@ import CoreUI
 import FeatureAuthCore
 import FeatureLiveTV
 import FeatureLiveTVCore
+import Observation
 import SwiftUI
 import UIKit
 import Vision
@@ -17,6 +18,105 @@ import XCTest
 
 @MainActor
 final class IPTVLibrarySelectionHostedTests: XCTestCase {
+    func testLiveTVEnrollsIPTVWhenProfileAuthorizationReturns() async throws {
+        try await exerciseLiveTVAuthorizationRecovery(interruptEnrollment: false)
+    }
+
+    func testLiveTVRestartsEnrollmentInterruptedByProfileAuthorization() async throws {
+        try await exerciseLiveTVAuthorizationRecovery(interruptEnrollment: true)
+    }
+
+    func testLiveTVRestoresSavedIPTVWhenProfileAuthorizationReturns() async throws {
+        try await exerciseLiveTVAuthorizationRecovery(interruptEnrollment: false, restoringSavedSource: true)
+    }
+
+    private func exerciseLiveTVAuthorizationRecovery(
+        interruptEnrollment: Bool, restoringSavedSource: Bool = false
+    ) async throws {
+        let suite = "IPTVAuthorizationRecovery.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let profile = Profile(id: suite, name: "IPTV viewer")
+        let store = LiveTVSourcesStore(secureStore: InMemorySecureStore(), namespace: suite)
+        if restoringSavedSource {
+            try store.save(.init(servers: [.init(id: "saved", name: "Saved IPTV", accountID: "iptv")]))
+        }
+        let saved = try store.load()
+        let provider = HostedIPTVSourceProvider(channelCount: 1)
+        let admission = LiveTVCatalogAdmission(isAuthorized: interruptEnrollment)
+        let resolver: LiveTVServerProviderResolver = { id in
+            guard admission.isAuthorized, id == "iptv" else { return nil }
+            return .init(accountID: id, authorizationID: "fixture", kind: .iptv, provider: provider)
+        }
+        let imports = LiveTVPrototypeImportModel(
+            configuration: .empty, loader: HostedIPTVSourceLoader(), serverProviderResolver: resolver
+        )
+        let controller = UIHostingController(rootView:
+            LiveTVPrototypeView(
+                preferencesStore: LiveTVPreferencesStore(defaults: defaults, namespace: suite),
+                sourceStore: store,
+                serverProviderResolver: resolver,
+                isProfileAuthorized: { admission.isAuthorized },
+                serverChoices: [.init(id: "iptv", name: "Saved IPTV", userName: "IPTV", kind: .iptv)],
+                serverAuthorizationID: "fixture",
+                allowsPlayback: false,
+                importModel: imports,
+                profileID: profile.id,
+                preferencesNamespace: suite,
+                sourceApprovalContext: {
+                    .init(profile: profile, parentalPIN: nil, activeAccountIDs: ["iptv"])
+                }
+            ) { _ in Color.black }
+                .environment(\.themePalette, ThemePalette.dark)
+                .environment(\.scenePhase, .active)
+        )
+        let sceneDeadline = ContinuousClock.now + .seconds(5)
+        while !UIApplication.shared.connectedScenes.contains(where: { $0.activationState == .foregroundActive }),
+              ContinuousClock.now < sceneDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKeyAndVisible()
+            defaults.removePersistentDomain(forName: suite)
+        }
+        addTeardownBlock { await provider.release() }
+        if interruptEnrollment {
+            let deadline = ContinuousClock.now + .seconds(5)
+            while !(await provider.requested), ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            let requested = await provider.requested
+            XCTAssertTrue(requested)
+            admission.isAuthorized = false
+        }
+        try await Task.sleep(for: .milliseconds(150))
+        await provider.release()
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(try store.load(), saved, "A blocked profile must not enroll or remove sources.")
+        if !interruptEnrollment {
+            let requested = await provider.requested
+            XCTAssertFalse(requested, "Enrollment must wait for profile authorization.")
+        }
+
+        admission.isAuthorized = true
+        let deadline = ContinuousClock.now + .seconds(5)
+        while imports.serverSources.first?.channelCount != 1, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(try store.load().servers.map(\.accountID), ["iptv"],
+                       "Returning from setup must enroll the saved account without reopening Live TV.")
+        XCTAssertEqual(imports.serverSources.first?.channelCount, 1)
+        XCTAssertNil(imports.serverSources.first?.failure)
+    }
+
     #if os(tvOS)
     func testAccountSetupKeepsTheSourcesNavigationMounted() async throws {
         let suite = "IPTVSetupNavigationHostedTests.\(UUID().uuidString)"
@@ -316,9 +416,17 @@ private actor HostedIPTVSourceProvider: ServerLiveTVProviding {
         continuation = nil
     }
 
-    func liveTVChannels() async throws -> [ServerLiveTVChannel] { [] }
+    func liveTVChannels() async throws -> [ServerLiveTVChannel] {
+        (0..<channelCount).map { .init(id: "channel-\($0)", name: "IPTV channel \($0)") }
+    }
     func liveTVGuide(channelIDs: [String], from: Date, to: Date) async throws -> [ServerLiveTVProgramme] { [] }
     func openLiveTVChannel(id: String) async throws -> any LiveTVStreamLease { throw ServerLiveTVError.tunerUnavailable }
+}
+
+@MainActor @Observable
+private final class LiveTVCatalogAdmission {
+    var isAuthorized: Bool
+    init(isAuthorized: Bool) { self.isAuthorized = isAuthorized }
 }
 
 private struct HostedIPTVSourceLoader: LiveTVSourceLoading {

@@ -213,6 +213,8 @@ final class NativeLibraryGridController: UIViewController, UICollectionViewDataS
     private var measuredHeaderHeight: CGFloat = 0
     private var hidesScrollIndicator = false
     private var viewportReport: Task<Void, Never>?
+    private var traversalRecorder: LibraryTraversalRecorder? =
+        ProcessInfo.processInfo.environment["PLOZZ_LIBRARY_TRAVERSAL_RECORDING"] == "1" ? .init() : nil
 
     override var preferredFocusEnvironments: [any UIFocusEnvironment] {
         requestedFocusIndex == nil ? super.preferredFocusEnvironments : [collection]
@@ -240,6 +242,7 @@ final class NativeLibraryGridController: UIViewController, UICollectionViewDataS
             withReuseIdentifier: "header")
         layout.sectionHeadersPinToVisibleBounds = false
         view.addSubview(collection)
+        if traversalRecorder != nil { enableTraversalRecording() }
         addChild(headerHost)
         headerHost.safeAreaRegions = []
         headerHost.view.backgroundColor = .clear
@@ -255,6 +258,11 @@ final class NativeLibraryGridController: UIViewController, UICollectionViewDataS
     ) {
         let reset = self.model !== model || self.generation != generation
         let previousCount = self.total
+        let previousColumns = self.environment.plozzMetrics.libraryPosterColumns.count
+        if traversalRecorder != nil,
+           reset || previousCount != total || previousColumns != environment.plozzMetrics.libraryPosterColumns.count {
+            traversalRecorder = LibraryTraversalRecorder()
+        }
         if !reset, previousCount != total {
             collection.layoutIfNeeded()
         }
@@ -535,7 +543,30 @@ final class NativeLibraryGridController: UIViewController, UICollectionViewDataS
         _ collectionView: UICollectionView, didUpdateFocusIn context: UICollectionViewFocusUpdateContext,
         with coordinator: UIFocusAnimationCoordinator
     ) {
+        let next = context.nextFocusedIndexPath?.item
+        traversalRecorder?.record(
+            from: context.previouslyFocusedIndexPath?.item, to: next,
+            loaded: next.flatMap { model?.item(at: $0) } != nil,
+            uptime: ProcessInfo.processInfo.systemUptime
+        )
         if let path = context.nextFocusedIndexPath { lastFocusedIndex = path }
+    }
+
+    var traversalSnapshot: LibraryTraversalSnapshot? {
+        traversalRecorder?.snapshot(
+            generation: generation, columns: max(1, environment.plozzMetrics.libraryPosterColumns.count),
+            total: total
+        )
+    }
+
+    func enableTraversalRecording() {
+        if traversalRecorder == nil { traversalRecorder = LibraryTraversalRecorder() }
+        loadViewIfNeeded()
+        guard !view.subviews.contains(where: { $0 is NativeLibraryTraversalProbe }) else { return }
+        let probe = NativeLibraryTraversalProbe()
+        probe.frame = CGRect(x: 1, y: 1, width: 1, height: 1)
+        probe.snapshot = { [weak self] in self?.traversalSnapshot }
+        view.addSubview(probe)
     }
 
     func collectionView(_ collectionView: UICollectionView, canFocusItemAt indexPath: IndexPath) -> Bool {

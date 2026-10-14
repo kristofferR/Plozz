@@ -1491,7 +1491,8 @@ public final class PlayerViewModel {
             forceTranscode: forceTranscode,
             plozzigenAvailable: engineFactory.plozzigenAvailable,
             capabilities: capabilities,
-            subtitleRule: effectiveSubtitleRule(for: request.item)
+            subtitleRule: effectiveSubtitleRule(for: request.item),
+            audioRouteIsAirPlay: AirPlayAudioSession.isActiveRoute
         )
     }
 
@@ -1642,6 +1643,8 @@ public final class PlayerViewModel {
         engineKind: PlaybackEngineKind,
         startPosition: TimeInterval
     ) async {
+        var request = request
+        request.trueHDAtmosEnabled = playbackSettings.trueHDAtmosEnabled
         dynamicRangeLoadGeneration &+= 1
         let rangeLoadGeneration = dynamicRangeLoadGeneration
         inheritedPreservedDynamicRange =
@@ -2082,8 +2085,12 @@ public final class PlayerViewModel {
         // This is the one funnel for genuine play/pause intent — record it before
         // anything else so every resume/transport decision has a truthful signal
         // that the engine's transient post-seek pause can't corrupt.
+        let resuming = !paused && !intendsPlayback
         intendsPlayback = !paused
         controls.intendsPause = paused
+        // Pause/play is the way back from an AirPlay speaker that went silent
+        // under a still-"playing" AVPlayer: rebuild its stream while paused.
+        if resuming { AirPlayAudioSession.rebuildStreamBeforeResume() }
         if paused { engine.pause() } else { engine.play() }
         // A user pause means "no progress" is expected — don't let the stall
         // watchdog misfire, and stop any post-seek resume nudging so we don't

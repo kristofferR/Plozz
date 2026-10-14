@@ -217,6 +217,12 @@ final class IPTVCatalog {
     func commitImport(
         library: String?, scope: String, progress: (Int) throws -> Void = { _ in }
     ) throws {
+        let performance = PerformanceDiagnostics.shared.begin(.playlistCommit, provider: .iptv)
+        var outcome = PerformanceDiagnostics.Outcome.failed
+        var copied = 0
+        defer {
+            performance?.finish(Task.isCancelled ? .cancelled : outcome, metrics: .init(rows: copied))
+        }
         try Task.checkCancellation()
         try progress(0)
         try execute("BEGIN IMMEDIATE")
@@ -229,7 +235,6 @@ final class IPTVCatalog {
             }
             // Report completed batches without publishing a partially replaced catalogue.
             var lastRowID: Int64 = 0
-            var copied = 0
             while let nextRowID = try lastImportRow(after: lastRowID) {
                 try Task.checkCancellation()
                 try execute("""
@@ -244,7 +249,9 @@ final class IPTVCatalog {
             try Task.checkCancellation()
             try setState(scope, String(Date().timeIntervalSince1970))
             try execute("COMMIT")
+            outcome = .succeeded
         } catch {
+            outcome = IPTVPerformanceMetrics.outcome(for: error)
             if sqlite3_get_autocommit(db) == 0 {
                 do { try execute("ROLLBACK") }
                 catch { PlozzLog.networking.error("IPTV catalogue rollback failed") }

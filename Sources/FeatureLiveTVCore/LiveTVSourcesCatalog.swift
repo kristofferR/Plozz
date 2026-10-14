@@ -163,6 +163,8 @@ public final class LiveTVSourcesCatalog {
                 await imports.reload(into: catalog)
             } else {
                 await imports.restoreCachedCatalog(into: catalog, now: catalog.now)
+                guard revision == request, !Task.isCancelled else { return }
+                if admission.isCurrent { await imports.restoreCachedServerCatalogs(into: catalog) }
             }
             guard revision == request else { return }
             guard !Task.isCancelled, admission.isCurrent else {

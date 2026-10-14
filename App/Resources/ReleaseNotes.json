@@ -2,6 +2,94 @@
   "schemaVersion": 1,
   "releases": [
     {
+      "id": "release/055.6",
+      "version": "2026.10.14",
+      "marketingVersion": "2026.9.25",
+      "build": "55.6",
+      "releasedAt": "2026-10-14",
+      "sections": [
+        {
+          "category": "Updated",
+          "items": [
+            "Home follows your Silo server's rows and video selections when using Match Server.",
+            "Clearer Silo connection errors and privacy-safe troubleshooting when crash reporting is enabled."
+          ]
+        },
+        {
+          "category": "Fixed",
+          "items": [
+            "Silo sign-in failing when its public address differs from the address you entered.",
+            "Silo approval showing an outdated confirmation phrase or expiring before the server's extended deadline."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "release/055.5",
+      "version": "2026.10.14",
+      "marketingVersion": "2026.9.25",
+      "build": "55.5",
+      "releasedAt": "2026-10-14",
+      "sections": [
+        {
+          "category": "Updated",
+          "items": [
+            {
+              "text": "Smoother Browse scrolling while posters load.",
+              "platforms": ["tvOS"]
+            },
+            "Less repeated artwork loading on devices with more memory.",
+            "Fewer blank posters when scrolling back through Browse."
+          ]
+        },
+        {
+          "category": "Fixed",
+          "items": [
+            "Some videos losing audio through HomePod or other AirPlay speakers.",
+            "Seeking causing stuttering or leaving videos paused when using AirPlay speakers.",
+            "Live TV channels not loading after setup or unlocking a profile.",
+            {
+              "text": "Profile button appearing too wide or missing its picture when using the iPad app on Mac.",
+              "platforms": ["iOS"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "release/055",
+      "version": "2026.10.13",
+      "marketingVersion": "2026.9.25",
+      "build": 55,
+      "releasedAt": "2026-10-13",
+      "sections": [
+        {
+          "category": "New",
+          "items": [
+            {
+              "text": "TrueHD Atmos overhead audio on compatible equipment with tvOS 26 or later, enabled by default in Settings > Playback.",
+              "platforms": ["tvOS"]
+            }
+          ]
+        },
+        {
+          "category": "Updated",
+          "items": [
+            "Clearer messages when an IPTV provider blocks access.",
+            "More useful diagnostics for investigating slow Home loading and Live TV sync, when crash reporting is enabled."
+          ]
+        },
+        {
+          "category": "Fixed",
+          "items": [
+            "IPTV accounts showing \"Ready to load\" in Live TV settings after channels were already imported.",
+            "Duplicate and lingering IPTV connections that could prevent channels from playing.",
+            "Live TV provider access errors being mistaken for a profile permission problem."
+          ]
+        }
+      ]
+    },
+    {
       "id": "release/054.1",
       "version": "2026.10.13",
       "marketingVersion": "2026.9.25",

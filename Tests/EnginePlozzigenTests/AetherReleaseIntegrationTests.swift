@@ -1,5 +1,6 @@
 import AetherEngine
 import CoreModels
+import FeaturePlayback
 import XCTest
 @testable import EnginePlozzigen
 
@@ -18,10 +19,55 @@ final class AetherReleaseIntegrationTests: XCTestCase {
         XCTAssertNotEqual(engineBundle.bundleURL, Bundle.main.bundleURL)
     }
 
-    func testNewReleaseFeaturesRemainOptIn() {
+    func testUpstreamDefaultsRemainOptIn() {
         let options = LoadOptions()
         XCTAssertEqual(options.objectAudioRendering, .off)
         XCTAssertFalse(options.progressiveSegmentDelivery)
+    }
+
+    func testPlozzAutomaticallyRequestsSpatialAudioOnSupportedTVOS() {
+        for channels in [0, 2, 6, 8] {
+            let options = PlozzigenVideoEngine.onDemandLoadOptions(audioChannels: channels)
+            #if os(tvOS)
+            if #available(tvOS 26.0, *) {
+                XCTAssertEqual(options.objectAudioRendering, .apac(.l714))
+            } else {
+                XCTAssertEqual(options.objectAudioRendering, .off)
+            }
+            #else
+            XCTAssertEqual(options.objectAudioRendering, .off)
+            #endif
+            XCTAssertEqual(options.audioBridgeMode, channels > 6 ? .lossless : .surroundCompat)
+            XCTAssertTrue(options.matchContentEnabled)
+            XCTAssertFalse(options.isLive)
+            XCTAssertFalse(options.progressiveSegmentDelivery)
+        }
+    }
+
+    func testSharedLivePlayersAndMutedPreviewsKeepTheOrdinaryAudioBridge() {
+        for policy in [
+            LiveChannelOutputPolicy(isAudible: false),
+            .init(isAudible: true, sharesAudioSession: true),
+            .init(isAudible: false, sharesAudioSession: true, suppressesDisplayMatching: true)
+        ] {
+            let options = PlozzigenVideoEngine.onDemandLoadOptions(audioChannels: 8, outputPolicy: policy)
+            XCTAssertEqual(options.objectAudioRendering, .off)
+            XCTAssertEqual(options.audioBridgeMode, .lossless)
+            XCTAssertEqual(options.suppressDisplayCriteria, policy.suppressesDisplayMatching)
+            XCTAssertEqual(options.matchContentEnabled, !policy.suppressesDisplayMatching)
+        }
+    }
+
+    func testDisablingTrueHDAtmosKeepsTheExistingChannelBridge() {
+        for channels in [0, 2, 6, 8] {
+            let options = PlozzigenVideoEngine.onDemandLoadOptions(
+                audioChannels: channels, trueHDAtmosEnabled: false
+            )
+            XCTAssertEqual(options.objectAudioRendering, .off)
+            XCTAssertEqual(options.audioBridgeMode, channels > 6 ? .lossless : .surroundCompat)
+            XCTAssertTrue(options.matchContentEnabled)
+            XCTAssertFalse(options.isLive)
+        }
     }
 
     func testTrueHDLegalCreditIncludesSourceAndBothLicenses() throws {

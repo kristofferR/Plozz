@@ -13,6 +13,7 @@ actor IPTVPlaybackProxy {
     private let headers: [String: String]
     private let formatHint: MediaFormatHint
     private let http: IPTVHTTP
+    private let isLive: Bool
     private let diagnostic: PlaybackFailureAttempt?
     private let key = SymmetricKey(size: .bits256)
     /// Derives each address's nonce from its URL, so a segment keeps one
@@ -25,6 +26,12 @@ actor IPTVPlaybackProxy {
     private var requests: [UUID: (NWConnection, Task<Void, Never>)] = [:]
     private var stopped = false
     private var didStart = false
+    private var shutdown: Task<Void, Never>?
+    private var liveRootRequest: UUID?
+    private var rootWaiters: [(UUID, CheckedContinuation<Void, Error>)] = []
+    private var refusal: (status: Int, retryAfter: TimeInterval?)?
+    private var playbackURL: URL?
+    private var deliveryFailure: PlaybackDeliveryFailure?
 
     init(
         origin: URL, headers: [String: String], formatHint: MediaFormatHint = .init(),
@@ -35,6 +42,7 @@ actor IPTVPlaybackProxy {
         self.origin = origin
         self.headers = headers
         self.formatHint = formatHint
+        isLive = content == .live
         http = IPTVHTTP(
             configuration: configuration, resourceTimeout: 86_400,
             sensitiveValues: sensitiveValues, redirectScope: .playback
@@ -78,15 +86,28 @@ actor IPTVPlaybackProxy {
         }
         guard !stopped, !Task.isCancelled else { listener.cancel(); throw CancellationError() }
         port = value
-        return try address(for: origin)
+        let url = try address(for: origin)
+        playbackURL = url
+        deliveryFailure = PlaybackDeliveryFailure.register(loopbackURL: url)
+        return url
     }
 
-    func stop() {
-        guard !stopped else { return }
+    func stop() async {
+        if let shutdown { await shutdown.value; return }
         stopped = true
+        listener.newConnectionHandler = nil
         listener.cancel()
+        http.cancel()
+        if let playbackURL { PlaybackDeliveryFailure.unregister(loopbackURL: playbackURL) }
+        let waiting = rootWaiters
+        rootWaiters.removeAll()
+        for (_, continuation) in waiting { continuation.resume(throwing: CancellationError()) }
+        let pending = requests.values.map(\.1)
         for (connection, task) in requests.values { task.cancel(); connection.cancel() }
         requests.removeAll()
+        let completion = Task { for task in pending { await task.value } }
+        shutdown = completion
+        await completion.value
     }
 
     private func accept(_ connection: NWConnection) {
@@ -95,7 +116,7 @@ actor IPTVPlaybackProxy {
         connection.start(queue: DispatchQueue.global(qos: .userInitiated))
         let task = Task { [weak self] in
             guard let self else { connection.cancel(); return }
-            await self.serve(connection)
+            await self.serve(connection, id: id)
             await self.finished(id)
         }
         requests[id] = (connection, task)
@@ -103,6 +124,42 @@ actor IPTVPlaybackProxy {
 
     private func finished(_ id: UUID) {
         requests.removeValue(forKey: id)?.0.cancel()
+    }
+
+    private func cancelRequest(_ id: UUID) {
+        guard let (connection, task) = requests[id] else { return }
+        task.cancel()
+        connection.cancel()
+        cancelRootWaiter(id)
+    }
+
+    private func acquireLiveRoot(_ id: UUID) async throws {
+        try Task.checkCancellation()
+        guard !stopped else { throw CancellationError() }
+        if liveRootRequest == nil { liveRootRequest = id; return }
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { continuation in
+                rootWaiters.append((id, continuation))
+            }
+            try Task.checkCancellation()
+        } onCancel: {
+            Task { await self.cancelRootWaiter(id) }
+        }
+    }
+
+    private func cancelRootWaiter(_ id: UUID) {
+        guard let index = rootWaiters.firstIndex(where: { $0.0 == id }) else { return }
+        rootWaiters.remove(at: index).1.resume(throwing: CancellationError())
+    }
+
+    private func releaseLiveRoot(_ id: UUID) {
+        guard liveRootRequest == id else { return }
+        liveRootRequest = nil
+        guard !stopped, !rootWaiters.isEmpty else { return }
+        let next = rootWaiters.removeFirst()
+        liveRootRequest = next.0
+        next.1.resume()
     }
 
     private func address(for url: URL) throws -> URL {
@@ -156,7 +213,8 @@ actor IPTVPlaybackProxy {
         return ["m3u8", "ts", "m2ts", "mts"].contains(suffix) ? "." + suffix : ""
     }
 
-    private func serve(_ connection: NWConnection) async {
+    private func serve(_ connection: NWConnection, id: UUID) async {
+        defer { releaseLiveRoot(id) }
         let deadline = Task {
             do { try await Task.sleep(for: .seconds(15)); connection.cancel() }
             catch is CancellationError {}
@@ -180,6 +238,16 @@ actor IPTVPlaybackProxy {
             let request = line.split(separator: " ")
             guard request.count == 3, request[0] == "GET" || request[0] == "HEAD" else { throw IPTVError.unsupported }
             let url = try upstream(for: String(request[1]))
+            // No request body/pipelining is supported. Observe EOF while the
+            // upstream is stalled, rather than waiting for our next socket write.
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { [weak self] _, _, _, _ in
+                Task { await self?.cancelRequest(id) }
+            }
+            if isLive, url == origin { try await acquireLiveRoot(id) }
+            if let refusal {
+                try await Self.send(connection, data: Self.failureHead(refusal.status, retryAfter: refusal.retryAfter))
+                return
+            }
             var outgoing = IPTVCredential.sameOrigin(origin, url) ? headers : [:]
             for field in text.components(separatedBy: "\r\n").dropFirst() {
                 guard let colon = field.firstIndex(of: ":") else { continue }
@@ -195,57 +263,60 @@ actor IPTVPlaybackProxy {
                 receivedResponse: { status, mimeType in responseEvidence.record(status: status, mimeType: mimeType) }
             )
             defer { bytes.task.cancel() }
-            if request[0] == "HEAD" {
-                diagnosticStage = nil
-                try await Self.send(connection, data: responseHead(response, chunked: false))
-                return
-            }
-            diagnosticStage = .body
-            var iterator = bytes.makeAsyncIterator()
-            var prefix = Data()
-            while prefix.count < 16, let byte = try await iterator.next() { prefix.append(byte) }
-            let contentType = response.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
-            let prefixText = String(decoding: prefix, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            let manifest = contentType.contains("mpegurl") || prefixText.hasPrefix("#EXTM3U")
-                || prefixText.hasPrefix("\u{FEFF}#EXTM3U")
-            if manifest {
-                responseEvidence.detectHLS()
-                var body = prefix
-                while let byte = try await iterator.next() {
-                    guard body.count < 8 * 1_024 * 1_024 else { throw IPTVError.oversizedRecord }
-                    body.append(byte)
-                    if body.count.isMultiple(of: 65_536) { try Task.checkCancellation() }
+            let upstreamTask = bytes.task
+            try await withTaskCancellationHandler {
+                if request[0] == "HEAD" {
+                    diagnosticStage = nil
+                    try await Self.send(connection, data: responseHead(response, chunked: false))
+                    return
                 }
-                guard let text = String(data: body, encoding: .utf8) else { throw IPTVError.malformed }
-                diagnosticStage = .manifest
-                let rewritten = try rewrite(text, baseURL: response.url ?? url)
-                let data = Data(rewritten.utf8)
-                diagnosticStage = nil
-                try await Self.send(connection, data: Data(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: \(data.count)\r\nConnection: close\r\n\r\n".utf8
-                ))
-                sentResponse = true
-                try await Self.send(connection, data: data)
-            } else {
-                diagnosticStage = nil
-                try await Self.send(connection, data: responseHead(response, chunked: true))
-                sentResponse = true
-                var chunk = prefix
                 diagnosticStage = .body
-                while let byte = try await iterator.next() {
-                    chunk.append(byte)
-                    if chunk.count == 65_536 {
-                        try Task.checkCancellation()
-                        diagnosticStage = nil
-                        try await Self.sendChunk(connection, data: chunk)
-                        chunk.removeAll(keepingCapacity: true)
-                        diagnosticStage = .body
+                var iterator = bytes.makeAsyncIterator()
+                var prefix = Data()
+                while prefix.count < 16, let byte = try await iterator.next() { prefix.append(byte) }
+                let contentType = response.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
+                let prefixText = String(decoding: prefix, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                let manifest = contentType.contains("mpegurl") || prefixText.hasPrefix("#EXTM3U")
+                    || prefixText.hasPrefix("\u{FEFF}#EXTM3U")
+                if manifest {
+                    responseEvidence.detectHLS()
+                    var body = prefix
+                    while let byte = try await iterator.next() {
+                        guard body.count < 8 * 1_024 * 1_024 else { throw IPTVError.oversizedRecord }
+                        body.append(byte)
+                        if body.count.isMultiple(of: 65_536) { try Task.checkCancellation() }
                     }
+                    guard let text = String(data: body, encoding: .utf8) else { throw IPTVError.malformed }
+                    diagnosticStage = .manifest
+                    let rewritten = try rewrite(text, baseURL: response.url ?? url)
+                    let data = Data(rewritten.utf8)
+                    diagnosticStage = nil
+                    try await Self.send(connection, data: Data(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: \(data.count)\r\nConnection: close\r\n\r\n".utf8
+                    ))
+                    sentResponse = true
+                    try await Self.send(connection, data: data)
+                } else {
+                    diagnosticStage = nil
+                    try await Self.send(connection, data: responseHead(response, chunked: true))
+                    sentResponse = true
+                    var chunk = prefix
+                    diagnosticStage = .body
+                    while let byte = try await iterator.next() {
+                        chunk.append(byte)
+                        if chunk.count == 65_536 {
+                            try Task.checkCancellation()
+                            diagnosticStage = nil
+                            try await Self.sendChunk(connection, data: chunk)
+                            chunk.removeAll(keepingCapacity: true)
+                            diagnosticStage = .body
+                        }
+                    }
+                    diagnosticStage = nil
+                    if !chunk.isEmpty { try await Self.sendChunk(connection, data: chunk) }
+                    try await Self.send(connection, data: Data("0\r\n\r\n".utf8))
                 }
-                diagnosticStage = nil
-                if !chunk.isEmpty { try await Self.sendChunk(connection, data: chunk) }
-                try await Self.send(connection, data: Data("0\r\n\r\n".utf8))
-            }
+            } onCancel: { upstreamTask.cancel() }
         } catch {
             if !Task.isCancelled, !(error is CancellationError), let diagnosticStage {
                 let failure = (error as? IPTVError)?.setupFailure ?? .sanitized(error)
@@ -255,16 +326,39 @@ actor IPTVPlaybackProxy {
                     domain: failure.networkCode == nil ? .none : .url, code: failure.networkCode,
                     httpStatus: evidence.status, format: evidence.format
                 )
+                if let status = evidence.status, [401, 403, 429, 451, 509].contains(status) {
+                    let retryAfter: TimeInterval?
+                    if case AppError.rateLimited(let delay) = error { retryAfter = delay }
+                    else { retryAfter = nil }
+                    let appError: AppError
+                    switch status {
+                    case 401, 403: appError = .unauthorized
+                    case 429, 509: appError = .rateLimited(retryAfter: retryAfter)
+                    case 451: appError = .accessRestricted
+                    default: appError = .invalidResponse
+                    }
+                    deliveryFailure?.record(appError)
+                    refusal = (status, retryAfter)
+                }
             }
             if !Task.isCancelled { PlozzLog.playback.error("Authenticated IPTV delivery failed") }
             if !sentResponse {
                 do {
-                    try await Self.send(connection, data: Data(
-                        "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8
+                    let status = responseEvidence.snapshot.status
+                    try await Self.send(connection, data: Self.failureHead(
+                        status.flatMap { (400...599).contains($0) ? $0 : nil } ?? 502,
+                        retryAfter: refusal?.retryAfter
                     ))
                 } catch { connection.cancel() }
             }
         }
+    }
+
+    private static func failureHead(_ status: Int, retryAfter: TimeInterval? = nil) -> Data {
+        let retry = retryAfter.flatMap {
+            $0.isFinite && $0 >= 0 ? "Retry-After: \(String(format: "%.0f", ceil($0)))\r\n" : nil
+        } ?? ""
+        return Data("HTTP/1.1 \(status) Upstream Failure\r\n\(retry)Content-Length: 0\r\nConnection: close\r\n\r\n".utf8)
     }
 
     private final class IPTVPlaybackResponseEvidence: @unchecked Sendable {

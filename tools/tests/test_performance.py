@@ -85,6 +85,8 @@ class EvidenceTests(unittest.TestCase):
     def test_selection_is_explicit_and_narrow_by_default(self):
         self.assertEqual(len(performance.select(None, None)), 3)
         self.assertEqual(performance.select("matrix", None), ["runtime-matrix"])
+        self.assertEqual(performance.select("diagnostics", None),
+                         ["diagnostics-disabled", "diagnostics-enabled", "diagnostics-snapshot"])
         self.assertEqual(len(performance.expected_reports(["runtime-matrix"])), 16)
         for suite, names in [("core", ["sync-unchanged"]), (None, ["unknown"]),
                              (None, ["sync-unchanged", "sync-unchanged"])]:
@@ -112,6 +114,16 @@ class EvidenceTests(unittest.TestCase):
                 mutate(candidate)
                 with self.assertRaises(performance.Failure):
                     performance.validate_report(candidate, spec)
+
+    def test_platform_specific_selection_rejects_explicit_unsupported_workloads(self):
+        artwork = {"home-artwork-layout", "home-artwork-layout-duplicate", "home-artwork-layout-cold"}
+        self.assertTrue(artwork <= set(performance.select("ui", None, "tvOS")))
+        self.assertFalse(artwork & set(performance.select("ui", None, "iOS")))
+        self.assertFalse(artwork & set(performance.select("all", None, "iOS")))
+        for name in artwork:
+            self.assertEqual(performance.select(None, [name], "tvOS"), [name])
+            with self.assertRaisesRegex(performance.Failure, "not supported on iOS"):
+                performance.select(None, [name], "iOS")
 
     def test_only_complete_no_skip_summary_passes(self):
         performance.verify_summary(summary(), 1)

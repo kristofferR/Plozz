@@ -65,7 +65,7 @@ public enum LiveTVServerImportError: Error, Equatable, Sendable {
         if error is DecodingError { return fallback == .invalidGuide ? .invalidGuide : .invalidCatalog }
         if let error = error as? AppError {
             switch error {
-            case .unauthorized, .invalidCredentials: return .accountUnavailable
+            case .unauthorized, .invalidCredentials, .accessRestricted: return .permissionDenied
             case .notFound: return .unsupportedAPI
             case .invalidResponse, .decoding: return fallback == .invalidGuide ? .invalidGuide : .invalidCatalog
             default: return fallback

@@ -48,11 +48,13 @@ public struct ServerValidator: Sendable {
             guard ["http", "https"].contains(baseURL.scheme?.lowercased() ?? ""),
                   baseURL.user == nil, baseURL.password == nil,
                   baseURL.query == nil, baseURL.fragment == nil else { throw AppError.invalidResponse }
-            let info = try await http.decode(SiloInfo.self, from: Endpoint(
-                path: "/api/v2/system/info", redirectPolicy: .sameOrigin), baseURL: baseURL)
+            let info = try await SiloSetupRequest.decode(SiloInfo.self, endpoint: Endpoint(
+                path: "/api/v2/system/info", redirectPolicy: .sameOrigin),
+                baseURL: baseURL, http: http, stage: .validation)
             guard info.api_major == 2, !info.contract_digest.isEmpty else { throw AppError.invalidResponse }
-            let capability = try await http.decode(SiloPairingCapability.self, from: Endpoint(
-                path: "/api/v2/auth/device/capability", redirectPolicy: .sameOrigin), baseURL: baseURL)
+            let capability = try await SiloSetupRequest.decode(SiloPairingCapability.self, endpoint: Endpoint(
+                path: "/api/v2/auth/device/capability", redirectPolicy: .sameOrigin),
+                baseURL: baseURL, http: http, stage: .capability)
             guard capability.protocol_versions.contains(2),
                   ["available", "disabled", "not_configured", "unsupported"].contains(capability.state) else {
                 throw AppError.invalidResponse

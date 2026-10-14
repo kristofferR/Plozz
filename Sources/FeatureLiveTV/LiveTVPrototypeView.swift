@@ -752,7 +752,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         .onChange(of: isInitialCatalogLoading, initial: true) { _, loading in
             HandoffDiagnostics.emit("LIVE_TV event=guideLoading loading=\(loading) channels=\(model.channels.count)")
         }
-        .task(id: isActive ? reloadRequest : -1) {
+        .task(id: isActive && isProfileAuthorized() ? reloadRequest : -1) {
             await reloadCatalog()
         }
         .task(id: preview.pendingRequest) {
@@ -958,8 +958,11 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             updatePlaybackAvailability()
             handleHomeSelection()
         }
-        .onChange(of: isProfileAuthorized(), initial: true) { _, _ in
-            if !isProfileAuthorized() { enrollment.invalidate() }
+        .onChange(of: isProfileAuthorized(), initial: true) { _, authorized in
+            if !authorized {
+                enrollment.invalidate()
+                loadedRequest = nil
+            }
             updatePlaybackAvailability()
         }
         .onChange(of: allowsPlayback, initial: true) { _, _ in
@@ -1318,7 +1321,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
     }
 
     private func reloadCatalog() async {
-        guard isActive, loadedRequest != reloadRequest else { return }
+        guard isActive, isProfileAuthorized(), loadedRequest != reloadRequest else { return }
         installCatalogHooks()
         let request = reloadRequest
         if let sources {

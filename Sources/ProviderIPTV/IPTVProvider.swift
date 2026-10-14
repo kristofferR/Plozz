@@ -253,6 +253,10 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
         )
     }
 
+    public func cachedLiveTVCatalog() async throws -> ServerLiveTVCatalogSnapshot? {
+        try await client.cachedLiveTVCatalog()
+    }
+
     public func refreshLiveTVAvailability() async throws -> ServerLiveTVAvailability {
         try await client.ensureCatalog("live", force: true)
         return try await liveTVAvailability()
@@ -266,6 +270,31 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
         guard from < to, to.timeIntervalSince(from) <= 172_800, channelIDs.count <= 2_000 else {
             throw ServerLiveTVError.invalidGuideWindow
         }
+        let performance = PerformanceDiagnostics.shared.begin(
+            .guideFetch, provider: .iptv, metrics: .init(items: channelIDs.count)
+        )
+        let metrics = performance == nil ? nil : IPTVPerformanceMetrics()
+        do {
+            let programmes = try await IPTVHTTP.$performanceMetrics.withValue(metrics) {
+                try await retrieveGuide(channelIDs: channelIDs, from: from, to: to)
+            }
+            let counts = metrics?.snapshot
+            performance?.finish(
+                .succeeded,
+                metrics: .init(bytes: counts?.bytes, rows: programmes.count, requests: counts?.requests)
+            )
+            return programmes
+        } catch {
+            let counts = metrics?.snapshot
+            performance?.finish(
+                IPTVPerformanceMetrics.outcome(for: error),
+                metrics: .init(bytes: counts?.bytes, requests: counts?.requests)
+            )
+            throw error
+        }
+    }
+
+    private func retrieveGuide(channelIDs: [String], from: Date, to: Date) async throws -> [ServerLiveTVProgramme] {
         let credential = await client.credential
         if credential.mode == .xtream, credential.explicitGuideURLs.isEmpty {
             var result: [ServerLiveTVProgramme] = []

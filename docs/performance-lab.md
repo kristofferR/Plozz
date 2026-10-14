@@ -24,7 +24,9 @@ python3 tools/performance.py run --platform tvOS --sim-id "$PLOZZ_SIM_ID" --suit
 python3 tools/performance.py run --platform iOS --sim-id "$PLOZZ_IOS_SIM_ID" --suite ui
 ```
 
-`core` is the default. `ui`, `matrix`, and `all` are explicit larger selections.
+`core` is the default. `ui`, `matrix`, `diagnostics`, `network`, and `all` are explicit selections.
+Suites include only scenarios supported on the requested platform; explicitly
+requesting a platform-incompatible scenario fails before a build starts.
 For a bounded investigation, select one or more scenario names instead of a suite:
 
 ```sh
@@ -148,13 +150,33 @@ without pretending a sample count measures frame smoothness.
 | Suite | Production path and limits |
 | --- | --- |
 | `core` | Unchanged sync persistence (10,000 records, 1,000 checks), warm incremental Share scanning (1,000 films), fresh SQLite IPTV import (10,000 generated records). The sync/Share fixtures also verify an actual edit is not suppressed. |
-| `ui` | Shared `MediaRowView`/poster presentation with generated local artwork, settled idle, programmatic scrolling, repeated host/view teardown. Runs on tvOS, iPhone and iPad simulators. This is a hosted card fixture, **not the entire Home screen**. |
+| `ui` | Shared `MediaRowView`/poster presentation with generated local artwork, settled idle, programmatic scrolling, repeated host/view teardown. Shared card scenarios run on tvOS, iPhone and iPad simulators and are **not the entire Home screen**. The tvOS-only `home-artwork-layout` scenarios exercise production Showcase artwork invalidation and duplicate reports across eight populated rows, with direct nested-host fitting duration/counts, sizing/placement counters and layout/focus controls. The `-cold` variant mounts a fresh view graph with warm artwork; it does not simulate every cold cache or a complete navigation session. |
 | `matrix` | Full 16-case factorial: 1/4 resolved fixture-provider accounts × Plozz automatic channels off/on × cached Live TV data off/on × local cloud-sync processing off/on. Uses account resolution, `LiveTVLibraryRuntime`, source/portable sync bridges, and ledger persistence, with isolated defaults, in-memory credentials, local catalogues and provider doubles. |
+| `diagnostics` | 10,000 operation attempts with recording disabled/enabled, plus 100 bounded snapshot encodes. Measures recorder and event-time serialization overhead without starting Sentry or creating uploads. |
+| `network` | `catalog-cached-refresh`: 1,000-channel loopback M3U import with a 100-ms header delay, then an expired-catalog refresh held while three cached reads complete. Verifies one refresh and actual replacement visibility. Cold/cached foreground timings are separate counters; whole-cycle wall time includes setup, controlled waiting and settling. No external playlist or stream links are fetched. |
+
+For Home metadata work, select `home-metadata-publication`,
+`home-observed-metadata-publication`, `home-row-metadata-updates`, and
+`home-row-metadata-reuse` on either platform.
+These hosted scenarios measure real silent Home reloads and production-row
+updates, distinguishing independently decoded equal snapshots from reuse of
+existing values. The observed-publication variant changes metadata and waits
+for the observing production row to receive every update. A background sampler
+reports main-actor scheduling delays, not presented-frame hitches or FPS.
+Pair `home-observed-metadata-publication` with
+`home-observed-metadata-diagnostics` in the same run to measure the same Home
+workload with the in-memory diagnostic recorder disabled/enabled. The enabled
+variant does not start Sentry or upload anything.
+Credits, sort metadata, membership/order, and provider parity
+remain correctness controls; unchanged identity must not hide changed metadata.
 
 The matrix uses 500 library items per provider and 1,000 cached IPTV channels
 when enabled. Startup/discovery happens before measurement; each warm sample
 performs ten unchanged refresh/capture cycles. It distinguishes feature
 interaction and provider-count scaling without introducing real network noise.
+Its providers are doubles labeled Plex/Jellyfin, not real Plex, Jellyfin, Emby,
+SMB and IPTV transports running together. A cheap settled refresh does not
+exonerate initial discovery, playlist replacement, guide fan-out or slow servers.
 Catalogue revision callbacks and ledger capture acknowledgements mirror the
 production sync composition, so warm samples exercise its unchanged-state path.
 Assertions require the initial export to run, subsequent unchanged exports to
@@ -200,7 +222,12 @@ automatically enabled by installing this tooling.
 Measurements cover the test process, including any framework work it triggers.
 `persistenceCalls` counts entry into the ledger's guarded persistence closure,
 not total filesystem operations; `inventoryUpdates` counts SQLite row updates,
-not physical writes. Do not turn either into a claim about total device I/O.
+not physical writes. An unchanged Share scan still stamps retained inventory
+with its new scan identifier so final pruning does not delete valid entries.
+Those stamps are neither fresh file discovery nor one network request per item.
+The Share fixture uses an immediate in-memory directory lister; `catalog-import`
+uses preconstructed IPTV records and does not include M3U download or parsing.
+Do not turn these counters into a claim about total device I/O.
 They do not measure total device CPU, allocation count, GPU time, energy use,
 presented-frame hitches or memory-pressure limits. Do not describe a sleeping
 idle window's wall time as work; its comparison gates CPU only.

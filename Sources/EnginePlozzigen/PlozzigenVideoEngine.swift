@@ -420,17 +420,13 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
         intendsPause = false
         furthestObservedPosition = startPosition
 
-        // For >6-channel sources (7.1), prefer the lossless FLAC bridge so the
-        // full 7.1 layout survives — the default `.surroundCompat` EAC3 bridge caps
-        // at 5.1. Multichannel-LPCM AVRs get true 7.1; stereo-only routes downmix
-        // gracefully. Either way it's an on-device bridge, never a server transcode.
         let channels = request.localRemuxSource?.sourceMetadata.audio?.channels
             ?? request.sourceMetadata?.audio?.channels ?? 0
-        var options = LoadOptions(
-            matchContentEnabled: true,
-            audioBridgeMode: channels > 6 ? .lossless : .surroundCompat
+        var options = Self.onDemandLoadOptions(
+            audioChannels: channels,
+            trueHDAtmosEnabled: request.trueHDAtmosEnabled,
+            outputPolicy: outputPolicy
         )
-        Self.applyLiveOutputPolicy(outputPolicy, to: &options)
         // Build the native WebVTT renditions so subtitles can travel into a
         // Picture in Picture window, where our own overlay cannot follow: it is a
         // view in this app's hierarchy and the window only carries what is in the
@@ -566,6 +562,7 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
         let outputPolicy = liveOutputPolicy
         defer { finishOutputLoad(outputGeneration, policy: outputPolicy) }
         let liveGeneration = beginLiveAttempt()
+        liveDeliveryFailure = PlaybackDeliveryFailure.state(for: url)
         _ = probePublicationGate.beginLoad()
         sourceFormatCancellable?.cancel()
         sourceFormatCancellable = nil
@@ -702,6 +699,29 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
         #endif
     }
 
+    nonisolated static func onDemandLoadOptions(
+        audioChannels: Int,
+        trueHDAtmosEnabled: Bool = PlaybackSettings.default.trueHDAtmosEnabled,
+        outputPolicy: LiveChannelOutputPolicy = .init()
+    ) -> LoadOptions {
+        // Keep the full 7.1 fallback: the compatibility EAC3 bridge caps at 5.1.
+        var options = LoadOptions(
+            matchContentEnabled: true,
+            audioBridgeMode: audioChannels > 6 ? .lossless : .surroundCompat
+        )
+        #if os(tvOS)
+        if #available(tvOS 26.0, *), trueHDAtmosEnabled,
+           outputPolicy.isAudible, !outputPolicy.sharesAudioSession {
+            // This is an intermediate spatial bed, not a detected speaker inventory.
+            // Aether gates TrueHD Atmos/48 kHz/native VOD and retains the bridge fallback.
+            // Shared live players and muted previews must not add spatial encoding work.
+            options.objectAudioRendering = .apac(.l714)
+        }
+        #endif
+        applyLiveOutputPolicy(outputPolicy, to: &options)
+        return options
+    }
+
     nonisolated static func liveLoadOptions(
         httpHeaders: [String: String], url: URL? = nil
     ) -> LoadOptions {
@@ -761,6 +781,7 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
     }
 
     private var liveFailureDiagnostic: PlaybackFailureAttempt?
+    private var liveDeliveryFailure: PlaybackDeliveryFailure?
 
     private func beginLiveAttempt() -> UInt64 {
         let generation = liveAttemptGate.begin()
@@ -781,6 +802,7 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
     private func endLiveAttempt() {
         liveAttemptGate.invalidate()
         liveFailureDiagnostic = nil
+        liveDeliveryFailure = nil
         liveSourceResetCancellable?.cancel()
         liveSourceResetCancellable = nil
     }
@@ -804,7 +826,7 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
         PlozzLog.playback.error(
             "Plozzigen live playback failed at \(stage): \(classification) \(redacted)"
         )
-        let error = PlozzigenLiveFailure.appError(info)
+        let error = PlozzigenLiveFailure.appError(info, deliveryFailure: liveDeliveryFailure?.error)
         status = .failed(error)
         onFailure?(error)
     }

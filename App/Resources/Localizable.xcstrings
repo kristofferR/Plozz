@@ -242096,6 +242096,226 @@
         }
       }
     },
+    "Dolby Atmos from TrueHD" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos من TrueHD"
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos от TrueHD"
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos a partir de TrueHD"
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos z TrueHD"
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos fra TrueHD"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos aus TrueHD"
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos από TrueHD"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos a partir de TrueHD"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos از TrueHD"
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos TrueHD-äänestä"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos à partir de TrueHD"
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos מ־TrueHD"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "TrueHD से Dolby Atmos"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos iz formata TrueHD"
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos TrueHD-ből"
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos dari TrueHD"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos da TrueHD"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "TrueHDからのDolby Atmos"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "TrueHD의 Dolby Atmos"
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos daripada TrueHD"
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos fra TrueHD"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos uit TrueHD"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos z TrueHD"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos a partir de TrueHD"
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos din TrueHD"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos из TrueHD"
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos z TrueHD"
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos iz TrueHD"
+          }
+        },
+        "sr-Latn" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos iz formata TrueHD"
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos från TrueHD"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos จาก TrueHD"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "TrueHD'den Dolby Atmos"
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos із TrueHD"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dolby Atmos từ TrueHD"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "来自 TrueHD 的 Dolby Atmos"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "來自 TrueHD 的 Dolby Atmos"
+          }
+        }
+      }
+    },
     "Don't turn subtitles on automatically." : {
       "comment" : "Explanation shown beneath the subtitle mode option in Settings > Playback.",
       "localizations" : {
@@ -312452,6 +312672,226 @@
         }
       }
     },
+    "Hear overhead sound from supported TrueHD Atmos tracks on compatible equipment, using lossy conversion. If playback stutters or seeking is slow, try turning this off. Those tracks will still play, but without Atmos height positioning. Dolby Digital Plus Atmos is unaffected. Applies to new playback sessions." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "استمتع بصوت من الأعلى عند تشغيل مسارات TrueHD Atmos المدعومة على أجهزة متوافقة، باستخدام تحويل مع فقدان بعض بيانات الصوت. إذا كان التشغيل متقطعًا أو كان الانتقال إلى موضع آخر في المقطع بطيئًا، فجرّب إيقاف هذا الخيار. سيستمر تشغيل هذه المسارات، ولكن من دون تحديد مواضع الصوت رأسيًا بتقنية Atmos. لن يتأثر Dolby Digital Plus Atmos. يسري على جلسات التشغيل الجديدة فقط."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Чуйте звук, идващ отгоре, при възпроизвеждане на поддържани аудиописти TrueHD Atmos на съвместимо оборудване чрез преобразуване със загуба на качество. Ако възпроизвеждането накъсва или превъртането до друг момент в записа е бавно, опитайте да изключите тази настройка. Тези писти ще продължат да се възпроизвеждат, но без позициониране на звука по височина с Atmos. Dolby Digital Plus Atmos не се влияе. Прилага се само за нови сесии на възпроизвеждане."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Escolta so provinent de dalt amb les pistes TrueHD Atmos admeses en equips compatibles, mitjançant una conversió amb pèrdua de qualitat. Si la reproducció va a batzegades o saltar a un altre punt de la reproducció és lent, prova de desactivar aquesta opció. Aquestes pistes continuaran sonant, però sense el posicionament en alçada del so d’Atmos. Dolby Digital Plus Atmos no es veu afectat. S’aplica només a les sessions de reproducció noves."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Poslouchejte zvuk shora z podporovaných stop TrueHD Atmos na kompatibilním vybavení díky ztrátovému převodu. Pokud se přehrávání zadrhává nebo je posouvání v záznamu pomalé, zkuste tuto volbu vypnout. Tyto stopy se budou přehrávat i nadále, ale bez výškového umístění zvuku pomocí Atmos. Dolby Digital Plus Atmos zůstává beze změny. Platí pouze pro nové relace přehrávání."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hør understøttede TrueHD Atmos-lydspor med lyd ovenfra på kompatibelt udstyr via konvertering med kvalitetstab. Hvis afspilningen hakker, eller det går langsomt at spole, kan du prøve at slå denne indstilling fra. Lydsporene afspilles stadig, men uden Atmos-lydplacering i højden. Dolby Digital Plus Atmos påvirkes ikke. Gælder kun for nye afspilningssessioner."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Höre Klang von oben aus unterstützten TrueHD Atmos-Tonspuren auf kompatiblen Geräten per verlustbehafteter Umwandlung. Wenn die Wiedergabe ruckelt oder das Springen zu anderen Stellen langsam ist, versuche, diese Option auszuschalten. Die Tonspuren werden weiterhin abgespielt, jedoch ohne die Höhenpositionierung von Atmos. Dolby Digital Plus Atmos ist davon nicht betroffen. Gilt nur für neue Wiedergabesitzungen."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ακούστε ήχο από ψηλά με υποστηριζόμενα κομμάτια ήχου TrueHD Atmos σε συμβατό εξοπλισμό, μέσω απωλεστικής μετατροπής. Αν η αναπαραγωγή παρουσιάζει διακοπές ή η μετακίνηση σε άλλο σημείο της αναπαραγωγής είναι αργή, δοκιμάστε να απενεργοποιήσετε αυτή την επιλογή. Αυτά τα κομμάτια ήχου θα συνεχίσουν να αναπαράγονται, αλλά χωρίς την τοποθέτηση των ήχων καθ’ ύψος από το Atmos. Το Dolby Digital Plus Atmos δεν επηρεάζεται. Ισχύει μόνο για νέες συνεδρίες αναπαραγωγής."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Escucha sonidos por encima de ti con pistas TrueHD Atmos admitidas en equipos compatibles, mediante una conversión con pérdida. Si la reproducción se entrecorta o el desplazamiento por la línea de tiempo es lento, prueba a desactivar esta opción. Esas pistas seguirán reproduciéndose, pero sin el posicionamiento en altura de Atmos. Dolby Digital Plus Atmos no se ve afectado. Solo se aplica a las nuevas sesiones de reproducción."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "صدای بالای سر را از ترک‌های پشتیبانی‌شدهٔ TrueHD Atmos روی تجهیزات سازگار و به کمک تبدیل با اتلاف داده بشنوید. اگر پخش قطع و وصل می‌شود یا جلو و عقب بردن پخش کند است، غیرفعال کردن این گزینه را امتحان کنید. این ترک‌ها همچنان پخش می‌شوند، اما بدون موقعیت‌دهی صدا در ارتفاع با Atmos. این گزینه بر Dolby Digital Plus Atmos تأثیری ندارد. این تنظیم فقط در پخش‌های جدید اعمال می‌شود."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Kuule yläpuoleltasi tuleva ääni tuetuilta TrueHD Atmos -ääniraidoilta yhteensopivilla laitteilla häviöllisen muunnoksen avulla. Jos toisto pätkii tai siirtyminen aikajanalla on hidasta, kokeile poistaa tämä asetus käytöstä. Ääniraidat toistuvat edelleen, mutta ilman Atmos-äänen korkeussuuntaista sijoittelua. Tämä ei vaikuta Dolby Digital Plus Atmos -ääneen. Koskee vain uusia toistoistuntoja."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Profitez d’un son venant d’en haut avec les pistes TrueHD Atmos prises en charge et un équipement compatible, grâce à une conversion avec perte. Si la lecture est saccadée ou s’il faut du temps pour avancer ou reculer, essayez de désactiver cette option. Ces pistes seront toujours lues, mais sans le positionnement vertical du son Atmos. Dolby Digital Plus Atmos n’est pas affecté. S’applique uniquement aux nouvelles sessions de lecture."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "ניתן לשמוע צלילים מעל הראש מרצועות TrueHD Atmos נתמכות בציוד תואם, באמצעות המרה עם אובדן נתונים. אם ההפעלה מקוטעת או שהמעבר לנקודה אחרת בציר הזמן איטי, כדאי לנסות לכבות אפשרות זו. הרצועות האלה ימשיכו להתנגן, אך ללא מיקום הצלילים בממד הגובה של Atmos. Dolby Digital Plus Atmos לא יושפע. השינוי יחול רק בעת התחלת ניגון חדש."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "हानिपूर्ण रूपांतरण के ज़रिए, संगत उपकरण पर समर्थित TrueHD Atmos ट्रैक की ऊपर से आती ध्वनि सुनें। अगर प्लेबैक अटकता है या वीडियो में आगे-पीछे जाने में समय लगता है, तो इसे बंद करके देखें। ये ट्रैक फिर भी चलेंगे, लेकिन Atmos की ध्वनि को अलग-अलग ऊँचाइयों पर स्थित करने की सुविधा नहीं मिलेगी। Dolby Digital Plus Atmos पर कोई असर नहीं पड़ेगा। यह केवल नए प्लेबैक सत्रों पर लागू होता है।"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Slušajte zvuk iznad sebe iz podržanih zapisa TrueHD Atmos na kompatibilnoj opremi, uz pretvorbu s gubitkom kvalitete. Ako reprodukcija zastajkuje ili je premotavanje sporo, pokušajte isključiti ovu opciju. Ti će se zapisi i dalje reproducirati, ali bez Atmos pozicioniranja zvuka po visini. To ne utječe na Dolby Digital Plus Atmos. Primjenjuje se samo na nove sesije reprodukcije."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Kompatibilis berendezésen hallhatja a támogatott TrueHD Atmos-hangsávok felülről érkező hangjait, veszteséges átalakítással. Ha a lejátszás akadozik vagy a lejátszási pozíció váltása lassú, próbálja kikapcsolni ezt a beállítást. Ezek a hangsávok továbbra is lejátszhatók, de az Atmos magassági hangpozicionálása nélkül. A Dolby Digital Plus Atmos működését nem érinti. Csak az új lejátszási munkamenetekre vonatkozik."
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dengarkan suara dari atas pada trek TrueHD Atmos yang didukung dengan peralatan yang kompatibel, melalui konversi lossy. Jika pemutaran tersendat atau perpindahan posisi pemutaran lambat, coba nonaktifkan opsi ini. Trek tersebut tetap dapat diputar, tetapi tanpa pemosisian suara Atmos dalam dimensi ketinggian. Dolby Digital Plus Atmos tidak terpengaruh. Hanya berlaku untuk sesi pemutaran baru."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ascolta i suoni provenienti dall’alto con le tracce TrueHD Atmos supportate e apparecchiature compatibili, tramite conversione con perdita di qualità. Se la riproduzione procede a scatti o il passaggio a un altro punto della riproduzione è lento, prova a disattivare questa opzione. Le tracce continueranno a essere riprodotte, ma senza il posizionamento in altezza del suono Atmos. Non influisce su Dolby Digital Plus Atmos. Si applica solo alle nuove sessioni di riproduzione."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "対応するTrueHD Atmosトラックを非可逆変換し、対応機器で頭上からの音を楽しめます。再生が途切れたり、シークに時間がかかったりする場合は、この設定をオフにしてみてください。その場合も音声は再生されますが、Atmosによる高さ方向の音の定位はなくなります。Dolby Digital Plus Atmosには影響しません。新しい再生セッションにのみ適用されます。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "호환 기기에서 지원되는 TrueHD Atmos 트랙을 손실 변환해 머리 위에서 들리는 소리를 재생합니다. 재생이 끊기거나 재생 위치 이동이 느리면 이 설정을 꺼 보세요. 해당 트랙의 오디오는 계속 재생되지만, Atmos의 높이 방향 음향 배치는 적용되지 않습니다. Dolby Digital Plus Atmos에는 영향을 주지 않습니다. 새 재생 세션부터 적용됩니다."
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dengar bunyi dari atas kepala daripada trek TrueHD Atmos yang disokong pada peralatan yang serasi, melalui penukaran audio dengan kehilangan data. Jika main balik tersekat-sekat atau lambat beralih ke kedudukan main balik yang lain, cuba matikan tetapan ini. Audio trek tersebut masih dimainkan, tetapi tanpa penempatan bunyi menegak Atmos. Dolby Digital Plus Atmos tidak terjejas. Berkuat kuasa untuk sesi main balik baharu."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hør lyd over hodet fra støttede TrueHD Atmos-spor på kompatibelt utstyr ved hjelp av konvertering med kvalitetstap. Hvis avspillingen hakker eller spoling går tregt, kan du prøve å slå dette av. Lyden fra disse sporene spilles fortsatt av, men uten Atmos-posisjonering i høyden. Dolby Digital Plus Atmos påvirkes ikke. Gjelder nye avspillingsøkter."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hoor geluid van boven uit ondersteunde TrueHD Atmos-tracks op compatibele apparatuur, via conversie met kwaliteitsverlies. Als het afspelen hapert of vooruit- en terugspoelen traag gaat, probeer dit dan uit te schakelen. Het geluid van deze tracks wordt nog steeds afgespeeld, maar zonder de hoogtepositionering van Atmos. Dolby Digital Plus Atmos wordt niet beïnvloed. Geldt voor nieuwe afspeelsessies."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Usłysz dźwięk znad głowy z obsługiwanych ścieżek TrueHD Atmos na zgodnym sprzęcie dzięki konwersji stratnej. Jeśli odtwarzanie się zacina lub przewijanie jest wolne, spróbuj wyłączyć tę opcję. Dźwięk z tych ścieżek nadal będzie odtwarzany, ale bez pozycjonowania dźwięku Atmos w pionie. Nie ma to wpływu na Dolby Digital Plus Atmos. Dotyczy nowych sesji odtwarzania."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Em equipamentos compatíveis, ouça sons vindos de cima com faixas TrueHD Atmos suportadas, usando conversão com perdas. Se a reprodução engasgar ou demorar para avançar ou retroceder, experimente desativar esta opção. O áudio dessas faixas continuará sendo reproduzido, mas sem o posicionamento vertical do Atmos. O Dolby Digital Plus Atmos não é afetado. Aplica-se a novas sessões de reprodução."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ascultați sunet de deasupra capului din piste TrueHD Atmos acceptate pe echipamente compatibile, prin conversie cu pierderi. Dacă redarea sacadează sau derularea este lentă, încercați să dezactivați această opțiune. Pistele respective se vor reda în continuare, dar fără poziționarea sunetului pe înălțime oferită de Atmos. Dolby Digital Plus Atmos nu este afectat. Se aplică doar sesiunilor noi de redare."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Слушайте звук над головой при воспроизведении поддерживаемых дорожек TrueHD Atmos на совместимом оборудовании. Для этого используется преобразование с потерями. Если воспроизведение идёт рывками или перемотка работает медленно, попробуйте отключить эту настройку. Дорожки по-прежнему будут воспроизводиться, но без позиционирования звука по высоте в Atmos. На Dolby Digital Plus Atmos это не влияет. Применяется только к новым сеансам воспроизведения."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Počúvajte zvuk nad hlavou z podporovaných stôp TrueHD Atmos na kompatibilnom vybavení pomocou stratovej konverzie. Ak sa prehrávanie zasekáva alebo je posúvanie v zázname pomalé, skúste túto možnosť vypnúť. Tieto stopy sa budú prehrávať aj naďalej, ale bez výškového umiestnenia zvuku Atmos. Na Dolby Digital Plus Atmos to nemá vplyv. Platí len pre nové relácie prehrávania."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Poslušajte zvok nad glavo iz podprtih zvočnih stez TrueHD Atmos na združljivi opremi s pretvorbo z izgubami. Če se predvajanje zatika ali je premikanje po posnetku počasno, poskusite to možnost izklopiti. Te steze se bodo še naprej predvajale, vendar brez višinskega umeščanja zvoka Atmos. To ne vpliva na Dolby Digital Plus Atmos. Velja le za nove seje predvajanja."
+          }
+        },
+        "sr-Latn" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Čujte zvuk iznad glave iz podržanih audio-zapisa TrueHD Atmos na kompatibilnoj opremi, uz konverziju sa gubicima. Ako se reprodukcija secka ili je premotavanje sporo, pokušajte da isključite ovu opciju. Ti zapisi će se i dalje reprodukovati, ali bez pozicioniranja zvuka po visini koje pruža Atmos. To ne utiče na Dolby Digital Plus Atmos. Primenjuje se samo na nove sesije reprodukcije."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hör ljud ovanför dig från TrueHD Atmos-spår som stöds på kompatibel utrustning, genom konvertering med kvalitetsförlust. Om uppspelningen hackar eller det går långsamt att spola, prova att stänga av den här inställningen. Spåren spelas fortfarande upp, men utan Atmos-positionering i höjdled. Dolby Digital Plus Atmos påverkas inte. Gäller endast nya uppspelningssessioner."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "ฟังเสียงเหนือศีรษะจากแทร็กเสียง TrueHD Atmos ที่รองรับบนอุปกรณ์ที่เข้ากันได้ โดยใช้การแปลงแบบสูญเสียข้อมูล หากการเล่นสะดุดหรือการเลื่อนไปยังตำแหน่งอื่นช้า ให้ลองปิดตัวเลือกนี้ แทร็กเหล่านั้นจะยังคงเล่นได้ แต่จะไม่มีการวางตำแหน่งเสียงตามความสูงของ Atmos Dolby Digital Plus Atmos จะไม่ได้รับผลกระทบ มีผลเฉพาะการเล่นที่เริ่มใหม่เท่านั้น"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Desteklenen TrueHD Atmos ses parçalarındaki yukarıdan gelen sesleri, kayıplı dönüştürme kullanarak uyumlu ekipmanlarda duyun. Oynatma takılıyorsa veya oynatma sırasında başka bir konuma geçiş yavaşsa bu seçeneği kapatmayı deneyin. Bu ses parçaları Atmos'un yükseklik konumlandırması olmadan çalmaya devam eder. Dolby Digital Plus Atmos etkilenmez. Yalnızca yeni oynatma oturumları için geçerlidir."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Слухайте звук над головою з підтримуваних доріжок TrueHD Atmos на сумісному обладнанні завдяки перетворенню із втратами. Якщо відтворення затинається або перехід до іншого моменту відбувається повільно, спробуйте вимкнути цю опцію. Звук цих доріжок і далі відтворюватиметься, але без позиціювання звуку за висотою в Atmos. Це не впливає на Dolby Digital Plus Atmos. Застосовується лише до нових сеансів відтворення."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nghe âm thanh từ phía trên qua các rãnh âm thanh TrueHD Atmos được hỗ trợ trên thiết bị tương thích, bằng cách chuyển đổi có suy hao. Nếu quá trình phát bị giật hoặc thao tác tua phản hồi chậm, hãy thử tắt tùy chọn này. Các rãnh đó vẫn phát âm thanh, nhưng không có định vị âm thanh theo chiều cao của Atmos. Dolby Digital Plus Atmos không bị ảnh hưởng. Chỉ áp dụng cho các phiên phát mới."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "通过有损转换，在兼容设备上聆听受支持的 TrueHD Atmos 音轨带来的头顶音效。如果播放卡顿或跳转到其他播放位置时反应缓慢，请尝试关闭此选项。这些音轨仍会播放声音，但不再具有 Atmos 的高度定位效果。Dolby Digital Plus Atmos 不受影响。仅对新开始的播放生效。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "透過有損轉換，在相容設備上聆聽支援的 TrueHD Atmos 音軌所呈現的頭頂音效。若播放卡頓或跳轉到其他播放位置時反應緩慢，請嘗試關閉此選項。這些音軌仍會播放聲音，但不再具有 Atmos 的高度定位效果。Dolby Digital Plus Atmos 不受影響。僅對新開始的播放生效。"
+          }
+        }
+      }
+    },
     "Hearing impaired" : {
       "comment" : "Label for the iOS subtitle-search preference that controls whether SDH or hearing-impaired subtitle results are preferred.",
       "localizations" : {
@@ -358085,6 +358525,7 @@
       }
     },
     "Live TV (Experimental)" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -632104,6 +632545,226 @@
         }
       }
     },
+    "Silo approved this device, but we couldn't load your profiles. Try again without repeating approval." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "سمح Silo لهذا الجهاز بالوصول، ولكن تعذّر تحميل ملفاتك الشخصية. حاول مرة أخرى دون تكرار الموافقة."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo одобри това устройство, но не успяхме да заредим профилите ви. Опитайте отново, без да повтаряте одобрението."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo ha autoritzat aquest dispositiu, però no hem pogut carregar els vostres perfils. Torneu-ho a provar sense repetir l'autorització."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo schválilo toto zařízení, ale nepodařilo se nám načíst vaše profily. Zkuste to znovu bez opakování schválení."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo godkendte denne enhed, men vi kunne ikke indlæse dine profiler. Prøv igen uden at gentage godkendelsen."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo hat dieses Gerät freigegeben, aber wir konnten deine Profile nicht laden. Versuche es erneut, ohne die Freigabe zu wiederholen."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Το Silo ενέκρινε αυτή τη συσκευή, αλλά δεν ήταν δυνατή η φόρτωση των προφίλ σας. Δοκιμάστε ξανά χωρίς να επαναλάβετε την έγκριση."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo ha autorizado este dispositivo, pero no hemos podido cargar tus perfiles. Vuelve a intentarlo sin repetir la autorización."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo این دستگاه را تأیید کرد، اما نتوانستیم نمایه‌های شما را بارگیری کنیم. بدون تکرار تأیید، دوباره تلاش کنید."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo hyväksyi tämän laitteen, mutta profiilejasi ei voitu ladata. Yritä uudelleen. Hyväksyntää ei tarvitse toistaa."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo a autorisé cet appareil, mais nous n’avons pas pu charger vos profils. Réessayez sans répéter l’étape d’autorisation."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo אישר את המכשיר הזה, אך לא הצלחנו לטעון את הפרופילים שלכם. נסו שוב בלי לחזור על תהליך האישור."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo ने इस डिवाइस को मंज़ूरी दे दी है, लेकिन हम आपकी प्रोफ़ाइलें लोड नहीं कर सके। दोबारा मंज़ूरी दिए बिना फिर से कोशिश करें।"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo je odobrio ovaj uređaj, ali nismo mogli učitati vaše profile. Pokušajte ponovno bez ponovnog odobravanja."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "A Silo jóváhagyta ezt az eszközt, de nem sikerült betölteni a profiljait. Próbálja újra, a jóváhagyást nem kell megismételnie."
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo telah menyetujui perangkat ini, tetapi profil Anda tidak dapat dimuat. Coba lagi tanpa mengulangi persetujuan."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo ha autorizzato questo dispositivo, ma non è stato possibile caricare i tuoi profili. Riprova senza ripetere l’autorizzazione."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Siloはこのデバイスを承認しましたが、プロフィールを読み込めませんでした。再承認は不要です。もう一度お試しください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo에서 이 기기를 승인했지만 프로필을 불러오지 못했습니다. 다시 승인할 필요 없이 재시도해 주세요."
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo telah meluluskan peranti ini, tetapi kami tidak dapat memuatkan profil anda. Cuba lagi tanpa mengulangi proses kelulusan."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo godkjente denne enheten, men vi kunne ikke laste inn profilene dine. Prøv igjen uten å gjenta godkjenningen."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo heeft dit apparaat goedgekeurd, maar we konden je profielen niet laden. Probeer het opnieuw zonder de goedkeuring te herhalen."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo zatwierdziło to urządzenie, ale nie udało się wczytać twoich profili. Spróbuj ponownie bez powtarzania zatwierdzania."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "O Silo aprovou este dispositivo, mas não foi possível carregar seus perfis. Tente novamente sem repetir a aprovação."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo a aprobat acest dispozitiv, dar nu am putut încărca profilurile tale. Încearcă din nou fără să repeți aprobarea."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo авторизовал это устройство, но нам не удалось загрузить ваши профили. Попробуйте ещё раз без повторной авторизации устройства."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo schválilo toto zariadenie, ale nepodarilo sa nám načítať vaše profily. Skúste to znova bez opätovného schvaľovania."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo je odobril to napravo, vendar nam ni uspelo naložiti vaših profilov. Poskusite znova brez ponovne odobritve."
+          }
+        },
+        "sr-Latn" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo je odobrio ovaj uređaj, ali nismo uspeli da učitamo vaše profile. Pokušajte ponovo bez ponovnog odobravanja."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo godkände den här enheten, men vi kunde inte läsa in dina profiler. Försök igen – du behöver inte godkänna enheten på nytt."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo อนุมัติให้อุปกรณ์นี้ลงชื่อเข้าใช้แล้ว แต่เราไม่สามารถโหลดโปรไฟล์ของคุณได้ ลองอีกครั้งโดยไม่ต้องอนุมัติซ้ำ"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo bu cihazda oturum açılmasını onayladı ancak profillerinizi yükleyemedik. Yeniden onay vermeden tekrar deneyin."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo схвалив вхід на цьому пристрої, але нам не вдалося завантажити ваші профілі. Спробуйте ще раз — повторне схвалення не потрібне."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo đã cấp quyền đăng nhập cho thiết bị này, nhưng không thể tải các hồ sơ của bạn. Hãy thử lại mà không cần cấp quyền đăng nhập lần nữa."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo 已授权此设备登录，但未能加载你的用户档案。请重试，无需再次授权。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo 已授權此裝置登入，但無法載入你的使用者檔案。請再試一次，無須重新授權。"
+          }
+        }
+      }
+    },
     "Silo cannot prepare a download at this bitrate." : {
       "localizations" : {
         "ar" : {
@@ -633204,6 +633865,226 @@
         }
       }
     },
+    "Silo couldn't create a sign-in code. Try again. If this continues, check that device pairing is enabled and Silo is up to date." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "تعذّر على Silo إنشاء رمز لتسجيل الدخول. حاول مرة أخرى. إذا استمرت المشكلة، فتحقّق من تفعيل إقران الأجهزة ومن تحديث Silo إلى أحدث إصدار."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo не успя да създаде код за вход. Опитайте отново. Ако проблемът продължава, проверете дали сдвояването на устройства е активирано и дали използвате най-новата версия на Silo."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo no ha pogut crear un codi d'inici de sessió. Torneu-ho a provar. Si el problema continua, comproveu que l'aparellament de dispositius estigui activat i que Silo estigui actualitzat."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo nemohlo vytvořit přihlašovací kód. Zkuste to znovu. Pokud problém přetrvává, zkontrolujte, zda je povoleno párování zařízení a zda je Silo aktuální."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo kunne ikke oprette en loginkode. Prøv igen. Hvis problemet fortsætter, skal du kontrollere, at parring af enheder er aktiveret, og at Silo er opdateret."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo konnte keinen Anmeldecode erstellen. Versuche es erneut. Wenn das Problem weiterhin besteht, prüfe, ob die Gerätekopplung aktiviert und Silo auf dem neuesten Stand ist."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Το Silo δεν μπόρεσε να δημιουργήσει κωδικό σύνδεσης. Δοκιμάστε ξανά. Αν το πρόβλημα επιμένει, ελέγξτε ότι η σύζευξη συσκευών είναι ενεργοποιημένη και ότι το Silo είναι ενημερωμένο."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo no ha podido generar un código de inicio de sesión. Vuelve a intentarlo. Si el problema persiste, comprueba que la vinculación de dispositivos esté activada y que Silo esté actualizado."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo نتوانست کد ورود ایجاد کند. دوباره تلاش کنید. اگر مشکل ادامه داشت، بررسی کنید که جفت‌سازی دستگاه‌ها فعال باشد و Silo به‌روز باشد."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo ei voinut luoda kirjautumiskoodia. Yritä uudelleen. Jos ongelma jatkuu, tarkista, että laitteiden pariliitos on käytössä ja Silo on ajan tasalla."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo n’a pas pu générer de code de connexion. Réessayez. Si le problème persiste, vérifiez que l’appairage des appareils est activé et que Silo est à jour."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo לא הצליח ליצור קוד כניסה. נסו שוב. אם הבעיה נמשכת, ודאו שצימוד מכשירים מופעל וש־Silo מעודכן."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo साइन-इन कोड नहीं बना सका। फिर से कोशिश करें। अगर समस्या बनी रहती है, तो जाँचें कि डिवाइस पेयरिंग चालू है और Silo का नवीनतम संस्करण इस्तेमाल हो रहा है।"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo nije mogao izraditi kod za prijavu. Pokušajte ponovno. Ako se problem nastavi, provjerite je li uparivanje uređaja omogućeno i je li Silo ažuriran."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "A Silo nem tudott bejelentkezési kódot létrehozni. Próbálja újra. Ha a hiba továbbra is fennáll, ellenőrizze, hogy az eszközpárosítás engedélyezve van-e, és a Silo naprakész-e."
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo tidak dapat membuat kode masuk. Coba lagi. Jika masalah berlanjut, pastikan penyandingan perangkat diaktifkan dan Silo sudah menggunakan versi terbaru."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo non ha potuto generare un codice di accesso. Riprova. Se il problema persiste, verifica che l’abbinamento dei dispositivi sia abilitato e che Silo sia aggiornato."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Siloでサインインコードを作成できませんでした。もう一度お試しください。問題が続く場合は、デバイスのペアリングが有効になっているか、Siloが最新バージョンかを確認してください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo에서 로그인 코드를 생성하지 못했습니다. 다시 시도해 주세요. 문제가 계속되면 기기 페어링이 활성화되어 있는지, Silo가 최신 버전인지 확인해 주세요."
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo tidak dapat menjana kod log masuk. Cuba lagi. Jika masalah ini berterusan, pastikan penggandingan peranti diaktifkan dan Silo dikemas kini kepada versi terkini."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo kunne ikke opprette en innloggingskode. Prøv igjen. Hvis problemet vedvarer, kontroller at paring av enheter er aktivert, og at Silo er oppdatert."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo kon geen inlogcode aanmaken. Probeer het opnieuw. Als dit probleem zich blijft voordoen, controleer dan of het koppelen van apparaten is ingeschakeld en of Silo is bijgewerkt naar de nieuwste versie."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo nie mogło wygenerować kodu logowania. Spróbuj ponownie. Jeśli problem będzie się powtarzał, sprawdź, czy parowanie urządzeń jest włączone i czy Silo jest aktualne."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "O Silo não conseguiu gerar um código de login. Tente novamente. Se o problema persistir, verifique se o pareamento de dispositivos está ativado e se o Silo está atualizado."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo nu a putut crea un cod de autentificare. Încearcă din nou. Dacă problema persistă, verifică dacă asocierea dispozitivelor este activată și dacă Silo este actualizat."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo не удалось создать код для входа. Попробуйте ещё раз. Если проблема сохраняется, убедитесь, что сопряжение устройств включено, а Silo обновлён до последней версии."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo nedokázalo vytvoriť prihlasovací kód. Skúste to znova. Ak problém pretrváva, skontrolujte, či je zapnuté párovanie zariadení a či je Silo aktuálne."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Kode za prijavo v Silo ni bilo mogoče ustvariti. Poskusite znova. Če težava ni odpravljena, preverite, ali je seznanjanje naprav omogočeno in ali uporabljate najnovejšo različico Silo."
+          }
+        },
+        "sr-Latn" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo nije uspeo da generiše kod za prijavu. Pokušajte ponovo. Ako se problem nastavi, proverite da li je uparivanje uređaja omogućeno i da li je Silo ažuriran."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo kunde inte skapa en inloggningskod. Försök igen. Om problemet kvarstår, kontrollera att parkoppling av enheter är aktiverad och att Silo är uppdaterat."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo ไม่สามารถสร้างรหัสลงชื่อเข้าใช้ได้ ลองอีกครั้ง หากยังเกิดปัญหานี้ ให้ตรวจสอบว่าเปิดใช้งานการจับคู่อุปกรณ์แล้ว และ Silo เป็นเวอร์ชันล่าสุด"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo bir oturum açma kodu oluşturamadı. Tekrar deneyin. Sorun devam ederse cihaz eşleştirmenin etkin olduğundan ve Silo'nun güncel olduğundan emin olun."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo не вдалося створити код для входу. Спробуйте ще раз. Якщо проблема не зникає, переконайтеся, що сполучення пристроїв увімкнено, а Silo оновлено до останньої версії."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo không thể tạo mã đăng nhập. Hãy thử lại. Nếu sự cố vẫn tiếp diễn, hãy kiểm tra xem tính năng ghép nối thiết bị đã được bật và Silo đã được cập nhật lên phiên bản mới nhất hay chưa."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo 无法生成登录码。请重试。如果问题持续出现，请检查设备配对是否已启用，以及 Silo 是否已更新至最新版本。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo 無法產生登入碼。請再試一次。如果問題持續發生，請確認已啟用裝置配對，且 Silo 已更新至最新版本。"
+          }
+        }
+      }
+    },
     "Silo couldn’t prepare the selected stream. Check its transcoding permissions and server settings." : {
       "localizations" : {
         "ar" : {
@@ -634300,6 +635181,226 @@
           "stringUnit" : {
             "state" : "needs_review",
             "value" : "Silo 傳回不符合所選畫質限制的串流。播放已停止，而非移除限制。"
+          }
+        }
+      }
+    },
+    "Silo supplied an approval link for a different address. Go back and enter the public address configured in Silo." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "وفّر Silo رابطًا للموافقة على الجهاز يشير إلى عنوان مختلف. ارجع وأدخل العنوان العام المضبوط في Silo."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo предостави връзка за одобрение на устройството, която води към друг адрес. Върнете се назад и въведете публичния адрес, зададен в Silo."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo ha proporcionat un enllaç d'autorització per a una adreça diferent. Torneu enrere i introduïu l'adreça pública configurada a Silo."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo poskytlo schvalovací odkaz pro jinou adresu. Vraťte se zpět a zadejte veřejnou adresu nastavenou v Silo."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo angav et godkendelseslink til en anden adresse. Gå tilbage, og indtast den offentlige adresse, der er konfigureret i Silo."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo hat einen Link zur Gerätefreigabe für eine andere Adresse bereitgestellt. Gehe zurück und gib die in Silo konfigurierte öffentliche Adresse ein."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Το Silo παρείχε έναν σύνδεσμο έγκρισης για διαφορετική διεύθυνση. Επιστρέψτε και εισαγάγετε τη δημόσια διεύθυνση που έχει οριστεί στο Silo."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo ha proporcionado un enlace de autorización para una dirección diferente. Vuelve atrás e introduce la dirección pública configurada en Silo."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo پیوند تأییدی برای نشانی دیگری ارائه کرد. برگردید و نشانی عمومی تنظیم‌شده در Silo را وارد کنید."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo antoi hyväksyntälinkin eri osoitteeseen. Palaa takaisin ja anna Siloon määritetty julkinen osoite."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo a fourni un lien d’autorisation pour une autre adresse. Revenez en arrière et saisissez l’adresse publique configurée dans Silo."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo סיפק קישור לאישור עבור כתובת אחרת. חזרו והזינו את הכתובת הציבורית שהוגדרה ב־Silo."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo ने किसी दूसरे पते के लिए मंज़ूरी का लिंक दिया है। वापस जाएँ और Silo में सेट किया गया सार्वजनिक पता दर्ज करें।"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo je poslao poveznicu za odobravanje za drugu adresu. Vratite se i unesite javnu adresu postavljenu u sustavu Silo."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "A Silo egy másik címhez tartozó jóváhagyási hivatkozást adott meg. Lépjen vissza, és adja meg a Silo beállításaiban megadott nyilvános címet."
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo memberikan tautan persetujuan untuk alamat yang berbeda. Kembali dan masukkan alamat publik yang dikonfigurasi di Silo."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo ha fornito un link di autorizzazione per un indirizzo diverso. Torna indietro e inserisci l’indirizzo pubblico configurato in Silo."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Siloから、別のアドレス用の承認リンクが返されました。戻って、Siloに設定されている公開アドレスを入力してください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo에서 다른 주소를 가리키는 승인 링크를 제공했습니다. 돌아가서 Silo에 설정된 공개 주소를 입력해 주세요."
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo memberikan pautan kelulusan untuk alamat yang berbeza. Kembali dan masukkan alamat awam yang dikonfigurasikan dalam Silo."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo oppga en godkjenningslenke for en annen adresse. Gå tilbake og skriv inn den offentlige adressen som er konfigurert i Silo."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo heeft een goedkeuringslink voor een ander adres verstrekt. Ga terug en voer het openbare adres in dat in Silo is ingesteld."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo udostępniło link do zatwierdzenia urządzenia prowadzący do innego adresu. Wróć i wpisz adres publiczny skonfigurowany w Silo."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "O Silo forneceu um link de aprovação para um endereço diferente. Volte e insira o endereço público configurado no Silo."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo a furnizat un link de aprobare pentru o altă adresă. Revino și introdu adresa publică configurată în Silo."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo предоставил ссылку для авторизации устройства, ведущую на другой адрес. Вернитесь и введите публичный адрес, настроенный в Silo."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo poskytlo odkaz na schválenie zariadenia pre inú adresu. Vráťte sa a zadajte verejnú adresu nastavenú v službe Silo."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Povezava za odobritev naprave, ki jo je posredoval Silo, kaže na drug naslov. Vrnite se in vnesite javni naslov, nastavljen v storitvi Silo."
+          }
+        },
+        "sr-Latn" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Veza za odobravanje uređaja koju je poslao Silo vodi na drugu adresu. Vratite se i unesite javnu adresu podešenu u servisu Silo."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo gav en godkännandelänk för en annan adress. Gå tillbaka och ange den publika adress som är konfigurerad i Silo."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo ส่งลิงก์อนุมัติการลงชื่อเข้าใช้สำหรับที่อยู่อื่นมาให้ ย้อนกลับแล้วป้อนที่อยู่สาธารณะที่กำหนดไว้ใน Silo"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo farklı bir adres için oturum açma onay bağlantısı sağladı. Geri dönüp Silo'da yapılandırılmış herkese açık adresi girin."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo надав посилання для схвалення входу, що веде на іншу адресу. Поверніться назад і введіть публічну адресу, налаштовану в Silo."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo đã cung cấp liên kết cấp quyền đăng nhập cho một địa chỉ khác. Hãy quay lại và nhập địa chỉ công khai được cấu hình trong Silo."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo 提供的登录授权链接指向另一个地址。请返回并输入在 Silo 中配置的公开地址。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo 提供的登入授權連結指向另一個位址。請返回並輸入在 Silo 中設定的公開位址。"
           }
         }
       }
@@ -708991,6 +710092,446 @@
           "stringUnit" : {
             "state" : "needs_review",
             "value" : "此位址不是 WebDAV 端點。"
+          }
+        }
+      }
+    },
+    "This address redirects to another server address. Go back and enter the final address shown in your browser." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "يعيد هذا العنوان التوجيه إلى عنوان خادم آخر. ارجع وأدخل العنوان النهائي الظاهر في متصفحك."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Този адрес пренасочва към друг сървърен адрес. Върнете се назад и въведете крайния адрес, показан в браузъра ви."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Aquesta adreça redirigeix a una altra adreça de servidor. Torneu enrere i introduïu l'adreça final que apareix al navegador."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Tato adresa přesměrovává na jinou adresu serveru. Vraťte se zpět a zadejte konečnou adresu zobrazenou v prohlížeči."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Denne adresse omdirigerer til en anden serveradresse. Gå tilbage, og indtast den endelige adresse, der vises i din browser."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Diese Adresse leitet auf eine andere Serveradresse weiter. Gehe zurück und gib die endgültige Adresse ein, die in deinem Browser angezeigt wird."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Αυτή η διεύθυνση ανακατευθύνει σε άλλη διεύθυνση διακομιστή. Επιστρέψτε και εισαγάγετε την τελική διεύθυνση που εμφανίζεται στο πρόγραμμα περιήγησής σας."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Esta dirección redirige a otra dirección de servidor. Vuelve atrás e introduce la dirección final que aparece en tu navegador."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "این نشانی شما را به نشانی دیگری از سرور هدایت می‌کند. برگردید و نشانی نهایی را که در مرورگرتان نمایش داده می‌شود، وارد کنید."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Tämä osoite ohjaa toiseen palvelinosoitteeseen. Palaa takaisin ja anna selaimessa näkyvä lopullinen osoite."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Cette adresse redirige vers une autre adresse de serveur. Revenez en arrière et saisissez l’adresse finale affichée dans votre navigateur."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "הכתובת הזו מפנה לכתובת שרת אחרת. חזרו והזינו את הכתובת הסופית שמופיעה בדפדפן שלכם."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "यह पता सर्वर के किसी दूसरे पते पर रीडायरेक्ट करता है। वापस जाएँ और अपने ब्राउज़र में दिखने वाला अंतिम पता दर्ज करें।"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ova adresa preusmjerava na drugu adresu poslužitelja. Vratite se i unesite konačnu adresu prikazanu u pregledniku."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ez a cím egy másik kiszolgálócímre irányít át. Lépjen vissza, és adja meg a böngészőben látható végleges címet."
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Alamat ini mengalihkan Anda ke alamat server lain. Kembali dan masukkan alamat akhir yang ditampilkan di browser Anda."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Questo indirizzo reindirizza a un altro indirizzo del server. Torna indietro e inserisci l’indirizzo finale mostrato nel browser."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "このアドレスは別のサーバーアドレスにリダイレクトされます。戻って、ブラウザに最終的に表示されるアドレスを入力してください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "이 주소는 다른 서버 주소로 리디렉션됩니다. 돌아가서 브라우저에 표시된 최종 주소를 입력해 주세요."
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Alamat ini mengubah hala ke alamat pelayan lain. Kembali dan masukkan alamat akhir yang dipaparkan dalam pelayar anda."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Denne adressen omdirigerer til en annen serveradresse. Gå tilbake og skriv inn den endelige adressen som vises i nettleseren."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dit adres verwijst door naar een ander serveradres. Ga terug en voer het uiteindelijke adres in dat in je browser wordt weergegeven."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ten adres przekierowuje na inny adres serwera. Wróć i wpisz końcowy adres widoczny w przeglądarce."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Este endereço redireciona para outro endereço de servidor. Volte e insira o endereço final exibido no seu navegador."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Această adresă redirecționează către o altă adresă de server. Revino și introdu adresa finală afișată în browser."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Этот адрес перенаправляет на другой адрес сервера. Вернитесь и введите конечный адрес, показанный в браузере."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Táto adresa presmerováva na inú adresu servera. Vráťte sa a zadajte konečnú adresu zobrazenú v prehliadači."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ta naslov preusmerja na drug naslov strežnika. Vrnite se in vnesite končni naslov, prikazan v brskalniku."
+          }
+        },
+        "sr-Latn" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ova adresa preusmerava na drugu adresu servera. Vratite se i unesite krajnju adresu prikazanu u pregledaču."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Den här adressen omdirigerar till en annan serveradress. Gå tillbaka och ange den slutliga adressen som visas i webbläsaren."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "ที่อยู่นี้เปลี่ยนเส้นทางไปยังที่อยู่เซิร์ฟเวอร์อื่น ย้อนกลับแล้วป้อนที่อยู่ปลายทางที่แสดงในเบราว์เซอร์ของคุณ"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Bu adres başka bir sunucu adresine yönlendiriyor. Geri dönüp tarayıcınızda görünen son adresi girin."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ця адреса переспрямовує на іншу адресу сервера. Поверніться назад і введіть кінцеву адресу, показану у вашому браузері."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Địa chỉ này chuyển hướng đến một địa chỉ máy chủ khác. Hãy quay lại và nhập địa chỉ cuối cùng hiển thị trong trình duyệt của bạn."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "此地址会重定向到另一个服务器地址。请返回并输入浏览器中显示的最终地址。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "此位址會重新導向至另一個伺服器位址。請返回並輸入瀏覽器中顯示的最終位址。"
+          }
+        }
+      }
+    },
+    "This address returned a web page instead of Silo's API. Check the server address and any proxy sign-in requirements." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "أعاد هذا العنوان صفحة ويب بدلًا من واجهة برمجة التطبيقات (API) الخاصة بـ Silo. تحقّق من عنوان الخادم ومن أي متطلبات لتسجيل الدخول يفرضها الخادم الوكيل."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Този адрес върна уеб страница вместо API на Silo. Проверете адреса на сървъра и евентуалните изисквания за вход на прокси сървъра."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Aquesta adreça ha retornat una pàgina web en lloc de l'API de Silo. Comproveu l'adreça del servidor i si el servidor intermediari requereix iniciar sessió."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Tato adresa vrátila webovou stránku místo API Silo. Zkontrolujte adresu serveru a případné požadavky proxy serveru na přihlášení."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Denne adresse returnerede en webside i stedet for Silos API. Kontrollér serveradressen og eventuelle krav om login på proxyserveren."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Diese Adresse hat eine Webseite statt der API von Silo zurückgegeben. Prüfe die Serveradresse und etwaige Anmeldeanforderungen des Proxys."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Αυτή η διεύθυνση επέστρεψε μια ιστοσελίδα αντί για το API του Silo. Ελέγξτε τη διεύθυνση του διακομιστή και τυχόν απαιτήσεις σύνδεσης στον διακομιστή μεσολάβησης."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Esta dirección ha devuelto una página web en lugar de la API de Silo. Comprueba la dirección del servidor y los requisitos de inicio de sesión del proxy, si los hay."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "این نشانی به‌جای API مربوط به Silo، یک صفحهٔ وب برگرداند. نشانی سرور و الزامات احتمالی ورود به پراکسی را بررسی کنید."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Tämä osoite palautti verkkosivun Silon API-rajapinnan sijaan. Tarkista palvelimen osoite ja mahdolliset välityspalvelimen kirjautumisvaatimukset."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Cette adresse a renvoyé une page web au lieu de l’API de Silo. Vérifiez l’adresse du serveur et les éventuelles exigences de connexion du proxy."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "הכתובת הזו החזירה דף אינטרנט במקום ה־API של Silo. בדקו את כתובת השרת ואת דרישות הכניסה לשרת הפרוקסי, אם ישנן."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "इस पते से Silo के API की जगह एक वेब पेज मिला। सर्वर का पता और प्रॉक्सी की साइन-इन संबंधी ज़रूरतें जाँचें।"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ova je adresa vratila web-stranicu umjesto API-ja sustava Silo. Provjerite adresu poslužitelja i eventualne zahtjeve za prijavu na proxy poslužitelj."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ez a cím a Silo API-ja helyett egy weboldalt adott vissza. Ellenőrizze a kiszolgáló címét és a proxy esetleges bejelentkezési követelményeit."
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Alamat ini mengembalikan halaman web, bukan API Silo. Periksa alamat server dan persyaratan masuk pada proksi, jika ada."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Questo indirizzo ha restituito una pagina web anziché l’API di Silo. Controlla l’indirizzo del server e gli eventuali requisiti di accesso del proxy."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "このアドレスからは、SiloのAPIではなくウェブページが返されました。サーバーアドレスとプロキシのサインイン要件を確認してください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "이 주소에서 Silo API 대신 웹 페이지가 반환되었습니다. 서버 주소와 프록시 로그인 요구 사항을 확인해 주세요."
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Alamat ini mengembalikan halaman web dan bukannya API Silo. Semak alamat pelayan dan sebarang keperluan log masuk proksi."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Denne adressen returnerte en nettside i stedet for API-et til Silo. Kontroller serveradressen og eventuelle innloggingskrav for proxyen."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dit adres gaf een webpagina terug in plaats van de API van Silo. Controleer het serveradres en eventuele inlogvereisten van de proxy."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ten adres zwrócił stronę internetową zamiast interfejsu API Silo. Sprawdź adres serwera i ewentualne wymagania dotyczące logowania na serwerze proxy."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Este endereço retornou uma página da web em vez da API do Silo. Verifique o endereço do servidor e os requisitos de login do proxy, se houver."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Această adresă a returnat o pagină web în loc de un răspuns de la API-ul Silo. Verifică adresa serverului și eventualele cerințe de autentificare ale proxy-ului."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "По этому адресу получена веб-страница вместо ответа API Silo. Проверьте адрес сервера и возможные требования к аутентификации на прокси-сервере."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Táto adresa vrátila webovú stránku namiesto odpovede z API Silo. Skontrolujte adresu servera a prípadné požiadavky na prihlásenie na proxy serveri."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ta naslov je vrnil spletno stran namesto odgovora iz API-ja Silo. Preverite naslov strežnika in morebitne zahteve za prijavo na posredniški strežnik."
+          }
+        },
+        "sr-Latn" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ova adresa je vratila veb-stranicu umesto odgovora Silo API-ja. Proverite adresu servera i eventualne zahteve za prijavu na proksi server."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Den här adressen returnerade en webbsida i stället för ett svar från Silos API. Kontrollera serveradressen och eventuella inloggningskrav för proxyservern."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "ที่อยู่นี้ส่งคืนหน้าเว็บแทน API ของ Silo ตรวจสอบที่อยู่เซิร์ฟเวอร์และข้อกำหนดการลงชื่อเข้าใช้ของพร็อกซี หากมี"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Bu adres, Silo API'si yerine bir web sayfası döndürdü. Sunucu adresini ve varsa ara sunucunun oturum açma gereksinimlerini kontrol edin."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "За цією адресою повернуто вебсторінку замість API Silo. Перевірте адресу сервера та вимоги проксі-сервера щодо входу, якщо вони є."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Địa chỉ này trả về một trang web thay vì API của Silo. Hãy kiểm tra địa chỉ máy chủ và các yêu cầu đăng nhập của máy chủ proxy, nếu có."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "此地址返回了网页，而不是 Silo 的 API 响应。请检查服务器地址，以及代理的登录要求（如有）。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "此位址傳回了網頁，而不是 Silo 的 API 回應。請檢查伺服器位址，以及代理伺服器的登入要求（如有）。"
           }
         }
       }
@@ -787436,6 +788977,886 @@
         }
       }
     },
+    "We couldn't complete Silo approval. Try again to get a new code." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "تعذّر إكمال الموافقة على الجهاز في Silo. حاول مرة أخرى للحصول على رمز جديد."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Не успяхме да завършим одобрението на устройството в Silo. Опитайте отново, за да получите нов код."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "No hem pogut completar l'autorització del dispositiu a Silo. Torneu-ho a provar per obtenir un codi nou."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nepodařilo se nám dokončit schválení zařízení v Silo. Zkuste to znovu, abyste získali nový kód."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Vi kunne ikke fuldføre godkendelsen af enheden i Silo. Prøv igen for at få en ny kode."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Wir konnten die Freigabe des Geräts in Silo nicht abschließen. Versuche es erneut, um einen neuen Code zu erhalten."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Δεν ήταν δυνατή η ολοκλήρωση της έγκρισης στο Silo. Δοκιμάστε ξανά για να λάβετε νέο κωδικό."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "No hemos podido completar la autorización en Silo. Vuelve a intentarlo para obtener un código nuevo."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "نتوانستیم فرایند تأیید در Silo را تکمیل کنیم. برای دریافت کد جدید دوباره تلاش کنید."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo-kirjautumisen hyväksymistä ei voitu suorittaa loppuun. Yritä uudelleen saadaksesi uuden koodin."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nous n’avons pas pu terminer l’autorisation dans Silo. Réessayez pour obtenir un nouveau code."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "לא הצלחנו להשלים את האישור ב־Silo. נסו שוב כדי לקבל קוד חדש."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "हम Silo में साइन-इन की मंज़ूरी की प्रक्रिया पूरी नहीं कर सके। नया कोड पाने के लिए फिर से कोशिश करें।"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nismo mogli dovršiti odobravanje u sustavu Silo. Pokušajte ponovno da biste dobili novi kod."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nem sikerült befejezni a Silo jóváhagyási folyamatát. Próbálja újra, hogy új kódot kapjon."
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Kami tidak dapat menyelesaikan proses persetujuan untuk masuk ke Silo. Coba lagi untuk mendapatkan kode baru."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Non è stato possibile completare l’autorizzazione dell’accesso a Silo. Riprova per ottenere un nuovo codice."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Siloへのサインインの承認を完了できませんでした。新しいコードを取得するには、もう一度お試しください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo에서 기기 승인을 완료하지 못했습니다. 새 코드를 받으려면 다시 시도해 주세요."
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Kami tidak dapat menyelesaikan proses kelulusan peranti dalam Silo. Cuba lagi untuk mendapatkan kod baharu."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Vi kunne ikke fullføre enhetsgodkjenningen i Silo. Prøv igjen for å få en ny kode."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "We konden de goedkeuring van het apparaat in Silo niet voltooien. Probeer het opnieuw om een nieuwe code te krijgen."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nie udało się dokończyć zatwierdzania urządzenia w Silo. Spróbuj ponownie, aby uzyskać nowy kod."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Não foi possível concluir a aprovação do dispositivo no Silo. Tente novamente para obter um novo código."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nu am putut finaliza aprobarea dispozitivului în Silo. Încearcă din nou pentru a obține un cod nou."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Не удалось завершить авторизацию устройства в Silo. Попробуйте ещё раз, чтобы получить новый код."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nepodarilo sa nám dokončiť schválenie zariadenia v službe Silo. Skúste to znova, aby ste získali nový kód."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ni nam uspelo dokončati odobritve naprave v storitvi Silo. Poskusite znova, da dobite novo kodo."
+          }
+        },
+        "sr-Latn" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nismo uspeli da dovršimo odobravanje uređaja u servisu Silo. Pokušajte ponovo da biste dobili novi kod."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Vi kunde inte slutföra godkännandet i Silo. Försök igen för att få en ny kod."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "เราไม่สามารถดำเนินการอนุมัติการลงชื่อเข้าใช้ Silo ให้เสร็จสมบูรณ์ได้ ลองอีกครั้งเพื่อรับรหัสใหม่"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo oturum açma onayını tamamlayamadık. Yeni bir kod almak için tekrar deneyin."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Нам не вдалося завершити схвалення входу в Silo. Спробуйте ще раз, щоб отримати новий код."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Không thể hoàn tất việc cấp quyền đăng nhập vào Silo. Hãy thử lại để nhận mã mới."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "未能完成 Silo 登录授权。请重试以获取新的登录码。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "無法完成 Silo 的登入授權。請再試一次以取得新的登入碼。"
+          }
+        }
+      }
+    },
+    "We couldn't finish connecting your Silo profile. Try again." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "تعذّر إكمال ربط ملفك الشخصي في Silo. حاول مرة أخرى."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Не успяхме да завършим свързването на профила ви в Silo. Опитайте отново."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "No hem pogut acabar de connectar el vostre perfil de Silo. Torneu-ho a provar."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nepodařilo se nám dokončit připojení vašeho profilu Silo. Zkuste to znovu."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Vi kunne ikke færdiggøre tilknytningen af din Silo-profil. Prøv igen."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Wir konnten die Verknüpfung deines Silo-Profils nicht abschließen. Versuche es erneut."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Δεν ήταν δυνατή η ολοκλήρωση της σύνδεσης του προφίλ σας στο Silo. Δοκιμάστε ξανά."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "No hemos podido terminar de conectar tu perfil de Silo. Vuelve a intentarlo."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "نتوانستیم اتصال نمایهٔ شما در Silo را تکمیل کنیم. دوباره تلاش کنید."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo-profiilisi yhdistämistä ei voitu viimeistellä. Yritä uudelleen."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nous n’avons pas pu terminer la connexion de votre profil Silo. Réessayez."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "לא הצלחנו להשלים את חיבור הפרופיל שלכם ב־Silo. נסו שוב."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "हम आपकी Silo प्रोफ़ाइल को कनेक्ट करने की प्रक्रिया पूरी नहीं कर सके। फिर से कोशिश करें।"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nismo mogli dovršiti povezivanje vašeg profila u sustavu Silo. Pokušajte ponovno."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nem sikerült befejezni Silo-profilja csatlakoztatását. Próbálja újra."
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Kami tidak dapat menyelesaikan koneksi ke profil Silo Anda. Coba lagi."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Non è stato possibile completare la connessione del tuo profilo Silo. Riprova."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Siloプロフィールの接続を完了できませんでした。もう一度お試しください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo 프로필 연결을 완료하지 못했습니다. 다시 시도해 주세요."
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Kami tidak dapat melengkapkan proses penyambungan profil Silo anda. Cuba lagi."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Vi kunne ikke fullføre tilkoblingen til Silo-profilen din. Prøv igjen."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "We konden het koppelen van je Silo-profiel niet voltooien. Probeer het opnieuw."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nie udało się dokończyć łączenia z twoim profilem Silo. Spróbuj ponownie."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Não foi possível concluir a conexão com seu perfil do Silo. Tente novamente."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nu am putut finaliza conectarea profilului tău Silo. Încearcă din nou."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Не удалось завершить подключение вашего профиля Silo. Попробуйте ещё раз."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nepodarilo sa nám dokončiť pripojenie vášho profilu Silo. Skúste to znova."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ni nam uspelo dokončati povezovanja vašega profila Silo. Poskusite znova."
+          }
+        },
+        "sr-Latn" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nismo uspeli da dovršimo povezivanje vašeg Silo profila. Pokušajte ponovo."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Vi kunde inte slutföra anslutningen av din Silo-profil. Försök igen."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "เราไม่สามารถเชื่อมต่อโปรไฟล์ Silo ของคุณให้เสร็จสมบูรณ์ได้ ลองอีกครั้ง"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo profilinizi bağlama işlemini tamamlayamadık. Tekrar deneyin."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Нам не вдалося завершити підключення вашого профілю Silo. Спробуйте ще раз."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Không thể hoàn tất việc kết nối hồ sơ Silo của bạn. Hãy thử lại."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "未能完成连接你的 Silo 用户档案的操作。请重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "無法完成連接你的 Silo 使用者檔案的程序。請再試一次。"
+          }
+        }
+      }
+    },
+    "We couldn't verify Silo at this address. Check the address and update Silo if needed." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "تعذّر التحقّق من Silo على هذا العنوان. تحقّق من العنوان وحدّث Silo إذا لزم الأمر."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Не успяхме да проверим Silo на този адрес. Проверете адреса и при нужда актуализирайте Silo."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "No hem pogut verificar Silo en aquesta adreça. Comproveu l'adreça i actualitzeu Silo si cal."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nepodařilo se nám ověřit Silo na této adrese. Zkontrolujte adresu a v případě potřeby aktualizujte Silo."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Vi kunne ikke bekræfte Silo på denne adresse. Kontrollér adressen, og opdater Silo, hvis det er nødvendigt."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Wir konnten Silo unter dieser Adresse nicht verifizieren. Prüfe die Adresse und aktualisiere Silo bei Bedarf."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Δεν ήταν δυνατή η επαλήθευση του Silo σε αυτή τη διεύθυνση. Ελέγξτε τη διεύθυνση και ενημερώστε το Silo αν χρειάζεται."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "No hemos podido verificar Silo en esta dirección. Comprueba la dirección y actualiza Silo si es necesario."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "نتوانستیم Silo را در این نشانی تأیید کنیم. نشانی را بررسی کنید و در صورت نیاز Silo را به‌روز کنید."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Siloa ei voitu varmentaa tässä osoitteessa. Tarkista osoite ja päivitä Silo tarvittaessa."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nous n’avons pas pu vérifier Silo à cette adresse. Vérifiez l’adresse et mettez Silo à jour si nécessaire."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "לא הצלחנו לאמת את Silo בכתובת הזו. בדקו את הכתובת ועדכנו את Silo במידת הצורך."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "हम इस पते पर Silo की पुष्टि नहीं कर सके। पता जाँचें और ज़रूरत पड़ने पर Silo को अपडेट करें।"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nismo mogli provjeriti Silo na ovoj adresi. Provjerite adresu i po potrebi ažurirajte Silo."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nem sikerült ellenőrizni a Silo szolgáltatást ezen a címen. Ellenőrizze a címet, és szükség esetén frissítse a Silo szoftvert."
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Kami tidak dapat memverifikasi Silo di alamat ini. Periksa alamat dan perbarui Silo jika perlu."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Non è stato possibile verificare Silo a questo indirizzo. Controlla l’indirizzo e aggiorna Silo se necessario."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "このアドレスでSiloを確認できませんでした。アドレスを確認し、必要に応じてSiloを更新してください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "이 주소에서 Silo를 확인하지 못했습니다. 주소를 확인하고 필요한 경우 Silo를 업데이트해 주세요."
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Kami tidak dapat mengesahkan Silo di alamat ini. Semak alamat tersebut dan kemas kini Silo jika perlu."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Vi kunne ikke bekrefte Silo på denne adressen. Kontroller adressen og oppdater Silo om nødvendig."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "We konden Silo op dit adres niet verifiëren. Controleer het adres en werk Silo zo nodig bij."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nie udało się potwierdzić, że pod tym adresem działa Silo. Sprawdź adres i w razie potrzeby zaktualizuj Silo."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Não foi possível verificar o Silo neste endereço. Verifique o endereço e atualize o Silo, se necessário."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nu am putut verifica Silo la această adresă. Verifică adresa și actualizează Silo dacă este necesar."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Не удалось проверить Silo по этому адресу. Проверьте адрес и при необходимости обновите Silo."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nepodarilo sa nám overiť Silo na tejto adrese. Skontrolujte adresu a v prípade potreby aktualizujte Silo."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ni nam uspelo preveriti storitve Silo na tem naslovu. Preverite naslov in po potrebi posodobite Silo."
+          }
+        },
+        "sr-Latn" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nismo uspeli da proverimo Silo na ovoj adresi. Proverite adresu i ažurirajte Silo ako je potrebno."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Vi kunde inte verifiera Silo på den här adressen. Kontrollera adressen och uppdatera Silo vid behov."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "เราไม่สามารถตรวจสอบยืนยัน Silo ที่ที่อยู่นี้ได้ ตรวจสอบที่อยู่และอัปเดต Silo หากจำเป็น"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Bu adreste Silo'nun çalıştığını doğrulayamadık. Adresi kontrol edin ve gerekirse Silo'yu güncelleyin."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Нам не вдалося підтвердити, що за цією адресою працює Silo. Перевірте адресу й за потреби оновіть Silo."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Không thể xác minh Silo tại địa chỉ này. Hãy kiểm tra địa chỉ và cập nhật Silo nếu cần."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "无法确认此地址上的服务是否为 Silo。请检查地址，并根据需要更新 Silo。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "無法確認此位址上的服務是否為 Silo。請檢查位址，並視需要更新 Silo。"
+          }
+        }
+      }
+    },
+    "We couldn't verify your Silo profile PIN. Try again." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "تعذّر التحقّق من رمز PIN لملفك الشخصي في Silo. حاول مرة أخرى."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Не успяхме да проверим ПИН кода на профила ви в Silo. Опитайте отново."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "No hem pogut verificar el PIN del vostre perfil de Silo. Torneu-ho a provar."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nepodařilo se nám ověřit PIN vašeho profilu Silo. Zkuste to znovu."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Vi kunne ikke bekræfte pinkoden til din Silo-profil. Prøv igen."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Wir konnten die PIN deines Silo-Profils nicht überprüfen. Versuche es erneut."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Δεν ήταν δυνατή η επαλήθευση του PIN του προφίλ σας στο Silo. Δοκιμάστε ξανά."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "No hemos podido verificar el PIN de tu perfil de Silo. Vuelve a intentarlo."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "نتوانستیم رمز پین نمایهٔ شما در Silo را تأیید کنیم. دوباره تلاش کنید."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo-profiilisi PIN-koodia ei voitu vahvistaa. Yritä uudelleen."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nous n’avons pas pu vérifier le code PIN de votre profil Silo. Réessayez."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "לא הצלחנו לאמת את קוד ה־PIN של הפרופיל שלכם ב־Silo. נסו שוב."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "हम आपकी Silo प्रोफ़ाइल का PIN सत्यापित नहीं कर सके। फिर से कोशिश करें।"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nismo mogli provjeriti PIN vašeg profila u sustavu Silo. Pokušajte ponovno."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nem sikerült ellenőrizni Silo-profilja PIN-kódját. Próbálja újra."
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Kami tidak dapat memverifikasi PIN profil Silo Anda. Coba lagi."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Non è stato possibile verificare il PIN del tuo profilo Silo. Riprova."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "SiloプロフィールのPINを確認できませんでした。もう一度お試しください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo 프로필의 PIN을 확인하지 못했습니다. 다시 시도해 주세요."
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Kami tidak dapat mengesahkan PIN profil Silo anda. Cuba lagi."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Vi kunne ikke bekrefte PIN-koden til Silo-profilen din. Prøv igjen."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "We konden de pincode van je Silo-profiel niet verifiëren. Probeer het opnieuw."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nie udało się zweryfikować kodu PIN twojego profilu Silo. Spróbuj ponownie."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Não foi possível verificar o PIN do seu perfil do Silo. Tente novamente."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nu am putut verifica PIN-ul profilului tău Silo. Încearcă din nou."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Не удалось проверить PIN-код вашего профиля Silo. Попробуйте ещё раз."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nepodarilo sa nám overiť PIN vášho profilu Silo. Skúste to znova."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ni nam uspelo preveriti kode PIN vašega profila Silo. Poskusite znova."
+          }
+        },
+        "sr-Latn" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nismo uspeli da proverimo PIN vašeg Silo profila. Pokušajte ponovo."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Vi kunde inte verifiera PIN-koden för din Silo-profil. Försök igen."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "เราไม่สามารถตรวจสอบ PIN ของโปรไฟล์ Silo ของคุณได้ ลองอีกครั้ง"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Silo profilinizin PIN'ini doğrulayamadık. Tekrar deneyin."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Нам не вдалося перевірити PIN-код вашого профілю Silo. Спробуйте ще раз."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Không thể xác minh mã PIN của hồ sơ Silo của bạn. Hãy thử lại."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "未能验证你的 Silo 用户档案 PIN 码。请重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "無法驗證你的 Silo 使用者檔案 PIN 碼。請再試一次。"
+          }
+        }
+      }
+    },
     "We created this profile from your %@ account. You can rename it or change the photo here, or any time in Settings." : {
       "comment" : "Explanatory text on the tvOS first-run profile screen. %@ is the provider name the profile was created from, such as Plex or Jellyfin.",
       "extractionState" : "stale",
@@ -821426,6 +823847,234 @@
           "stringUnit" : {
             "state" : "needs_review",
             "value" : "即將播出"
+          }
+        }
+      }
+    },
+    "error.accessRestricted" : {
+      "comment" : "Shown when a stream provider explicitly blocks access, without rejecting the saved password.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "حظر مزوّد الخدمة الوصول. تحقّق من اشتراكك أو تواصل مع مزوّد الخدمة."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Доставчикът е блокирал достъпа. Проверете абонамента си или се свържете с доставчика."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "El proveïdor ha bloquejat l'accés. Comprova la teva subscripció o contacta amb el proveïdor."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Poskytovatel zablokoval přístup. Zkontrolujte své předplatné nebo kontaktujte poskytovatele."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Udbyderen har blokeret adgangen. Kontrollér dit abonnement, eller kontakt udbyderen."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Der Anbieter hat den Zugriff gesperrt. Prüfe dein Abonnement oder kontaktiere den Anbieter."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ο πάροχος έχει αποκλείσει την πρόσβαση. Ελέγξτε τη συνδρομή σας ή επικοινωνήστε με τον πάροχο."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The provider has blocked access. Check your subscription or contact the provider."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "El proveedor ha bloqueado el acceso. Comprueba tu suscripción o contacta con el proveedor."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "ارائه‌دهنده دسترسی را مسدود کرده است. اشتراک خود را بررسی کنید یا با ارائه‌دهنده تماس بگیرید."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Palveluntarjoaja on estänyt pääsyn. Tarkista tilauksesi tai ota yhteyttä palveluntarjoajaan."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Le fournisseur a bloqué l’accès. Vérifiez votre abonnement ou contactez le fournisseur."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "הספק חסם את הגישה. יש לבדוק את המינוי או לפנות לספק."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "सेवा प्रदाता ने पहुँच रोक दी है। अपनी सदस्यता जाँचें या सेवा प्रदाता से संपर्क करें।"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Pružatelj usluge blokirao je pristup. Provjerite svoju pretplatu ili se obratite pružatelju usluge."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "A szolgáltató letiltotta a hozzáférést. Ellenőrizze az előfizetését, vagy lépjen kapcsolatba a szolgáltatóval."
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Penyedia telah memblokir akses. Periksa langganan Anda atau hubungi penyedia."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Il fornitore ha bloccato l'accesso. Controlla il tuo abbonamento o contatta il fornitore."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "プロバイダーによってアクセスがブロックされました。契約状況を確認するか、プロバイダーにお問い合わせください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "서비스 제공업체가 접근을 차단했습니다. 구독 상태를 확인하거나 서비스 제공업체에 문의하세요."
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Penyedia telah menyekat akses. Semak langganan anda atau hubungi penyedia."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Leverandøren har blokkert tilgangen. Sjekk abonnementet ditt eller kontakt leverandøren."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "De aanbieder heeft de toegang geblokkeerd. Controleer je abonnement of neem contact op met de aanbieder."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Dostawca zablokował dostęp. Sprawdź swoją subskrypcję lub skontaktuj się z dostawcą."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "O provedor bloqueou o acesso. Verifique sua assinatura ou entre em contato com o provedor."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Furnizorul a blocat accesul. Verifică-ți abonamentul sau contactează furnizorul."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Поставщик услуги заблокировал доступ. Проверьте свою подписку или свяжитесь с поставщиком услуги."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Poskytovateľ zablokoval prístup. Skontrolujte svoje predplatné alebo kontaktujte poskytovateľa."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ponudnik je blokiral dostop. Preverite svojo naročnino ali se obrnite na ponudnika."
+          }
+        },
+        "sr-Latn" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Pružalac usluge je blokirao pristup. Proverite svoju pretplatu ili se obratite pružaocu usluge."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Leverantören har blockerat åtkomsten. Kontrollera din prenumeration eller kontakta leverantören."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "ผู้ให้บริการได้บล็อกการเข้าถึง โปรดตรวจสอบการสมัครใช้บริการของคุณหรือติดต่อผู้ให้บริการ"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Sağlayıcı erişimi engelledi. Aboneliğinizi kontrol edin veya sağlayıcıyla iletişime geçin."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Постачальник послуги заблокував доступ. Перевірте свою передплату або зверніться до постачальника послуги."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Nhà cung cấp đã chặn quyền truy cập. Hãy kiểm tra gói đăng ký của bạn hoặc liên hệ với nhà cung cấp."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "服务提供商已阻止访问。请检查您的订阅或联系服务提供商。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "服務供應商已封鎖存取。請檢查您的訂閱或聯絡服務供應商。"
           }
         }
       }

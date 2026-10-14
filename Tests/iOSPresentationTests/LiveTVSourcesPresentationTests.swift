@@ -124,7 +124,7 @@ final class LiveTVSourcesPresentationTests: XCTestCase {
             window.rootViewController = nil
             previous?.makeKeyAndVisible()
         }
-        for width in [CGFloat(768), 834] {
+        for width in [CGFloat(390), 768, 834] {
             for direction in [LayoutDirection.leftToRight, .rightToLeft] {
                 window.frame = CGRect(x: 0, y: 0, width: width, height: 1024)
                 window.rootViewController = UIHostingController(rootView:
@@ -153,6 +153,7 @@ final class LiveTVSourcesPresentationTests: XCTestCase {
                 for choice in ["IPTV provider", "Media server", "Plozz channels"] {
                     XCTAssertTrue(text.contains(choice), "\(choice) must be visible without scrolling: \(text)")
                 }
+                XCTAssertTrue(text.contains("Experimental"), "Setup must disclose Live TV's status: \(text)")
             }
         }
     }

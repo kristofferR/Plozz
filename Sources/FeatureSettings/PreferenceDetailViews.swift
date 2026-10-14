@@ -183,8 +183,7 @@ struct AppearanceDetailView: View {
                 ) {
                     NavigationLibrariesDetailView(
                         scope: librariesScope,
-                        navigation: navigation,
-                        includesIndividualLibraries: navigation.style != .tabBar
+                        navigation: navigation
                     )
                 }
             }
@@ -606,7 +605,7 @@ struct PlaybackDetailView: View {
     }
 
     private var audioRows: [SettingsSplitRow] {
-        [
+        var rows = [
             SettingsSplitRow(
                 id: "audio-defaults",
                 title: "Audio defaults",
@@ -643,6 +642,18 @@ struct PlaybackDetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         ]
+        #if os(tvOS)
+        if #available(tvOS 26.0, *) {
+            rows.append(SettingsSplitRow(
+                id: "truehd-atmos",
+                title: "Dolby Atmos from TrueHD",
+                description: "Hear overhead sound from supported TrueHD Atmos tracks on compatible equipment, using lossy conversion. If playback stutters or seeking is slow, try turning this off. Those tracks will still play, but without Atmos height positioning. Dolby Digital Plus Atmos is unaffected. Applies to new playback sessions."
+            ) {
+                Toggle("Dolby Atmos from TrueHD", isOn: $playback.settings.trueHDAtmosEnabled)
+            })
+        }
+        #endif
+        return rows
     }
 
     private var skipIntroRows: [SettingsSplitRow] {

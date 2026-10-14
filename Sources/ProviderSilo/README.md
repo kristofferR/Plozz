@@ -27,11 +27,44 @@ that picker without repeating approval; retrying a failed profile lookup reuses
 the approved login while it remains valid. Expired codes have an explicit renewal
 action. Leaving the flow cancels pending work and clears in-memory PINs/tokens.
 TV approval follows the shared Plex-style QR/manual-code layout with one expiry
-ring and a visible match phrase. Profile selection uses the same avatar-row
+ring and the same sign-in code shown by current Silo versions. Profile selection uses the same avatar-row
 component and scroll card as Plex server-user selection, including focus-aware
 PIN indicators. These are Silo server profiles, not new Plozz household profiles.
 On mobile, browser approval stays primary and manual/QR alternatives share one
 disclosure instead of repeating the same instructions.
+
+If Silo advertises a configured public alias, Plozz keeps approval on the selected
+server's documented `/activate` page, including its reverse-proxy base path.
+It builds the link from the public user code, never forwards a foreign query or
+follows an authentication redirect. Inconsistent/unrecognized approval links are
+rejected with an address-specific message. Pending polls honor Silo's extended
+expiry; canceled/consumed requests offer a fresh code. A failed start can be
+retried in place, while a failed profile lookup retains successful approval.
+
+Setup errors identify validation, code creation, polling, profile loading, PIN
+verification, or session completion. With crash-reporting consent, at most ten
+distinct failures per reporter lifetime are sent using fixed stage/reason/response
+categories and an HTTP status only. No server address, response body, profile
+identity, PIN, pairing code, token, or error description is included. Opt-out
+invalidates retained attempts, including across later opt-in.
+
+## Server Home
+
+Match Server imports Silo's profile-scoped native Home row IDs, headings, order
+and contents, including custom rows. The lightweight `/home/layout` endpoint
+falls back to `/home/sections` only when unavailable; actual authentication,
+network and malformed-response failures remain failures. A row refresh shares
+one fresh sections response instead of caching content across watch changes.
+Single-row requests use `/home/sections/{id}/items` with the same older-server
+fallback. Servers lacking both Home endpoints retain ordinary provider defaults.
+
+Only video cards are displayed. Disabled Plozz libraries require exact membership
+in an enabled library; title matches alone never establish membership. Continue
+Watching and Next Up resolve the server-selected playable episode and retain
+resume state and verified parent artwork. Shared Home composition still owns
+multi-server merging and explicit Plozz profile customizations.
+These Home and device-login contracts were checked at upstream revision
+`6144c45cd65ae0f49f9f3397bbc20f7e4d60a20e`.
 
 ## Contracts
 

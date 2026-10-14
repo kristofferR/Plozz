@@ -110,6 +110,10 @@ public struct PlaybackSettings: Codable, Equatable, Sendable {
     /// `.original`, `false` → `.device`), migrated in the decoder below.
     public var audioLanguagePreference: AudioLanguagePreference
 
+    /// Request TrueHD Atmos spatial rendering on tvOS 26+. Off retains the
+    /// ordinary channel bridge. Applied when a new playback session starts.
+    public var trueHDAtmosEnabled: Bool
+
     /// Remember the chosen **audio language** per series: switching audio on any
     /// episode makes that language stick for every other episode of that series
     /// (per profile). Stored by language, re-resolved to a concrete track per
@@ -150,6 +154,7 @@ public struct PlaybackSettings: Codable, Equatable, Sendable {
         showUpNextCard: Bool = true,
         upNextLeadSeconds: Int = 30,
         audioLanguagePreference: AudioLanguagePreference = .original,
+        trueHDAtmosEnabled: Bool = true,
         rememberAudioTrackPerSeries: Bool = true,
         rememberSubtitleTrackPerSeries: Bool = true,
         fadeOnDynamicRangeChange: Bool = true,
@@ -171,6 +176,7 @@ public struct PlaybackSettings: Codable, Equatable, Sendable {
         self.showUpNextCard = showUpNextCard
         self.upNextLeadSeconds = upNextLeadSeconds
         self.audioLanguagePreference = audioLanguagePreference
+        self.trueHDAtmosEnabled = trueHDAtmosEnabled
         self.rememberAudioTrackPerSeries = rememberAudioTrackPerSeries
         self.rememberSubtitleTrackPerSeries = rememberSubtitleTrackPerSeries
         self.fadeOnDynamicRangeChange = fadeOnDynamicRangeChange
@@ -213,6 +219,7 @@ public extension PlaybackSettings {
         case showUpNextCard
         case upNextLeadSeconds
         case audioLanguagePreference
+        case trueHDAtmosEnabled
         /// Legacy boolean predecessor of `audioLanguagePreference`, still read for
         /// migration (`true` → `.original`, `false` → `.device`).
         case preferOriginalLanguageAudio
@@ -300,6 +307,9 @@ public extension PlaybackSettings {
         } else {
             self.audioLanguagePreference = defaults.audioLanguagePreference
         }
+        self.trueHDAtmosEnabled =
+            (try? container.decodeIfPresent(Bool.self, forKey: .trueHDAtmosEnabled))
+            .flatMap { $0 } ?? defaults.trueHDAtmosEnabled
         self.rememberAudioTrackPerSeries =
             (try? container.decodeIfPresent(Bool.self, forKey: .rememberAudioTrackPerSeries))
             .flatMap { $0 } ?? defaults.rememberAudioTrackPerSeries
@@ -341,6 +351,7 @@ public extension PlaybackSettings {
         try container.encode(showUpNextCard, forKey: .showUpNextCard)
         try container.encode(upNextLeadSeconds, forKey: .upNextLeadSeconds)
         try container.encode(audioLanguagePreference, forKey: .audioLanguagePreference)
+        try container.encode(trueHDAtmosEnabled, forKey: .trueHDAtmosEnabled)
         try container.encode(rememberAudioTrackPerSeries, forKey: .rememberAudioTrackPerSeries)
         try container.encode(rememberSubtitleTrackPerSeries, forKey: .rememberSubtitleTrackPerSeries)
         try container.encode(fadeOnDynamicRangeChange, forKey: .fadeOnDynamicRangeChange)

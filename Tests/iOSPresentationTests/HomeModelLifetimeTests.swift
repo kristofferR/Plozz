@@ -1,4 +1,5 @@
 #if os(iOS)
+import CoreModels
 import CoreUI
 import FeatureHomeCore
 import SwiftUI
@@ -8,6 +9,83 @@ import XCTest
 
 @MainActor
 final class HomeModelLifetimeTests: XCTestCase {
+    func testDefaultTabsKeepSettingsOptionalOnPhoneAndTablet() async throws {
+        let app = PlozziOSAppModel()
+        let original = app.profiles.activeProfileID
+        let profile = app.profiles.add(name: "Navigation defaults fixture", isAwaitingSetup: false)
+        let store = NavigationLibraryLayoutStore(namespace: profile.id)
+        store.save(.default)
+        app.selectProfile(profile.id)
+        defer {
+            app.selectProfile(original)
+            app.profiles.remove(profile.id)
+            store.save(.default)
+        }
+        let scene = try XCTUnwrap(
+            UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        )
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKeyAndVisible()
+        }
+        let available = NavigationDestinationDefaults.iOS
+        let automatic = NavigationDestinationDefaults.iOSAutomaticallyHiddenKeys
+        for (width, sizeClass) in [
+            (CGFloat(390), UserInterfaceSizeClass.compact), (834, .regular)
+        ] {
+            window.frame = CGRect(x: 0, y: 0, width: width, height: 1024)
+            let host = UIHostingController(rootView:
+                PlozziOSTabShell(
+                    appModel: app, homeViewModelBox: LazyViewState<HomeViewModel>(), onAddServer: {},
+                    showingSettings: .constant(false), showingProfileSwitcher: .constant(false),
+                    deferredPairingURL: .constant(nil), systemColorScheme: .dark
+                )
+                .environment(app)
+                .environment(HeroTrailerController())
+                .environment(PlozziOSSidebarGeometryModel())
+                .environment(\.themePalette, .dark)
+                .environment(\.horizontalSizeClass, sizeClass)
+                .environment(\.locale, Locale(identifier: "en"))
+            )
+            window.rootViewController = host
+            window.makeKeyAndVisible()
+            try await waitForTabs(in: host, window: window)
+            let tabs = try XCTUnwrap(tabController(in: host))
+            let initial = try XCTUnwrap(tabs.tabBar.items).compactMap(\.title)
+            XCTAssertFalse(initial.contains("Settings"), "\(initial)")
+            XCTAssertFalse(initial.contains("More"), "\(initial)")
+            XCTAssertLessThanOrEqual(initial.count, 5)
+
+            let navigation = app.settings.navigation
+            let sections = navigation.librarySections(available: available, automaticallyHiddenKeys: automatic)
+            XCTAssertTrue(sections.disabled.contains(NavigationLibraryLayout.settingsKey))
+            navigation.applyLibrarySections(
+                .init(enabled: sections.enabled + [NavigationLibraryLayout.settingsKey],
+                      disabled: sections.disabled.filter { $0 != NavigationLibraryLayout.settingsKey }),
+                available: available, automaticallyHiddenKeys: automatic
+            )
+            try await waitForSettingsTab(in: host, window: window, visible: true)
+            XCTAssertTrue(store.load().shownKeys.contains(NavigationLibraryLayout.settingsKey))
+            navigation.resetLibraryLayout()
+            try await waitForSettingsTab(in: host, window: window, visible: false)
+            XCTAssertEqual(store.load(), .default)
+        }
+    }
+
+    private func waitForSettingsTab(in host: UIViewController, window: UIWindow, visible: Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(4)
+        repeat {
+            try await Task.sleep(for: .milliseconds(20))
+            window.layoutIfNeeded()
+            if let titles = tabController(in: host)?.tabBar.items?.compactMap(\.title),
+               titles.contains("Settings") == visible { return }
+        } while ContinuousClock.now < deadline
+        XCTFail("Settings tab visibility did not become \(visible).")
+    }
+
     func testTabShellProvidesProfilesToHomeLiveTVScopeOnPhoneAndTablet() async throws {
         let app = PlozziOSAppModel()
         let original = app.profiles.activeProfileID

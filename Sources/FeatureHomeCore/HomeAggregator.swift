@@ -558,6 +558,9 @@ public struct HomeAggregator: Sendable {
                     // the request queue for the remaining libraries.
                     enqueueAvailable()
 
+                    let merging = PerformanceDiagnostics.shared.begin(
+                        .homeMerge, metrics: .init(accounts: accounts.count)
+                    )
                     let librariesComplete = perAccount.allSatisfy { $0.completed.contains(.libraries) }
                     content.libraries = perAccount.flatMap(\.libraries).filter { !$0.library.isMusic }
                     for row in HomeRowKind.allCases where !publishedRows.contains(row) {
@@ -609,6 +612,10 @@ public struct HomeAggregator: Sendable {
                         return group
                     }
                     content.serverRows = definitions.compactMap { serverRows[$0.id] }
+                    merging?.finish(.succeeded, metrics: .init(
+                        items: content.continueWatching.count + content.latest.count + content.watchlist.count,
+                        rows: content.librarySections.reduce(0) { $0 + $1.sections.count } + content.serverRows.count
+                    ))
                     guard !Task.isCancelled else {
                         group.cancelAll()
                         break
@@ -744,7 +751,17 @@ public struct HomeAggregator: Sendable {
             })
         case let .server(index, definitions):
             let resolved = accounts[index]
-            let batch = await fetch("server-sections", from: resolved) {
+            let batch = await fetch("server-sections", from: resolved, diagnosticOutcome: { results in
+                var cancelled = false
+                for definition in definitions {
+                    guard let result = results[definition.section.id] else { return .failed }
+                    if case let .failure(error) = result {
+                        guard error == .cancelled else { return .failed }
+                        cancelled = true
+                    }
+                }
+                return cancelled ? .cancelled : .succeeded
+            }) {
                 await resolved.provider.serverHomeItems(
                     sections: definitions.map(\.section), limit: perLibraryLimit,
                     excludingLibraryIDs: excludedLibraries(visibility, accountID: resolved.account.id)
@@ -783,20 +800,33 @@ public struct HomeAggregator: Sendable {
     private static func fetch<Value: Sendable>(
         _ row: String,
         from resolved: ResolvedAccount,
+        diagnosticOutcome: @Sendable (Value) -> PerformanceDiagnostics.Outcome = { _ in .succeeded },
         operation: @Sendable () async throws -> Value
     ) async -> Result<Value, AppError> {
         let clock = ContinuousClock()
         let started = clock.now
+        let diagnostic = PerformanceDiagnostics.shared.begin(.homeFetch, provider: resolved.provider.kind)
         defer {
             PlozzLog.boot("HomeAgg.request row=\(row) provider=\(resolved.provider.kind) ms=\(elapsedMS(from: started, to: clock.now))")
         }
         do {
             try Task.checkCancellation()
-            return .success(try await operation())
+            let value: Value
+            if diagnostic != nil {
+                value = try await PerformanceDiagnostics.$provider.withValue(resolved.provider.kind) {
+                    try await operation()
+                }
+            } else {
+                value = try await operation()
+            }
+            diagnostic?.finish(diagnosticOutcome(value))
+            return .success(value)
         } catch is CancellationError {
+            diagnostic?.finish(.cancelled)
             return .failure(.cancelled)
         } catch {
             let failure = (error as? AppError) ?? .unknown("")
+            diagnostic?.finish(failure == .cancelled ? .cancelled : .failed)
             if failure != .cancelled {
                 PlozzLog.app.error("Home row failed: row=\(row) provider=\(resolved.provider.kind)")
             }

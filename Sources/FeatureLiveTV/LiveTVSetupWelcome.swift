@@ -155,6 +155,9 @@ private struct LiveTVSetupIntroduction: View {
                 .font(.callout)
                 .foregroundStyle(palette.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
+            Text("Experimental")
+                .font(.caption)
+                .foregroundStyle(palette.secondaryText)
         }
     }
 }

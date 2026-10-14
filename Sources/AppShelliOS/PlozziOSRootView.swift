@@ -892,7 +892,8 @@ struct PlozziOSTabShell: View {
     ) -> [PlozziOSDestination] {
         let navigation = appModel.settings.navigation
         return navigation.libraryLayout.resolvingAutomaticVisibility(
-            hidden: navigationAvailability(appModel: appModel).automaticallyHiddenKeys,
+            hidden: navigationAvailability(appModel: appModel).automaticallyHiddenKeys
+                .union(NavigationDestinationDefaults.iOSAutomaticallyHiddenKeys),
             retainingWatchlist: retainingWatchlist
         )
             .sections(

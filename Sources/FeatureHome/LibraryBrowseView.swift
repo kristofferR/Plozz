@@ -50,9 +50,9 @@ public struct LibraryBrowseView: View {
     @State private var showcaseNavigation = ShowcaseNavigationVisibility()
     @State private var isFrontmost = false
     #endif
-    /// Tracks which items we've already warmed artwork for. A reference type (not a
-    /// `@State` `Set`) so inserting during scroll does not invalidate the view body.
+    /// Owns a bounded lookahead without invalidating the view on every scroll update.
     @State private var artworkPrefetch = ArtworkPrefetchTracker()
+    @Environment(\.scenePhase) private var scenePhase
     /// The rail letter that currently holds focus, or `nil` when focus is in the
     /// grid. Drives the fly-through highlight + the transient jumbo letter bubble.
     @State private var railFocusedLetter: String?
@@ -223,17 +223,32 @@ public struct LibraryBrowseView: View {
         .background {
             LibraryAlphabetFeedback(letter: viewModel.alphabet.jumpingTo, message: viewModel.alphabet.message)
         }
-        .onDisappear { viewModel.cancelPendingQuery() }
+        .onDisappear {
+            viewModel.cancelPendingQuery()
+            artworkPrefetch.isActive = false
+            artworkPrefetch.reset()
+        }
+        .onChange(of: viewModel.contentGeneration) { _, _ in artworkPrefetch.reset() }
+        .onChange(of: metrics.libraryPosterColumns.count) { _, _ in
+            artworkPrefetch.reset()
+            prefetchArtwork(aheadFrom: viewModel.topVisibleIndex ?? 0)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            artworkPrefetch.reset()
+            if phase == .active { prefetchArtwork(aheadFrom: viewModel.topVisibleIndex ?? 0) }
+        }
         .onChange(of: viewModel.contentMode) { _, _ in
             railFocusedLetter = nil
             railHasRevealed = false
-            artworkPrefetch = ArtworkPrefetchTracker()
+            artworkPrefetch.reset()
             #if os(tvOS)
             nativeScrollTarget.moveHeader(with: 0)
             #endif
         }
         .onAppear {
             MainThreadStallProbe.context = "library"
+            artworkPrefetch.isActive = true
+            prefetchArtwork(aheadFrom: viewModel.topVisibleIndex ?? 0)
             #if os(tvOS)
             isFrontmost = true
             #endif
@@ -400,7 +415,7 @@ public struct LibraryBrowseView: View {
             header: scanBanner,
             onSelect: { item, index in select(item, at: index) },
             onLoaded: { prefetchArtwork(aheadFrom: $0) },
-            onScroll: { artworkPrefetch.updateDirection(at: $0) }
+            onScroll: { updateArtworkDirection(at: $0) }
         )
         .overlay(alignment: .trailing) {
             LibraryRailLayer(
@@ -451,6 +466,7 @@ public struct LibraryBrowseView: View {
                                 onSelect: { select($0, at: index) },
                                 onAppear: { idx in
                                     await viewModel.itemAppeared(at: idx, generation: generation)
+                                    guard !Task.isCancelled, generation == viewModel.contentGeneration else { return }
                                     prefetchArtwork(aheadFrom: idx)
                                 },
                                 onDisappear: { viewModel.itemDisappeared(at: $0, generation: generation) }
@@ -490,7 +506,7 @@ public struct LibraryBrowseView: View {
             .onScrollGeometryChange(for: CGFloat.self) {
                 $0.contentOffset.y + $0.contentInsets.top
             } action: { _, offset in
-                artworkPrefetch.updateDirection(at: offset)
+                updateArtworkDirection(at: offset)
                 #if os(tvOS)
                 nativeScrollTarget.moveHeader(with: offset)
                 #endif
@@ -665,25 +681,29 @@ public struct LibraryBrowseView: View {
     /// Warms decoded poster art in the viewport's direction once a cell loads.
     private func prefetchArtwork(aheadFrom index: Int) {
         #if canImport(UIKit)
-        guard index >= 0, index < viewModel.totalCount else { return }
-        // Look ahead in the direction of travel. Rows scrolled past have usually left the
-        // memory cache, so scrolling back up needs the same warm-up as scrolling down.
+        guard artworkPrefetch.isActive, scenePhase == .active,
+              viewModel.contentMode != .recommended,
+              index >= 0, index < viewModel.totalCount else { return }
         let tracker = artworkPrefetch
-        let row = max(1, metrics.libraryPosterColumns.count)
-        let lookahead = row * 2
-        let range = tracker.forward
-            ? Array(index...min(index + lookahead, viewModel.totalCount - 1))
-            : Array((max(0, index - lookahead)...index).reversed())
-        for candidateIndex in range {
-            guard let candidate = viewModel.item(at: candidateIndex) else { continue }
-            guard tracker.forward
-                ? tracker.seen.insert(candidate.id).inserted
-                : tracker.seenBackward.insert(candidate.id).inserted else { continue }
-            for url in candidate.artworkCandidates(for: .poster).prefix(2) {
-                ArtworkImageCache.shared.prefetch(url, variant: .posterCard)
+        let range = tracker.indices(
+            aheadFrom: index, total: viewModel.totalCount,
+            columns: metrics.libraryPosterColumns.count, generation: viewModel.contentGeneration
+        )
+        tracker.window.update(range.flatMap { candidateIndex in
+            guard let candidate = viewModel.item(at: candidateIndex) else {
+                return [ArtworkPrefetchWindow.Request]()
             }
-        }
+            return candidate.artworkCandidates(for: .poster).prefix(2).compactMap {
+                ArtworkImageCache.shared.prefetchRequest(for: $0, variant: .posterCard)
+            }
+        })
         #endif
+    }
+
+    private func updateArtworkDirection(at offset: CGFloat) {
+        if artworkPrefetch.updateDirection(at: offset) {
+            prefetchArtwork(aheadFrom: viewModel.topVisibleIndex ?? 0)
+        }
     }
 }
 
@@ -858,26 +878,59 @@ private struct PosterPlaceholderView: View {
     }
 }
 
-/// Reference-typed tracker of already-prefetched artwork item IDs. Kept in
-/// `@State` as a *class* so mutating its contents while scrolling does not
-/// invalidate the SwiftUI view body — a value-type `@State` `Set` would trigger a
-/// full-body re-render on every newly-seen item, hitching the scroll exactly when
-/// flying into not-yet-loaded content.
+/// Non-observable ownership keeps scroll bookkeeping out of SwiftUI invalidation.
+@MainActor
 final class ArtworkPrefetchTracker {
-    var seen: Set<String> = []
-    /// Prefetched while scrolling back up; separate, so the way back warms rows seen going down.
-    var seenBackward: Set<String> = []
+    var isActive = false
+    #if canImport(UIKit)
+    let window: ArtworkPrefetchWindow
+
+    init(limiter: ConcurrencyLimiter = ArtworkSession.warmLimiter) {
+        window = ArtworkPrefetchWindow(limiter: limiter)
+    }
+    #endif
     private(set) var forward = true
     private var viewportPosition: CGFloat?
+    private var anchor: Int?
+    private var generation: Int?
+    private var columns: Int?
 
     /// Loading cells may finish in any order; only viewport movement changes direction.
-    func updateDirection(at position: CGFloat) {
+    @discardableResult
+    func updateDirection(at position: CGFloat) -> Bool {
         defer { viewportPosition = position }
-        guard let viewportPosition, position != viewportPosition else { return }
+        guard let viewportPosition, position != viewportPosition else { return false }
         let nextForward = position > viewportPosition
-        guard forward != nextForward else { return }
+        guard forward != nextForward else { return false }
         forward = nextForward
-        if forward { seen.removeAll() } else { seenBackward.removeAll() }
+        anchor = nil
+        return true
+    }
+
+    func indices(aheadFrom index: Int, total: Int, columns: Int, generation: Int) -> [Int] {
+        if self.generation != generation || self.columns != columns {
+            reset()
+            self.generation = generation
+            self.columns = columns
+        }
+        guard total > 0, index >= 0, index < total else { return [] }
+        let anchor = min(total - 1, self.anchor.map { forward ? max($0, index) : min($0, index) } ?? index)
+        self.anchor = anchor
+        let lookahead = max(1, columns) * 2
+        return forward
+            ? Array(anchor...min(anchor + lookahead, total - 1))
+            : Array((max(0, anchor - lookahead)...anchor).reversed())
+    }
+
+    func reset() {
+        #if canImport(UIKit)
+        window.cancelAll()
+        #endif
+        anchor = nil
+        generation = nil
+        columns = nil
+        viewportPosition = nil
+        forward = true
     }
 }
 

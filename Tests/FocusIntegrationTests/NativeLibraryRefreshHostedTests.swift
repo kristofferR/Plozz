@@ -15,6 +15,48 @@ import XCTest
 final class NativeLibraryRefreshHostedTests: XCTestCase {
     private var savedProviders = MetadataProviderSettings.default
 
+    func testTraversalDiagnosticsRecordNativeFocusWithoutAddingAFocusTarget() async throws {
+        let model = LibraryBrowseViewModel(
+            provider: RefreshLibraryProvider(), containerID: "library", containerKind: .series
+        )
+        await model.loadFirstPage()
+        try await withLibrary(model: model) { root, window in
+            let controller = try XCTUnwrap(self.findController(
+                NativeLibraryGridController.self, in: XCTUnwrap(window.rootViewController)
+            ))
+            XCTAssertNil(controller.traversalSnapshot, "Ordinary browsing must not collect benchmark history.")
+            controller.enableTraversalRecording()
+            let probe = try XCTUnwrap(self.find(NativeLibraryTraversalProbe.self, in: root))
+            XCTAssertTrue(probe.isAccessibilityElement)
+            XCTAssertFalse(probe.canBecomeFocused)
+            let collection = try XCTUnwrap(self.find(UICollectionView.self, in: root))
+            let first = try XCTUnwrap(collection.cellForItem(at: IndexPath(item: 0, section: 0)) as? NativeTVLibraryCell)
+            let second = try XCTUnwrap(collection.cellForItem(at: IndexPath(item: 6, section: 0)) as? NativeTVLibraryCell)
+            @MainActor func focus(_ cell: NativeTVLibraryCell) async throws {
+                XCTAssertTrue(cell.onRequestFocus?() == true)
+                let deadline = ContinuousClock.now + .seconds(2)
+                while !cell.isFocused, ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                XCTAssertTrue(cell.isFocused)
+            }
+            try await focus(second)
+            try await focus(first)
+            let before = try XCTUnwrap(controller.traversalSnapshot)
+            let start = ProcessInfo.processInfo.systemUptime
+            try await focus(second)
+            try await focus(first)
+            let end = ProcessInfo.processInfo.systemUptime
+            let value = try XCTUnwrap(probe.accessibilityValue)
+            let after = try JSONDecoder().decode(LibraryTraversalSnapshot.self, from: Data(value.utf8))
+            let evidence = try LibraryTraversalValidation.validate(
+                before: before, after: after, start: start, end: end, mode: .stepped(path: [0, 6])
+            )
+            XCTAssertEqual(evidence.transitions, 2)
+            XCTAssertEqual(evidence.deepestRow, 1)
+        }
+    }
+
     func testLiveScanBannerReservesSpaceAndAlignsWithUnfocusedArtwork() async throws {
         let provider = RefreshLibraryProvider()
         let model = LibraryBrowseViewModel(

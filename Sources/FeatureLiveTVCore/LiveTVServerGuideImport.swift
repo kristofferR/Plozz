@@ -11,20 +11,27 @@ extension LiveTVPrototypeImportModel {
     public func reloadServerGuides(
         channelIDs: [String], from: Date, to: Date, into model: LiveTVPrototypeModel, force: Bool = false
     ) async {
+        _ = await reloadServerGuidesResult(channelIDs: channelIDs, from: from, to: to, into: model, force: force)
+    }
+
+    func reloadServerGuidesResult(
+        channelIDs: [String], from: Date, to: Date, into model: LiveTVPrototypeModel, force: Bool
+    ) async -> ReloadResult {
         var seen = Set<String>()
         let requestedIDs = channelIDs.filter { seen.insert($0).inserted && serverChannelReferences[$0] != nil }
-        guard !requestedIDs.isEmpty else { return }
+        guard !requestedIDs.isEmpty else { return .completed }
         let duration = to.timeIntervalSince(from)
         guard from.timeIntervalSince1970.isFinite, to.timeIntervalSince1970.isFinite, duration > 0,
               duration <= Self.maximumServerGuideRequestDuration * Double(Self.maximumServerGuideWindows) else {
             for id in Set(requestedIDs.compactMap { serverChannelReferences[$0]?.sourceID }) {
                 updateServerStatus(id) { $0.guidePhase = .failed; $0.guideFailure = .invalidGuide }
             }
-            return
+            return .failed
         }
         let request = serverRevision
+        var result = ReloadResult.completed
         for source in configuration.servers where source.isEnabled {
-            guard request == serverRevision, !Task.isCancelled else { return }
+            guard request == serverRevision, !Task.isCancelled else { return .cancelled }
             let globalIDs = requestedIDs.filter {
                 serverChannelReferences[$0]?.sourceID == source.id
                     && serverChannelReferences[$0]?.accountID == source.accountID
@@ -45,11 +52,11 @@ extension LiveTVPrototypeImportModel {
             var start = from
             while start < to {
                 guard currentServerRequest(source, request: request, sourceRevision: sourceRevision),
-                      !Task.isCancelled else { return }
+                      !Task.isCancelled else { return .cancelled }
                 let end = min(to, start.addingTimeInterval(Self.maximumServerGuideRequestDuration))
                 guard end > start else {
                     updateServerStatus(source.id) { $0.guidePhase = .failed; $0.guideFailure = .invalidGuide }
-                    return
+                    return .failed
                 }
                 let chunkStart = start
                 start = end
@@ -65,7 +72,7 @@ extension LiveTVPrototypeImportModel {
                 }
                 for offset in stride(from: 0, to: missingIDs.count, by: Self.maximumServerGuideChannelsPerRequest) {
                     guard currentServerRequest(source, request: request, sourceRevision: sourceRevision),
-                          !Task.isCancelled else { return }
+                          !Task.isCancelled else { return .cancelled }
                     let batch = Array(missingIDs[offset..<min(
                         missingIDs.count, offset + Self.maximumServerGuideChannelsPerRequest
                     )])
@@ -79,11 +86,11 @@ extension LiveTVPrototypeImportModel {
                             channelIDs: nativeIDs, from: chunkStart, to: end
                         )
                         try Task.checkCancellation()
-                        guard activeServerGuideRequests.contains(window.id) else { return }
+                        guard activeServerGuideRequests.contains(window.id) else { return .cancelled }
                         guard acceptServerResult(
                             source, context: context, request: request, sourceRevision: sourceRevision, into: model
-                        ) else { return }
-                        guard var catalog = cachedServerCatalogs[source.id] else { return }
+                        ) else { return .cancelled }
+                        guard var catalog = cachedServerCatalogs[source.id] else { return .cancelled }
                         let requested = Set(batch)
                         let programs = try catalog.mapPrograms(nativePrograms, source: source).filter {
                             requested.contains($0.channelID) && $0.end > chunkStart && $0.start < end
@@ -111,19 +118,20 @@ extension LiveTVPrototypeImportModel {
                             $0.lastGuideRefresh = Date()
                         }
                     } catch {
-                        guard activeServerGuideRequests.contains(window.id) else { return }
+                        guard activeServerGuideRequests.contains(window.id) else { return .cancelled }
                         guard currentServerRequest(source, request: request, sourceRevision: sourceRevision) else {
                             finishServerGuideWindow(window.id, phase: .idle)
-                            return
+                            return .cancelled
                         }
                         if isCancellation(error) {
                             finishServerGuideWindow(window.id, phase: .idle)
-                            return
+                            return .cancelled
                         }
                         guard acceptServerResult(
                             source, context: context, request: request, sourceRevision: sourceRevision, into: model
-                        ) else { return }
+                        ) else { return .cancelled }
                         let failure = LiveTVServerImportError.sanitized(error, fallback: .serviceUnavailable)
+                        result = .failed
                         if failure == .permissionDenied {
                             cachedServerCatalogs[source.id]?.programs = []
                             try? publishPlaylists(into: model)
@@ -135,11 +143,12 @@ extension LiveTVPrototypeImportModel {
                         updateServerStatus(source.id) {
                             $0.programCount = cachedServerCatalogs[source.id]?.programs.count ?? 0
                         }
-                        if failure == .permissionDenied { return }
+                        if failure == .permissionDenied { return .failed }
                     }
                 }
             }
         }
+        return result
     }
 
     /// Loaded empty coverage is distinct from a channel/window which has never been requested.

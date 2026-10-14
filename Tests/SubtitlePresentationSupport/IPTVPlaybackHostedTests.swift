@@ -28,6 +28,27 @@ final class IPTVPlaybackHostedTests: XCTestCase {
         try await play(hls: true, fragmented: true)
     }
 
+    func testProviderAccessRestrictionSurvivesNativePlaybackFailureWithoutRetryingUpstream() async throws {
+        let server = try IPTVTestHTTPServer { _ in .init(data: Data("blocked".utf8), status: 451) }
+        addTeardownBlock { await server.stop() }
+        let base = try await server.start()
+        let proxy = try IPTVPlaybackProxy(origin: base.appendingPathComponent("channel.m3u8"), headers: [:])
+        addTeardownBlock { await proxy.stop() }
+        let url = try await proxy.start()
+        let engine = try PlozzigenVideoEngine()
+        defer { engine.stop() }
+        var failure: AppError?
+        engine.onFailure = { failure = $0 }
+        await engine.loadLive(url: url, httpHeaders: [:])
+        let deadline = ContinuousClock.now + .seconds(25)
+        while failure == nil, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(failure, .accessRestricted)
+        let requests = await server.requestCount
+        XCTAssertEqual(requests, 1, "Native engine retries must not repeatedly contact the rejecting provider.")
+    }
+
     func testOptInTrialChannelSustainsPlaybackThroughTheProductionEngine() async throws {
         let control = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()

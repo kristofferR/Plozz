@@ -4,6 +4,8 @@ import XCTest
 final class NativeLibraryPosterRemoteTests: XCTestCase {
     private static var controlledArm: String?
     private static var controlledPath: [String] = []
+    private static var controlledIndices: [Int] = []
+    private static var controlledGrid: UUID?
 
     private struct InputTiming: Encodable {
         let index: Int
@@ -20,6 +22,8 @@ final class NativeLibraryPosterRemoteTests: XCTestCase {
         let durationSeconds: Double
         let inputs: [InputTiming]
         var measurementBoundary: MeasurementBoundaryTiming? = nil
+        var focusSnapshots: [LibraryTraversalSnapshot]? = nil
+        var heldMinimumRows: Int? = nil
     }
 
     private struct MeasurementBoundaryTiming: Encodable {
@@ -50,6 +54,8 @@ final class NativeLibraryPosterRemoteTests: XCTestCase {
         }
         Self.controlledArm = nil
         Self.controlledPath = []
+        Self.controlledIndices = []
+        Self.controlledGrid = nil
         addTeardownBlock { @MainActor in self.capture(app, name: "controlled-\(arm)-idle") }
 
         let initial: String
@@ -58,7 +64,7 @@ final class NativeLibraryPosterRemoteTests: XCTestCase {
         } else {
             try await Task.sleep(for: .seconds(max(0, launchEpoch + 60 - Date().timeIntervalSince1970)))
             let library = try XCTUnwrap(environment["PLOZZ_LIBRARY_TARGET_LABEL"])
-            XCTAssertEqual(expectedPath.count, 7)
+            XCTAssertEqual(expectedPath.count, 19)
             initial = try XCTUnwrap(expectedPath.first)
             let focused = app.descendants(matching: .any).matching(NSPredicate(format: "hasFocus == true")).firstMatch
             XCTAssertTrue(focused.waitForExistence(timeout: 60))
@@ -106,19 +112,29 @@ final class NativeLibraryPosterRemoteTests: XCTestCase {
         }
         XCTAssertTrue(app.staticTexts["Filter"].exists, "The workload must include all watch states.")
         XCTAssertTrue(app.staticTexts["Sort: Name"].exists)
+        let calibration = try traversalSnapshot(in: app)
+        let firstIndex = try XCTUnwrap(calibration.focusedIndex)
+        XCTAssertGreaterThan(calibration.columns, 0)
+        let indices = (0...18).map { firstIndex + $0 * calibration.columns }
+        XCTAssertLessThan(try XCTUnwrap(indices.last), calibration.total, "Calibrate all eighteen downward transitions.")
         var path = [initial]
-        for _ in 0..<6 {
+        for index in indices.dropFirst() {
             XCUIRemote.shared.press(.down)
             try await Task.sleep(for: .milliseconds(500))
             let label = try focusedPoster(in: app, arm: arm).label
+            let focused = try traversalSnapshot(in: app)
+            XCTAssertEqual(focused.identity, calibration.identity)
+            XCTAssertEqual(focused.focusedIndex, index, "The full route must stay in the calibrated column.")
             XCTAssertNotEqual(label, path.last)
             path.append(label)
         }
         if !expectedPath.isEmpty {
             XCTAssertEqual(path, expectedPath, "Every row must match the same actual library workload.")
         }
-        for _ in 0..<6 { XCUIRemote.shared.press(.up) }
+        for _ in 0..<18 { XCUIRemote.shared.press(.up) }
         XCTAssertEqual(try focusedPoster(in: app, arm: arm).label, path.first)
+        Self.controlledIndices = indices
+        Self.controlledGrid = calibration.identity
         let readyEpoch = Date().timeIntervalSince1970
         let minimumAge = environment["PLOZZ_LIBRARY_MINIMUM_STARTUP_AGE"].flatMap(Double.init) ?? 480
         XCTAssertGreaterThanOrEqual(minimumAge, 480)
@@ -169,8 +185,7 @@ final class NativeLibraryPosterRemoteTests: XCTestCase {
         try measureControlled(app, arm: arm, path: Self.controlledPath, phase: .rapid)
     }
 
-    /// Holding a direction lets the focus engine repeat and accelerate, crossing about
-    /// twenty rows in two seconds. Holding Up for longer always stops on the first row.
+    /// Held input must meet a declared depth and return; repeat throughput is observed.
     func testControlledDHeldTraversal() throws {
         guard #available(tvOS 26.0, *) else { throw XCTSkip("Native hitch metrics require tvOS 26.") }
         let app = try existingApp(activate: false)
@@ -236,7 +251,14 @@ final class NativeLibraryPosterRemoteTests: XCTestCase {
     @available(tvOS 26.0, *)
     private func measureControlled(_ app: XCUIApplication, arm: String, path: [String], phase: Phase) throws {
         let initial = try XCTUnwrap(path.first)
-        XCTAssertEqual(path.count, 7)
+        XCTAssertEqual(path.count, 19)
+        let minimumRows: Int
+        if let configured = ProcessInfo.processInfo.environment["PLOZZ_LIBRARY_HELD_MINIMUM_ROWS"] {
+            minimumRows = try XCTUnwrap(Int(configured))
+        } else {
+            minimumRows = 18
+        }
+        XCTAssertGreaterThan(minimumRows, 0)
         let options = XCTMeasureOptions()
         options.iterationCount = 3
         options.invocationOptions = [.manuallyStart, .manuallyStop]
@@ -249,6 +271,9 @@ final class NativeLibraryPosterRemoteTests: XCTestCase {
             iteration += 1
             do {
                 XCTAssertEqual(try focusedPoster(in: app, arm: arm).label, initial)
+                let before = try traversalSnapshot(in: app)
+                XCTAssertEqual(before.identity, Self.controlledGrid, "The calibrated grid must not be replaced.")
+                XCTAssertEqual(before.focusedIndex, Self.controlledIndices.first)
                 var inputs: [InputTiming] = []
                 let earliestStartEpoch = Date().timeIntervalSince1970
                 let startCall = ProcessInfo.processInfo.systemUptime
@@ -291,10 +316,23 @@ final class NativeLibraryPosterRemoteTests: XCTestCase {
                     stopCallSeconds: stopped - stopCall,
                     outerDurationSeconds: stopped - startCall
                 )
+                let after = try traversalSnapshot(in: app)
                 try attachTiming(WindowTiming(
                     arm: arm, phase: phase.rawValue, iteration: iteration, epoch: epoch,
-                    durationSeconds: elapsed, inputs: inputs, measurementBoundary: boundary
+                    durationSeconds: elapsed, inputs: inputs, measurementBoundary: boundary,
+                    focusSnapshots: [before, after], heldMinimumRows: phase == .held ? minimumRows : nil
                 ))
+                let mode: LibraryTraversalValidation.Mode
+                switch phase {
+                case .idle: mode = .idle
+                case .scroll: mode = .stepped(path: Array(Self.controlledIndices.prefix(7)))
+                case .rapid: mode = .stepped(path: Self.controlledIndices)
+                case .held: mode = .held(minimumRows: minimumRows)
+                }
+                let movement = try LibraryTraversalValidation.validate(
+                    before: before, after: after, start: start, end: stopCall, mode: mode
+                )
+                print("LIBRARY_POSTER verified-movement phase=\(phase.rawValue) iteration=\(iteration) transitions=\(movement.transitions) deepestRow=\(movement.deepestRow)")
                 print("LIBRARY_POSTER controlled-window arm=\(arm) phase=\(phase.rawValue) iteration=\(iteration) epoch=\(epoch) duration=\(elapsed)")
                 for input in inputs {
                     print("LIBRARY_POSTER controlled-input iteration=\(iteration) index=\(input.index) at=\(input.relativeSeconds) late=\(input.lateSeconds) duration=\(input.durationSeconds)")
@@ -354,6 +392,16 @@ final class NativeLibraryPosterRemoteTests: XCTestCase {
         attachment.name = "library-\(timing.arm)-\(timing.phase)-\(timing.iteration)-timing"
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func traversalSnapshot(in app: XCUIApplication) throws -> LibraryTraversalSnapshot {
+        let probe = app.descendants(matching: .any)
+            .matching(identifier: "library-traversal-diagnostics").firstMatch
+        let value = try XCTUnwrap(
+            probe.value as? String,
+            "Launch the app with PLOZZ_LIBRARY_TRAVERSAL_RECORDING=1; input timing alone is not movement evidence."
+        )
+        return try JSONDecoder().decode(LibraryTraversalSnapshot.self, from: Data(value.utf8))
     }
 
     private func existingApp(activate: Bool = true) throws -> XCUIApplication {

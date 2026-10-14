@@ -14,6 +14,7 @@ import Sentry
 ///   • Fixed screen-category history and typed Live TV sync stages/error codes.
 ///   • Temporary, bounded IPTV setup stages, counts, and handled failure categories.
 ///   • Bounded IPTV transport and live-engine failure categories and numeric codes.
+///   • A bounded in-memory operation timeline attached to existing events, including active operations.
 ///   • Numerical memory-pressure evidence when supplied by the SDK.
 /// What is NOT sent: user identity, IP, server URLs/hostnames, media titles,
 /// profile names, automatic network/UI breadcrumbs, or performance traces.
@@ -64,7 +65,7 @@ public final class SentryCrashReporter: CrashReporter {
             options.enableAppHangTracking = true
 
             // Final belt-and-suspenders scrub of every outgoing event/breadcrumb.
-            options.beforeSend = { event in CrashRedaction.scrub(event) }
+            options.beforeSend = { event in Self.prepareEvent(event) }
             options.beforeBreadcrumb = { crumb in CrashRedaction.scrub(crumb) }
         }
 
@@ -96,6 +97,11 @@ public final class SentryCrashReporter: CrashReporter {
         })
 
         isActive = true
+        PerformanceDiagnostics.shared.start()
+        SiloSetupDiagnostics.shared.start { diagnostic in
+            guard SentrySDK.isEnabled, let event = Self.siloSetupEvent(diagnostic) else { return }
+            SentrySDK.capture(event: event)
+        }
         configureSetupDiagnostics(context)
     }
 
@@ -118,6 +124,8 @@ public final class SentryCrashReporter: CrashReporter {
 
     public func stop() {
         guard isActive else { return }
+        PerformanceDiagnostics.shared.stop()
+        SiloSetupDiagnostics.shared.stop()
         for observer in diagnosticObservers { NotificationCenter.default.removeObserver(observer) }
         diagnosticObservers.removeAll()
         playlistDiagnosticGate.reset()
@@ -129,6 +137,26 @@ public final class SentryCrashReporter: CrashReporter {
         setupDiagnosticsActive = false
         SentrySDK.close()
         isActive = false
+    }
+
+    /// Only event capture pays serialization cost. User-requested reports use this same hook.
+    nonisolated static func prepareEvent(
+        _ event: Event, diagnostics: PerformanceDiagnostics = .shared
+    ) -> Event? {
+        event.context?[CrashPerformanceContext.key] = nil
+        let snapshot = diagnostics.snapshot()
+        if let snapshot,
+           let bytes = try? JSONEncoder().encode(snapshot),
+           let data = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any] {
+            var context = event.context ?? [:]
+            context[CrashPerformanceContext.key] = data
+            event.context = context
+        }
+        guard let cleaned = CrashRedaction.scrub(event) else { return nil }
+        if let snapshot, !diagnostics.isCurrent(snapshot) {
+            cleaned.context?[CrashPerformanceContext.key] = nil
+        }
+        return cleaned
     }
 
     private nonisolated static func record(_ diagnostic: LiveTVSyncDiagnostic) {
@@ -221,6 +249,22 @@ public final class SentryCrashReporter: CrashReporter {
         if let value = diagnostic.code { data["code"] = value }
         if let value = diagnostic.httpStatus { data["httpStatus"] = value }
         return data
+    }
+
+    nonisolated static func siloSetupData(_ diagnostic: SiloSetupDiagnostic) -> [String: Any] {
+        var data: [String: Any] = [
+            "stage": diagnostic.stage.rawValue, "reason": diagnostic.reason.rawValue,
+            "response": diagnostic.response.rawValue
+        ]
+        data["httpStatus"] = diagnostic.httpStatus
+        return data
+    }
+
+    nonisolated static func siloSetupEvent(_ diagnostic: SiloSetupDiagnostic) -> Event? {
+        let event = Event(level: .warning)
+        event.tags = ["report.kind": "silo-setup"]
+        event.context = ["silo_setup": siloSetupData(diagnostic)]
+        return CrashRedaction.scrub(event)
     }
 
     nonisolated static func playbackFingerprint(_ diagnostic: PlaybackFailureDiagnostic) -> [String] {

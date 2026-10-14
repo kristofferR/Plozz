@@ -88,8 +88,8 @@ let package = Package(
         // Powers the native HLS-fMP4 remux path for MKV → DoVi + Atmos + seek.
         // See AGENTS.local.md › "Playback engine (AetherEngine / Plozzigen)".
         //
-        // Pinned to the subtitle-corrected fork at
-        // 4b7552a06c4cf646bb94eb7eb273946f8b916a70, based on upstream
+        // Pinned to the playback-corrected fork at
+        // af350b9bf35be106e3f97ecd521e1ab32be0bdd3, based on upstream
         // release 7.34.1 (cc070bf8d7bd7004547283cf1dc0c70ccd00d616).
         //
         // Everything the old `plozz-pin-*` stack existed for is upstream
@@ -226,7 +226,7 @@ let package = Package(
         // output queue (DEC-106), which could leave a software seek silent until
         // the clock caught up. Its subtitle packet store also appends in place
         // instead of copying every retained packet on each addition (PERF-107).
-        // The fork changes only ASS/SSA subtitle decoding: packets with neither
+        // The fork also corrects ASS/SSA subtitle decoding: packets with neither
         // a decoded end nor a source duration are not given a synthetic five-second
         // life.
         //
@@ -234,12 +234,17 @@ let package = Package(
         // LibDovi and LibTrueHD's Rust unwind personalities must stay separate
         // from the host's Objective-C/C++ stack. FFmpegBuild moves to 3.7.x,
         // LibDovi stays at 2.1.x and LibTrueHD 2.2.x supplies TrueHD object decoding.
-        // Object-audio rendering and progressive segment delivery remain off.
+        // Plozz opts tvOS 26+ on-demand playback into TrueHD Atmos rendering.
+        // Progressive segment delivery remains off.
         // Both apps embed the engine framework and the new dependency notices.
+        //
+        // AAC-LC MP4 tracks whose timestamps drift from their decoded sample
+        // clock selectively use timestamp-aware resampling (#89). Ordinary AAC
+        // and rounding-only jitter keep stream-copy; SMB and video timing do not change.
         //
         // SMB enters AetherEngine only through Plozz's protocol-neutral custom-source
         // bridge; the engine's legacy SMB URL product is not linked.
-        .package(url: "https://github.com/brandomoore/AetherEngine", revision: "4b7552a06c4cf646bb94eb7eb273946f8b916a70"),
+        .package(url: "https://github.com/brandomoore/AetherEngine", revision: "af350b9bf35be106e3f97ecd521e1ab32be0bdd3"),
         // NOTE: FFmpegBuild (FFmpeg n8.1.x decode-only), LibDovi (Dolby Vision
         // RPU parser) and LibTrueHD are transitive dependencies — AetherEngine
         // declares and consumes them. The retired hybrid-engine target needed
@@ -936,7 +941,7 @@ let package = Package(
         // MARK: Tests (pure logic, no UI required)
         .testTarget(
             name: "CoreModelsTests",
-            dependencies: ["CoreModels", "CoreUI"]
+            dependencies: ["CoreModels", "CoreUI", "TestSupportPerformance"]
         ),
         .testTarget(
             name: "CrashReportingTests",

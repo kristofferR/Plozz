@@ -1,4 +1,5 @@
 #if canImport(AVFoundation)
+import AVFoundation
 import CoreModels
 import XCTest
 #if canImport(UIKit)
@@ -181,6 +182,63 @@ final class SeekScrubCoordinatorTests: XCTestCase {
         XCTAssertFalse(controls.isResumeConfirming, "resume-confirm must clear once the clock advances")
         XCTAssertFalse(controls.isPaused, "a healthy resume stays playing")
         XCTAssertFalse(engine.isPaused)
+    }
+
+    func testResumeConfirmDoesNotKickBufferedPlayerAndAcceptsRecoveredClock() async {
+        for status in [AVPlayer.TimeControlStatus.waitingToPlayAtSpecifiedRate, .playing] {
+            let (sut, _, engine, controls) = makeSUT()
+            defer { sut.cancelAll() }
+            engine.nowPlayingPlayer = SeekTimeControlPlayer(status: status)
+            sut.requestSeek(to: 15)
+            await waitUntil { engine.playCount == 1 && !controls.isSeeking }
+            // Observe multiple retry intervals while the buffered output is stationary.
+            try? await Task.sleep(for: .seconds(1))
+            XCTAssertEqual(engine.pauseCount, 0)
+            XCTAssertEqual(engine.playCount, 1)
+            XCTAssertTrue(controls.isResumeConfirming)
+            engine.startAdvancingClock()
+            await waitUntil { !controls.isResumeConfirming }
+            XCTAssertEqual(engine.pauseCount, 0)
+            XCTAssertEqual(engine.playCount, 1)
+            XCTAssertFalse(controls.isPaused)
+        }
+    }
+
+    func testResumeConfirmStillKicksAPausedNativePlayer() async {
+        let (sut, _, engine, _) = makeSUT()
+        defer { sut.cancelAll() }
+        engine.nowPlayingPlayer = SeekTimeControlPlayer(status: .paused)
+        sut.requestSeek(to: 15)
+        await waitUntil { engine.pauseCount > 0 && engine.playCount > 1 }
+    }
+
+    func testResumeConfirmBoundsAnIndefinitelyWaitingPlayer() async {
+        let (sut, _, engine, controls) = makeSUT()
+        defer { sut.cancelAll() }
+        engine.nowPlayingPlayer = SeekTimeControlPlayer(status: .waitingToPlayAtSpecifiedRate)
+        let start = ContinuousClock.now
+        sut.requestSeek(to: 15)
+        await waitUntil(timeout: 20) { controls.intendsPause && !controls.isResumeConfirming }
+        let elapsed = start.duration(to: ContinuousClock.now)
+        XCTAssertGreaterThanOrEqual(elapsed, .seconds(14))
+        XCTAssertLessThan(elapsed, .seconds(20))
+        XCTAssertTrue(controls.isPaused)
+        XCTAssertEqual(engine.pauseCount, 0, "A waiting player must not receive disruptive retry kicks.")
+        XCTAssertEqual(engine.playCount, 1)
+    }
+
+    func testCancellingBufferedResumeCannotPlayAgainOrGiveUpLater() async {
+        let (sut, _, engine, controls) = makeSUT()
+        defer { sut.cancelAll() }
+        engine.nowPlayingPlayer = SeekTimeControlPlayer(status: .waitingToPlayAtSpecifiedRate)
+        sut.requestSeek(to: 15)
+        await waitUntil { engine.playCount == 1 && !controls.isSeeking }
+        sut.cancelResumeConfirm()
+        try? await Task.sleep(for: .milliseconds(650))
+        XCTAssertFalse(controls.isResumeConfirming)
+        XCTAssertFalse(controls.intendsPause)
+        XCTAssertEqual(engine.playCount, 1)
+        XCTAssertEqual(engine.pauseCount, 0)
     }
 
     // MARK: teardown
@@ -398,6 +456,17 @@ private final class ScrubInputPan: UIPanGestureRecognizer {
 
 // MARK: - Spies
 
+private final class SeekTimeControlPlayer: AVPlayer, @unchecked Sendable {
+    private let reportedStatus: AVPlayer.TimeControlStatus
+
+    init(status: AVPlayer.TimeControlStatus) {
+        reportedStatus = status
+        super.init()
+    }
+
+    override var timeControlStatus: AVPlayer.TimeControlStatus { reportedStatus }
+}
+
 @MainActor
 private final class SeekSpyHost: SeekScrubCoordinatorHost {
     private let engine: SeekSpyEngine
@@ -444,6 +513,7 @@ private final class SeekSpyEngine: VideoEngine {
     var lastSeekTarget: TimeInterval? { seekLog.last?.target }
     var playCount = 0
     var pauseCount = 0
+    var nowPlayingPlayer: AVPlayer?
 
     /// When true, `currentTime` advances with wall-clock while playing, so the
     /// resume-confirm loop observes forward motion and resolves.
@@ -456,6 +526,11 @@ private final class SeekSpyEngine: VideoEngine {
             return baseTime + Date().timeIntervalSince(started)
         }
         return baseTime
+    }
+
+    func startAdvancingClock() {
+        autoAdvance = true
+        playStartedAt = Date()
     }
 
     func load(request: PlaybackRequest, startPosition: TimeInterval) async {

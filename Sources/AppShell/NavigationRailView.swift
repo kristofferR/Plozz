@@ -450,7 +450,7 @@ struct NavigationRailView: View {
         case .liveTV:
             item(
                 .liveTV, symbol: "antenna.radiowaves.left.and.right",
-                label: Text(Self.liveTVTitle), isExperimental: true
+                label: Text(Self.liveTVTitle)
             )
         case .music:
             item(.music, symbol: "music.note", label: Text(Self.musicTitle))
@@ -518,7 +518,6 @@ struct NavigationRailView: View {
         _ destination: NavigationRailDestination,
         symbol: String,
         label: Text,
-        isExperimental: Bool = false,
         isOffline: Bool = false
     ) -> some View {
         Button {
@@ -553,12 +552,10 @@ struct NavigationRailView: View {
                             for: .destination(destination),
                             isSelected: selection == destination
                         ),
-                        isFocused: focusedTarget == .destination(destination),
-                        font: isExperimental
-                            ? .system(size: 22, weight: .semibold) : NavigationRailMetrics.labelFont
+                        isFocused: focusedTarget == .destination(destination)
                     )
-                    if isExperimental || isOffline {
-                        (isOffline ? Text("Offline") : Text("Experimental"))
+                    if isOffline {
+                        Text("Offline")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(foregroundColor(
                                 for: .destination(destination),
@@ -590,7 +587,7 @@ struct NavigationRailView: View {
         .padding(.vertical, NavigationRailMetrics.itemVerticalPadding)
         .offset(x: animatedContentOffset)
         .accessibilityLabel(label)
-        .accessibilityValue(isOffline ? Text("Offline") : isExperimental ? Text("Experimental") : Text(verbatim: ""))
+        .accessibilityValue(isOffline ? Text("Offline") : Text(verbatim: ""))
         .accessibilityAddTraits(selection == destination ? [.isSelected] : [])
     }
 
