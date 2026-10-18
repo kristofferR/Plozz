@@ -216,7 +216,7 @@ struct HomeTab: View {
         case .watchlist:
             watchlistRoot
         case let .library(library):
-            libraryBrowse(for: library)
+            libraryBrowse(for: library, isNavigationRoot: true)
         case let .allLibraries(libraries):
             allLibrariesBrowse(libraries)
         }
@@ -388,7 +388,9 @@ struct HomeTab: View {
     /// One library's paged grid. Shared by the pushed `MediaLibrary` destination
     /// and — under the rail — by the stack root, so a library looks and behaves the
     /// same however it was opened.
-    private func libraryBrowse(for library: MediaLibrary) -> some View {
+    private func libraryBrowse(
+        for library: MediaLibrary, isNavigationRoot: Bool = false
+    ) -> some View {
         let browse = resolveLibraryBrowse(
             for: library,
             in: accounts,
@@ -404,6 +406,7 @@ struct HomeTab: View {
                 settingsNamespace: libraryPreferencesNamespace
             ),
             title: library.displayName,
+            isNavigationRoot: isNavigationRoot,
             spoilerSettings: spoilerSettings,
             continueWatchingShowsSeriesArtwork: homeVisibility.continueWatchingShowsSeriesArtwork,
             onSelect: {
@@ -439,6 +442,7 @@ struct HomeTab: View {
                     settingsNamespace: libraryPreferencesNamespace
                 ),
                 title: Text(AllLibrariesBrowse.title),
+                isNavigationRoot: true,
                 spoilerSettings: spoilerSettings,
                 onSelect: { navigate($0) }
             )

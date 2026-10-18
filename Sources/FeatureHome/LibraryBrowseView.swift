@@ -69,6 +69,9 @@ public struct LibraryBrowseView: View {
     /// Pre-built so a synthesized library name ("Movies" on a file share) is
     /// our translated copy while a server's own name stays verbatim.
     private let title: Text
+    /// A navigation root (a library tab, sidebar or rail destination) keeps the
+    /// app's navigation chrome; a pushed Browse page hides it.
+    private let isNavigationRoot: Bool
     private let spoilerSettings: SpoilerSettings
     private let continueWatchingShowsSeriesArtwork: Bool
     private let onSelect: (MediaItem) -> Void
@@ -108,6 +111,7 @@ public struct LibraryBrowseView: View {
     public init(
         viewModel: LibraryBrowseViewModel,
         title: Text,
+        isNavigationRoot: Bool = false,
         spoilerSettings: SpoilerSettings = .default,
         continueWatchingShowsSeriesArtwork: Bool = true,
         onSelect: @escaping (MediaItem) -> Void,
@@ -115,6 +119,7 @@ public struct LibraryBrowseView: View {
     ) {
         _viewModel = State(initialValue: viewModel)
         self.title = title
+        self.isNavigationRoot = isNavigationRoot
         self.spoilerSettings = spoilerSettings
         self.continueWatchingShowsSeriesArtwork = continueWatchingShowsSeriesArtwork
         self.onSelect = onSelect
@@ -125,10 +130,17 @@ public struct LibraryBrowseView: View {
         #if os(tvOS)
         NativeLibraryFocusHost(scrollTarget: nativeScrollTarget, content: libraryContent)
             .ignoresSafeArea(.container, edges: [.vertical, .trailing])
-            .toolbar(.hidden, for: .tabBar)
+            .toolbar(tabBarVisibility, for: .tabBar)
         #else
         libraryContent
         #endif
+    }
+
+    /// A pushed Browse page is full-screen, with no navigation chrome pinned at
+    /// the top. A root must keep it: hiding it there leaves no way to reach
+    /// another destination.
+    private var tabBarVisibility: Visibility {
+        isNavigationRoot ? .automatic : .hidden
     }
 
     private var libraryContent: some View {
@@ -172,11 +184,9 @@ public struct LibraryBrowseView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationEntryFocus(isEntryContentPending ? .pending : nil)
-        // Browse is a full-screen sub-page: hide the top tab bar so it reads as a
-        // dedicated destination with no navigation chrome pinned at the top.
         .environment(\.plozzCardCaptionView, viewModel.browseScope.cardCaptionView(for: viewModel.contentMode))
         .environment(\.plozzArtworkArea, nil)
-        .toolbar(.hidden, for: .tabBar)
+        .toolbar(tabBarVisibility, for: .tabBar)
         .safeAreaInset(edge: .top, spacing: 0) {
             #if os(tvOS)
             NativeLibraryScrollingHeader(

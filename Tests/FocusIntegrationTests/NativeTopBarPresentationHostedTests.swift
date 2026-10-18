@@ -1,6 +1,8 @@
 #if os(tvOS)
 import CoreModels
 import CoreUI
+import FeatureHome
+import FeatureHomeCore
 import Observation
 import SwiftUI
 import UIKit
@@ -72,6 +74,120 @@ final class NativeTopBarPresentationHostedTests: XCTestCase {
                 label: { AnyView(Label($0.storageValue, systemImage: "square")) }
             )
         }
+    }
+
+    func testLibraryRootKeepsTopBarWhilePushedBrowseHidesIt() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let model = TransitionModel()
+        let host = UIHostingController(rootView: LibraryRootFixture(model: model))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKeyAndVisible()
+        }
+        func tabController(_ controller: UIViewController) -> UITabBarController? {
+            if let tabs = controller as? UITabBarController { return tabs }
+            return controller.children.lazy.compactMap { tabController($0) }.first
+        }
+        func tabBarHidden() -> Bool? {
+            window.layoutIfNeeded()
+            return tabController(host)?.isTabBarHidden
+        }
+        func tabBarBecomes(hidden: Bool) async throws -> Bool {
+            let deadline = ContinuousClock.now + .seconds(3)
+            repeat {
+                if tabBarHidden() == hidden { return true }
+                try await Task.sleep(for: .milliseconds(20))
+            } while ContinuousClock.now < deadline
+            return false
+        }
+        // Browse applies its tab-bar preference after mounting, so visibility must hold.
+        func tabBarStaysVisible() async throws -> Bool {
+            let end = ContinuousClock.now + .seconds(1)
+            repeat {
+                if tabBarHidden() != false { return false }
+                try await Task.sleep(for: .milliseconds(20))
+            } while ContinuousClock.now < end
+            return true
+        }
+
+        let homeVisible = try await tabBarBecomes(hidden: false)
+        XCTAssertTrue(homeVisible)
+        model.selection = .library("server-a:movies")
+        let rootVisible = try await tabBarStaysVisible()
+        XCTAssertTrue(rootVisible, "A library root must keep the navigation that leads elsewhere.")
+        model.path = ["pushed"]
+        let pushedHidden = try await tabBarBecomes(hidden: true)
+        XCTAssertTrue(pushedHidden, "A pushed Browse page stays full-screen.")
+        model.path = []
+        let returnedVisible = try await tabBarBecomes(hidden: false)
+        let returnedStable = try await tabBarStaysVisible()
+        XCTAssertTrue(returnedVisible && returnedStable, "Returning to the library root restores navigation.")
+        let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        })
+        attachment.name = "Library root with horizontal navigation"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private struct LibraryRootFixture: View {
+        @Bindable var model: TransitionModel
+
+        var body: some View {
+            NativeTopBarNavigation(
+                destinations: [.home, .library("server-a:movies")], selection: $model.selection,
+                preventsAccidentalExit: false,
+                content: { destination, _ in
+                    guard destination != .home else { return AnyView(Text(verbatim: "home")) }
+                    return AnyView(NavigationStack(path: $model.path) {
+                        browse(isNavigationRoot: true)
+                            .navigationDestination(for: String.self) { _ in browse(isNavigationRoot: false) }
+                    })
+                },
+                label: { AnyView(Label($0.storageValue, systemImage: "square")) }
+            )
+        }
+
+        private func browse(isNavigationRoot: Bool) -> some View {
+            LibraryBrowseView(
+                viewModel: LibraryBrowseViewModel(
+                    provider: EmptyLibraryProvider(), containerID: "movies", containerKind: .movie
+                ),
+                title: Text(verbatim: "Movies"),
+                isNavigationRoot: isNavigationRoot,
+                onSelect: { _ in }
+            )
+        }
+    }
+
+    private struct EmptyLibraryProvider: MediaProvider {
+        let kind: ProviderKind = .jellyfin
+        let session = UserSession(
+            server: MediaServer(
+                id: "server-a", name: "Server", baseURL: URL(string: "https://example.invalid")!,
+                provider: .jellyfin
+            ),
+            userID: "viewer", userName: "Viewer", deviceID: "fixture", accessToken: ""
+        )
+        func libraries() async throws -> [MediaLibrary] { [] }
+        func continueWatching(limit: Int) async throws -> [MediaItem] { [] }
+        func latest(limit: Int) async throws -> [MediaItem] { [] }
+        func item(id: String) async throws -> MediaItem { throw AppError.notFound }
+        func children(of itemID: String) async throws -> [MediaItem] { [] }
+        func items(in containerID: String, kind: MediaItemKind, page: PageRequest) async throws -> MediaPage {
+            MediaPage(items: [], startIndex: 0, totalCount: 0)
+        }
+        func search(query: String, limit: Int) async throws -> [MediaItem] { [] }
+        func playbackInfo(for itemID: String) async throws -> PlaybackRequest { throw AppError.notFound }
+        func reportPlayback(_ progress: PlaybackProgress, event: PlaybackEvent) async throws {}
+        func imageURL(itemID: String, kind: ImageKind, maxWidth: Int?) -> URL? { nil }
     }
 
     func testLibrariesHaveDistinctNativeTabsAndOnlyTheSelectedRootIsActive() async throws {
