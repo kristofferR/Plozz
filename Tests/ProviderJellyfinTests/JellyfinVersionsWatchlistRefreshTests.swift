@@ -24,8 +24,10 @@ final class JellyfinVersionsWatchlistRefreshTests: XCTestCase {
            {"Id":"src4k","Name":"4K Remux","Path":"/media/Movie.Extended.mkv",
             "Size":42000000000,"Bitrate":80000000,"RunTimeTicks":72000000000,
             "MediaStreams":[
-              {"Index":0,"Type":"Video","Codec":"hevc","Width":3840,"Height":2160,"VideoRangeType":"DOVI"},
-              {"Index":1,"Type":"Audio","Codec":"truehd","Channels":8,"Profile":"Dolby Atmos"}]},
+              {"Index":0,"Type":"Video","Codec":"hevc","Width":3840,"Height":2160,"BitDepth":10,"VideoRangeType":"DOVI"},
+              {"Index":1,"Type":"Audio","Codec":"aac","Channels":2,"Language":"fra"},
+              {"Index":2,"Type":"Audio","Codec":"truehd","Channels":8,"Profile":"Dolby Atmos","Language":"eng","IsDefault":true},
+              {"Index":3,"Type":"Subtitle","Language":"jpn"}]},
            {"Id":"src1080","Name":"1080p","Size":9000000000,
             "MediaStreams":[
               {"Index":0,"Type":"Video","Codec":"h264","Width":1920,"Height":1080,"VideoRangeType":"SDR"},
@@ -43,7 +45,10 @@ final class JellyfinVersionsWatchlistRefreshTests: XCTestCase {
         XCTAssertEqual(uhd.height, 2160)
         XCTAssertEqual(uhd.videoCodec, "hevc")
         XCTAssertEqual(uhd.hdrLabel, "Dolby Vision")
-        XCTAssertEqual(uhd.audioLabel, "Atmos")
+        XCTAssertEqual(uhd.audioLabel, "Dolby Atmos")
+        XCTAssertEqual(uhd.audioFormatLabel, "Dolby TrueHD + Dolby Atmos")
+        XCTAssertEqual(uhd.audioLanguageNames(in: Locale(identifier: "en_US")), ["French", "English"])
+        XCTAssertEqual(uhd.sourceMetadata?.video?.bitDepth, 10)
         XCTAssertEqual(uhd.fileName, "Movie.Extended.mkv")
         XCTAssertEqual(uhd.bitrateLabel, "80 Mbps")
         XCTAssertEqual(uhd.duration, 7200)
@@ -53,6 +58,8 @@ final class JellyfinVersionsWatchlistRefreshTests: XCTestCase {
         XCTAssertEqual(hd.resolutionLabel, "1080p")
         XCTAssertEqual(hd.videoCodec, "h264")
         XCTAssertFalse(hd.isDefault)
+        XCTAssertTrue(hd.audioLanguageNames().isEmpty, "Language facts must not leak between files.")
+        XCTAssertEqual(hd.audioFormatLabel, "AAC Stereo")
     }
 
     func testSingleMediaSourceProducesNoVersionPicker() async throws {
@@ -67,6 +74,23 @@ final class JellyfinVersionsWatchlistRefreshTests: XCTestCase {
         let item = try await provider.item(id: "i2")
         XCTAssertFalse(item.hasMultipleVersions)
         XCTAssertEqual(item.versions, [])
+    }
+
+    func testTorrentSourcePathOnlyChangesTheDisplayFilename() throws {
+        let path = "https://media.example/stream?torrent_name=Film%20%26%20Friends.Extended.REMUX.mkv&id=tt123&media_type=movie"
+        let sources = try JSONDecoder.plozz.decode([MediaSourceInfo].self, from: Data("""
+        [
+          {"Id":"torrent","Name":"4K Remux","Path":"\(path)"},
+          {"Id":"local","Path":"/movies/Film.mkv"}
+        ]
+        """.utf8))
+        let versions = JellyfinProvider.versions(from: sources)
+        XCTAssertEqual(versions[0].fileName, "Film & Friends.Extended.REMUX.mkv")
+        XCTAssertEqual(versions[0].sourceMetadata?.fileName, versions[0].fileName)
+        XCTAssertEqual(MediaVersion.PickerPresentation(versions[0]).releaseName, versions[0].fileName)
+        XCTAssertEqual(versions[0].playbackMediaSourceID, "torrent")
+        XCTAssertEqual(sources[0].Path, path)
+        XCTAssertEqual(versions[1].fileName, "Film.mkv")
     }
 
     // MARK: - Feature B: Favorites-backed watchlist

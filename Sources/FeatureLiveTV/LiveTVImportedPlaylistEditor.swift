@@ -13,7 +13,7 @@ struct LiveTVImportedPlaylistEditor: View {
     let original: LiveTVPlaylistSource?
     let didConfigurePlaylist: () -> Void
     let didImportPlaylist: (String) -> Void
-    @Environment(\.dismiss) private var dismiss
+    @SettingsPageDismiss private var dismiss
     @State private var name: String
     @State private var guides: [LiveTVPlaylistEditorModel.GuideAddress]
     @State private var baseAddress = ""

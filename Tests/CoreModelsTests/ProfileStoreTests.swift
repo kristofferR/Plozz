@@ -124,6 +124,7 @@ private final class InMemorySecureStoringDouble: SecureStoring, @unchecked Senda
     private var storage: [String: String] = [:]
     private(set) var reads = 0
     var failWrites = false
+    var failRemovals = false
     var unreadableMembershipIDs: Set<String> = []
     var membershipReadsToFail = 0
     func setString(_ value: String, for key: String) throws {
@@ -148,11 +149,33 @@ private final class InMemorySecureStoringDouble: SecureStoring, @unchecked Senda
         }
         return value
     }
-    func removeValue(for key: String) throws { storage[key] = nil }
+    func removeValue(for key: String) throws {
+        if failRemovals { throw CocoaError(.fileWriteNoPermission) }
+        storage[key] = nil
+    }
 }
 
 @MainActor
 final class ProfilesModelTests: XCTestCase {
+    func testSyncErasureReportsSecureStoreFailureWithoutPretendingProfilesWereReset() throws {
+        let suite = "ProfileErasure.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let secure = InMemorySecureStoringDouble()
+        let model = ProfilesModel(store: ProfileStore(defaults: defaults, secureStore: secure))
+        model.seedDefaultProfileIdentity(name: "Original", avatarImageURL: nil)
+        let before = model.profiles
+        secure.failRemovals = true
+        XCTAssertThrowsError(try model.resetToPristineDefaultAfterSyncErasure())
+        XCTAssertEqual(model.profiles, before)
+        secure.failRemovals = false
+        try model.resetToPristineDefaultAfterSyncErasure()
+        XCTAssertEqual(model.profiles.count, 1)
+        XCTAssertEqual(model.profiles.first?.name, "Me")
+        let reloaded = ProfilesModel(store: ProfileStore(defaults: defaults, secureStore: secure))
+        XCTAssertEqual(reloaded.profiles, model.profiles)
+    }
+
     func testReadbackFailureDeniesFallbackWithoutRenderingReadsAndRecovers() throws {
         let secure = InMemorySecureStoringDouble()
         let store = ProfileStore(defaults: makeDefaults(), secureStore: secure)

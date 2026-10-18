@@ -11,7 +11,8 @@ you submit; no particular assistant or model is required.
 
 ## Reporting bugs & requesting features
 
-Everything starts with an issue. [**Open one**](https://github.com/thatcube/Plozz/issues/new/choose)
+Use issues for problems in distributed builds and proposals that need their own
+tracking. [**Open one**](https://github.com/thatcube/Plozz/issues/new/choose)
 and pick a template:
 
 - **🐞 Bug report** — captures what makes a bug fixable: steps to reproduce,
@@ -31,9 +32,15 @@ limits](../docs/discord-bridge.md); ordinary chat channels are not mirrored.
 
 ## Development pipeline
 
-The habit here: when a **real** bug turns up — a genuine defect, not a flaky
-test — file a bug-report issue first, then fix it. Keep it lightweight, but do
-file the issue.
+Fix defects, review findings, UI adjustments, and test failures introduced during
+active unreleased work within that task or its existing feature issue. Do not
+create a separate issue merely to fix something before users receive it. A
+development branch or local test installation is not a distributed release.
+
+Create an issue for a problem in a build delivered to users (including TestFlight),
+work being deferred beyond the current task, independently actionable work, or an
+explicit request to file one. Search for existing tracking first. Keep issue
+status accurate and distinguish a branch fix from a fix delivered to users.
 
 ### Commit issue references
 

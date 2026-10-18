@@ -1,6 +1,7 @@
 import Foundation
 import CoreModels
 import CoreSecureStore
+import TraktService
 
 /// Mirrors tracker sign-ins between devices through the app's existing
 /// end-to-end encrypted CloudKit channel.
@@ -18,6 +19,35 @@ import CoreSecureStore
 /// iCloud account — not by Apple, and not by anything inspecting the container.
 /// The Keychain remains the store of record on each device; this is transport.
 public enum TrackerTokenSyncBridge {
+    public static func erasureStores(profileNamespaces: [String?]) -> [any TraktTokenStoring] {
+        // Register inactive profiles as well as the currently constructed services.
+        var stores: [any TraktTokenStoring] = Set(profileNamespaces + [nil]).flatMap { namespace in
+            ["trakt.oauth", "wetrakr.oauth"].map {
+                KeychainTraktTokenStore(account: $0, namespace: namespace)
+            }
+        }
+        let existing = Set(stores.map(\.coordinationID))
+        stores += SyncedTokenRegistry.shared.knownAccounts().filter {
+            TraktSharedRefreshBootstrap.manages($0)
+                && !existing.contains($0.service + "\0" + $0.account)
+        }.map { KeychainTraktTokenStore(service: $0.service, account: $0.account) }
+        return stores
+    }
+
+    public static func eraseLocalTokens() throws {
+        for account in SyncedTokenRegistry.shared.knownAccounts() {
+            // clear() never decodes the generic payload and also removes legacy copies.
+            try SyncedTokenBox<String>(service: account.service, account: account.account).clear()
+        }
+        for synchronizable in [true, false] {
+            try KeychainStore(
+                service: "com.plozz.app.tokens", userIndependent: false,
+                fallbackToPerUser: false, synchronizable: synchronizable
+            ).removeAll()
+        }
+        NotificationCenter.default.post(name: .plozzTrackerTokensDidChangeRemotely, object: nil)
+    }
+
     /// `<service>|<account>`, both of which are already stable, non-secret
     /// identifiers. The record name must not be derived from the token.
     static func recordName(for account: SyncedTokenRegistry.Account) -> SyncRecordID {

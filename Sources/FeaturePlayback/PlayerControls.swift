@@ -1490,6 +1490,8 @@ struct PlayerControls: View {
         let isSelected: Bool
         let isToggle: Bool
         var isExternal: Bool = false
+        var facts: Text?
+        var titleLineLimit: Int? = 1
         let action: () -> Void
     }
 

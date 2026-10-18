@@ -84,13 +84,13 @@ private struct LiveTVScanSourceActions: View {
             .accessibilityIdentifier("live-tv-scan-source")
         }
         if coordinator.hasResults(sourceID: sourceID) {
-            NavigationLink {
+            SettingsPageLink {
                 LiveTVScanResultsView(coordinator: coordinator, sourceID: sourceID)
             } label: {
                 SettingsRowLabel(icon: "checklist", title: "Scan results")
             }
             .buttonStyle(SettingsFocusButtonStyle(size: .contained))
-            NavigationLink {
+            SettingsPageLink {
                 LiveTVScanResultsView(coordinator: coordinator, sourceID: sourceID, showHiddenOnly: true)
             } label: {
                 SettingsRowLabel(icon: "eye.slash", title: "Show hidden")

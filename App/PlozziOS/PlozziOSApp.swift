@@ -7,6 +7,12 @@ import UIKit
 
 private final class PlozziOSAppDelegate: NSObject, UIApplicationDelegate {
     func application(
+        _ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?
+    ) -> UIInterfaceOrientationMask {
+        PlozziOSWindowOrientation.supportedOrientations(for: window)
+    }
+
+    func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions:
             [UIApplication.LaunchOptionsKey: Any]? = nil

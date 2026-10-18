@@ -1,4 +1,5 @@
 import CoreModels
+import SwiftUI
 import XCTest
 @testable import FeaturePlayback
 
@@ -33,5 +34,27 @@ final class PlayerVersionMenuTests: XCTestCase {
         XCTAssertEqual(alternate.playbackMediaSourceID, "1")
         model.select("stale-version")
         XCTAssertEqual(selected, [alternate.id])
+    }
+
+    func testVersionRowsWrapSharedFactsAndRetainSelectionAction() throws {
+        let controls = PlayerControlsModel()
+        let version = MediaVersion(
+            id: "file", fileName: "Movie.REMUX.mkv", height: 2160,
+            duration: 7_200, videoCodec: "hevc", audioCodec: "truehd", audioChannels: 8,
+            sourceMetadata: .init(audio: .init(language: "eng"), audioLanguages: ["fra"])
+        )
+        controls.versions.options = [.init(version: version, isSelected: false)]
+        var selected: String?
+        var closed = false
+        controls.versions.onSelect = { selected = $0 }
+        let row = try XCTUnwrap(PlayerOptionsPanel.versionRows(
+            model: controls, locale: Locale(identifier: "en_US"), close: { closed = true }
+        ).first)
+        XCTAssertNil(row.titleLineLimit)
+        XCTAssertEqual(row.facts, Text(verbatim: "Remux · HEVC · French, English · Dolby TrueHD 7.1 · 2h"))
+        XCTAssertEqual(row.subtitle, Text(verbatim: "Movie.REMUX.mkv"))
+        row.action()
+        XCTAssertTrue(closed)
+        XCTAssertEqual(selected, "file")
     }
 }

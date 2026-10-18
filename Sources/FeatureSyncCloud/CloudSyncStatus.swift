@@ -11,11 +11,13 @@ public enum CloudSyncRecoveryResult: Equatable, Sendable {
 public enum CloudSyncRecoveryAction: Sendable {
     case reload
     case reset
+    case erase
 
     public var progressMessage: LocalizedStringResource {
         switch self {
         case .reload: "Reloading from iCloud…"
         case .reset: "Resetting iCloud Sync…"
+        case .erase: "Erasing Plozz sync data…"
         }
     }
 
@@ -23,11 +25,15 @@ public enum CloudSyncRecoveryAction: Sendable {
         switch (self, result) {
         case (.reload, .completed): "Reloaded the latest settings from iCloud."
         case (.reset, .completed): "Reset iCloud Sync using this device's settings."
+        case (.erase, .completed): "Erased Plozz sync data. iCloud Sync is off on this device."
+        case (.erase, .unavailable): "Plozz could not access iCloud. Check that you are signed in to iCloud and try again."
         case (_, .unavailable): "iCloud Sync is unavailable. Check that it is on and you are signed in to iCloud."
         case (.reload, .interrupted): "Reload was interrupted. Try again."
         case (.reset, .interrupted): "Reset was interrupted. Try again."
+        case (.erase, .interrupted): "Erasing was interrupted. Some data may already be deleted. Try again."
         case (.reload, .failed): "Couldn’t reload from iCloud. Try again."
         case (.reset, .failed): "Couldn't reset iCloud Sync. Try again."
+        case (.erase, .failed): "Could not finish erasing Plozz sync data. Some data may already be deleted. Check iCloud and try again."
         }
     }
 }

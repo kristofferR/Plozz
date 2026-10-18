@@ -29,7 +29,10 @@ extension AppState {
                 if let bridge { await bridge.accountDidChange() }
                 else { await MainActor.run { LiveTVPortableSyncPreferenceStore.accountDidChange() } }
             },
-            isHydrated: { [weak bridge] in bridge != nil }
+            isHydrated: { [weak bridge] in bridge != nil },
+            applySnapshot: { [weak bridge] snapshot in
+                await bridge?.apply(snapshot.changes, localCaptureDigests: snapshot.localCaptureDigests)
+            }
         )
     }
 

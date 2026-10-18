@@ -390,7 +390,7 @@ private struct PlozziOSCanonicalItemDetailView: View {
                 }
             }
         }
-        .sheet(isPresented: $presentsSeriesDownloads) {
+        .plozzSheet(isPresented: $presentsSeriesDownloads) {
             if let detail = viewModel.state.value {
                 PlozziOSSeriesDownloadPicker(
                     series: detail.item,
@@ -1410,16 +1410,18 @@ private struct PlozziOSSourceVersionControls: View {
 
 }
 
-private struct PlozziOSVersionPickerPopover: View {
+struct PlozziOSVersionPickerPopover: View {
     let versions: [MediaVersion]
     let selectedVersionID: String
     let onSelectVersion: (String) -> Void
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.locale) private var locale
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 2) {
                 ForEach(versions) { version in
+                    let presentation = MediaVersion.PickerPresentation(version, locale: locale)
                     Button {
                         onSelectVersion(version.id)
                         dismiss()
@@ -1429,8 +1431,23 @@ private struct PlozziOSVersionPickerPopover: View {
                                 .frame(width: 18)
                                 .opacity(version.id == selectedVersionID ? 1 : 0)
                                 .accessibilityHidden(version.id != selectedVersionID)
-                            versionTitleText(version.displayLabel)
-                                .multilineTextAlignment(.leading)
+                            VStack(alignment: .leading, spacing: 4) {
+                                versionTitleText(presentation.title)
+                                if !presentation.supplementalFacts.isEmpty {
+                                    Text(verbatim: presentation.supplementalFacts.joined(separator: " · "))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                if let release = presentation.releaseName {
+                                    Text(verbatim: release)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                        .truncationMode(.middle)
+                                }
+                            }
+                            .multilineTextAlignment(.leading)
                             Spacer(minLength: 0)
                         }
                         .contentShape(Rectangle())

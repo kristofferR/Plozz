@@ -12,13 +12,14 @@ final class PlozzigenLiveOutputTests: XCTestCase {
             XCTAssertFalse(options.nativeRemoteHLS, suffix)
             XCTAssertEqual(options.liveJoinProfile, .fastZap, suffix)
         }
-        for path in ["opaque.m3u8", "extensionless"] {
-            let url = try XCTUnwrap(URL(string: "http://127.0.0.1/\(path)"))
-            let options = PlozzigenVideoEngine.liveLoadOptions(httpHeaders: [:], url: url)
-            XCTAssertTrue(options.nativeRemoteHLS)
-            XCTAssertEqual(options.objectAudioRendering, .off)
-            XCTAssertEqual(options.liveJoinProfile, .standard)
-        }
+        let playlist = try XCTUnwrap(URL(string: "http://127.0.0.1/opaque.m3u8"))
+        XCTAssertTrue(PlozzigenVideoEngine.liveLoadOptions(httpHeaders: [:], url: playlist).nativeRemoteHLS)
+        let opaque = try XCTUnwrap(URL(string: "http://127.0.0.1/extensionless"))
+        XCTAssertFalse(PlozzigenVideoEngine.liveLoadOptions(httpHeaders: [:], url: opaque).nativeRemoteHLS)
+        let detected = PlozzigenVideoEngine.liveLoadOptions(httpHeaders: [:], url: opaque, sourceFormat: .hls)
+        XCTAssertTrue(detected.nativeRemoteHLS)
+        XCTAssertEqual(detected.objectAudioRendering, .off)
+        XCTAssertEqual(detected.liveJoinProfile, .standard)
     }
 
     func testOutputPoliciesLeavePanelModeInferenceToAether() {

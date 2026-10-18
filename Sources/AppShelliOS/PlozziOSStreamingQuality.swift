@@ -10,14 +10,27 @@ enum PlozziOSStreamingNetwork {
         AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             let monitor = NWPathMonitor()
             monitor.pathUpdateHandler = { path in
+                let interfacePreference: [StreamingNetwork] = path.availableInterfaces.map { interface in
+                    switch interface.type {
+                    case .wifi: .wifi
+                    case .cellular: .cellular
+                    case .wiredEthernet: .wired
+                    default: .unknown
+                    }
+                }
                 let network = StreamingNetwork.classify(
                     isSatisfied: path.status == .satisfied,
                     usesCellular: path.usesInterfaceType(.cellular),
                     usesWiFi: path.usesInterfaceType(.wifi),
-                    usesEthernet: path.usesInterfaceType(.wiredEthernet)
+                    usesEthernet: path.usesInterfaceType(.wiredEthernet),
+                    interfacePreference: interfacePreference
                 )
                 HandoffDiagnostics.emit(
-                    "streaming PATH network=\(network) expensive=\(path.isExpensive) constrained=\(path.isConstrained)"
+                    "streaming PATH network=\(network) status=\(path.status) "
+                        + "wifi=\(path.usesInterfaceType(.wifi)) cellular=\(path.usesInterfaceType(.cellular)) "
+                        + "wired=\(path.usesInterfaceType(.wiredEthernet)) other=\(path.usesInterfaceType(.other)) "
+                        + "preference=\(interfacePreference) "
+                        + "expensive=\(path.isExpensive) constrained=\(path.isConstrained)"
                 )
                 continuation.yield(network)
             }
@@ -63,7 +76,15 @@ struct PlozziOSStreamingSettings: View {
                 }
                 .accessibilityIdentifier("streaming-advanced")
             } else {
-                Text("Original quality")
+                Picker("Quality", selection: .constant(StreamingQuality.original)) {
+                    Text("Original quality").tag(StreamingQuality.original)
+                }
+                .disabled(true)
+                .accessibilityIdentifier("streaming-unavailable")
+            }
+        } footer: {
+            if !hasCompatibleServer {
+                Text("Unavailable for network shares.")
             }
         }
     }
@@ -145,7 +166,7 @@ struct StreamingQualityPicker: View {
         }
         .accessibilityLabel(Text(title))
         .accessibilityValue(Text(selection.title))
-        .sheet(item: $editingQuality) { quality in
+        .plozzSheet(item: $editingQuality) { quality in
             StreamingCustomQualityEditor(quality: quality, support: support) { selection = $0 }
         }
         if let message = support.validationMessage(for: selection) {

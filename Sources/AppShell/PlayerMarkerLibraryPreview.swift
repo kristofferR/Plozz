@@ -50,7 +50,7 @@ enum MarkerPreviewLibrarySource {
             + " setup=\(flow.hasResumableSetup) appearance=\(flow.isPickingAppearanceForNewProfile)"
             + " identity=\(flow.pendingIdentityAccountID != nil) lockOffer=\(flow.pendingLockOfferProfile != nil)"
             + " plexPIN=\(app.plexHomeUsers.pendingPlexPINRequest != nil)"
-            + " awaitsIdentity=\(app.profilesModel.activeProfile.awaitsIdentity(amongAccounts: app.accountsProviders.activeAccountIDs))"
+            + " awaitsIdentity=\(app.accountsProviders.activeProfileAwaitsIdentity)"
     }
 
     static func authorizationID(_ app: AppState) -> String {

@@ -27,6 +27,34 @@ public struct SettingsMenuLabel: View {
 }
 #endif
 
+/// A drill-in label inside a settings group; the group owns its content insets.
+public struct SettingsDisclosureLabel<Title: View, Value: View>: View {
+    private let title: Title
+    private let value: Value
+
+    public init(
+        @ViewBuilder title: () -> Title,
+        @ViewBuilder value: () -> Value = { EmptyView() }
+    ) {
+        self.title = title()
+        self.value = value()
+    }
+
+    public var body: some View {
+        LabeledContent {
+            HStack(spacing: 8) {
+                value
+                Image(systemName: "chevron.forward")
+                    .font(.caption.weight(.semibold))
+                    .accessibilityHidden(true)
+            }
+            .settingsRowSecondary()
+        } label: {
+            title
+        }
+    }
+}
+
 /// A group occupies one native List cell. On iOS, navigation beside other
 /// controls must use a Button and navigationDestination: a NavigationLink can
 /// claim the cell's primary action, including taps on a sibling picker's label.
@@ -125,7 +153,7 @@ public struct SettingsSectionGroup<Content: View, Footer: View>: View {
             #if os(tvOS)
             .toggleStyle(SettingsSwitchToggleStyle(flushLeading: false))
             #else
-            .toggleStyle(SettingsTouchSwitchToggleStyle())
+            .toggleStyle(SettingsSwitchToggleStyle())
             // A group is one List cell. Automatic pickers can claim the whole
             // cell's primary action, stealing taps from sibling controls.
             .pickerStyle(.menu)
@@ -133,7 +161,11 @@ public struct SettingsSectionGroup<Content: View, Footer: View>: View {
             .settingsGroupSurface(cornerRadius: 18)
 
             footer
+                #if os(tvOS)
+                .font(SettingsRowMetrics.helperFont)
+                #else
                 .font(.footnote)
+                #endif
                 .plozzForeground(.secondary)
                 .padding(.horizontal, 16)
         }

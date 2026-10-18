@@ -21,6 +21,44 @@ final class IPTVRemovalInteractionTests: XCTestCase {
         super.tearDown()
     }
 
+    func testSourceRetryShowsProgressWithoutOpeningDetailsAndWorksWithinDetails() {
+        app.launchArguments = ["--source-retry-fixture", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        let retry = app.buttons["live-tv-source-retry-source"]
+        let progress = app.descendants(matching: .any)
+            .matching(identifier: "live-tv-source-retry-progress-source").firstMatch
+        XCTAssertTrue(retry.waitForExistence(timeout: 10), app.debugDescription)
+        for count in 1...2 {
+            if count == 2 {
+                app.buttons["live-tv-source-details-source"].tap()
+                XCTAssertTrue(app.switches["live-tv-source-enabled-source"].waitForExistence(timeout: 5))
+            }
+            retry.tap()
+            let loading = NSPredicate { _, _ in
+                progress.exists && progress.label.contains("Loading channels and guide") && !retry.exists
+            }
+            XCTAssertEqual(XCTWaiter.wait(
+                for: [XCTNSPredicateExpectation(predicate: loading, object: nil)], timeout: 2
+            ), .completed, app.debugDescription)
+            XCTAssertFalse(app.staticTexts["Loading channels"].exists)
+            XCTAssertFalse(app.staticTexts["Refreshing sources"].exists)
+            XCTAssertEqual(app.progressIndicators.count, 0, "Only the inline, accessibility-hidden spinner should be visible.")
+            let attachment = XCTAttachment(screenshot: app.screenshot())
+            attachment.name = "source-retry-loading-\(count)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            app.buttons["fixture-finish-retry"].tap()
+            let finished = NSPredicate { _, _ in retry.exists && retry.isEnabled && !progress.exists }
+            XCTAssertEqual(XCTWaiter.wait(
+                for: [XCTNSPredicateExpectation(predicate: finished, object: nil)], timeout: 5
+            ), .completed, app.debugDescription)
+            if count == 1 {
+                XCTAssertTrue(app.buttons["live-tv-source-details-source"].exists, app.debugDescription)
+                XCTAssertEqual(app.staticTexts["fixture-source-retries"].label, "Retries: 1")
+            }
+        }
+    }
+
     func testRemovingAdditionalGuidesKeepsTheOtherRowsAndAllowsAddingAgain() {
         verifyRemoval(
             arguments: [], field: "Additional guide URL", remove: "Remove guide", add: "Add guide",

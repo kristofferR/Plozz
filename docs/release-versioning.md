@@ -112,6 +112,18 @@ the latest catalog entry's Apple version. Local builds continue to use the Git
 commit count and dirty-tree suffix and display that Apple version/build, rather
 than claiming to be a newly distributed release.
 
+Local Debug builds can show a short feature name after the number, such as
+**4776.4 wetrakr**, in About and Device & Build. Set it once per worktree in the
+gitignored `.plozz-dev-feature` file (one line), or override it for an invocation
+with `PLOZZ_DEV_FEATURE`. An explicitly empty environment value disables it.
+Use at most 32 ASCII letters, digits, spaces, dots, underscores or hyphens.
+Update the file when switching the worktree to a different task.
+
+The generator bakes this display-only value as `PlozzDevelopmentFeature`.
+Release configurations and selected distribution identities always suppress it.
+`CFBundleVersion`, Top Shelf parity, crash/protocol identifiers and release
+number allocation remain numeric and unchanged.
+
 Before uploading, both distribution lanes check both exported IPAs' platform, identifier,
 Apple version/build, and public release version/ID. A mismatch stops both uploads.
 After delivery, tags pad the first build component and preserve hotfix suffixes:

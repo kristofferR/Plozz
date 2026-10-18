@@ -1,9 +1,47 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import CoreModels
 
 final class LiveTVPortableSyncTests: XCTestCase {
     private let profileID = "profile"
+
+    func testCategoryRulesRegionAndIndividualExceptionsSyncWithoutExpandingFavorites() throws {
+        let sender = try makeFixture()
+        let receiver = try makeFixture()
+        var organization = LiveTVChannelOrganization()
+        let category = LiveTVCategoryRule(sourceID: "playlist", name: "News", visibility: .hidden, isFavorite: true)
+        organization.setCategory(category)
+        organization.region = .init(isEnabled: true, countries: ["US"], languages: ["English"])
+        organization.shownChannelIDs = ["shown"]
+        organization.excludedFavoriteIDs = ["unfavorite"]
+        try sender.preferences.save(.init(organization: organization))
+        let records = try sender.adapter.capture(sourceStore: sender.sources, fallback: [:])
+        XCTAssertEqual(records.count, 4)
+        _ = try receiver.adapter.apply(records.mapValues(Optional.some), sourceStore: receiver.sources)
+        XCTAssertEqual(try receiver.preferences.load().organization, organization)
+        XCTAssertTrue(try receiver.preferences.load().favoriteIDs.isEmpty)
+        XCTAssertEqual(try receiver.adapter.capture(sourceStore: receiver.sources, fallback: records), records)
+        try sender.preferences.save(.empty)
+        let cleared = try sender.adapter.capture(sourceStore: sender.sources, fallback: records)
+        _ = try receiver.adapter.apply(cleared.mapValues(Optional.some), sourceStore: receiver.sources)
+        XCTAssertEqual(try receiver.preferences.load().organization, .init())
+        let bytes = try XCTUnwrap(cleared[recordKey(.category, category.id).recordName])
+        XCTAssertTrue(try LiveTVPortableRecord.decode(bytes, key: recordKey(.category, category.id)).isDeleted)
+    }
+
+    func testCategoryAndRegionRecordsRejectWrongIdentityAndProfile() throws {
+        let fixture = try makeFixture()
+        let category = LiveTVCategoryRule(sourceID: "playlist", name: "News", visibility: .hidden)
+        let invalid = try LiveTVPortableRecord(category: category).encoded()
+        let changes: [String: Data?] = [
+            recordKey(.category, "wrong-id").recordName: invalid,
+            recordKey(.region, "wrong-region").recordName: try LiveTVPortableRecord(region: .init()).encoded(),
+            LiveTVPortableRecordKey(profileID: "different-profile", kind: .category, entityID: category.id).recordName: invalid
+        ]
+        _ = try fixture.adapter.apply(changes, sourceStore: fixture.sources)
+        XCTAssertEqual(try fixture.preferences.load(), .empty)
+    }
 
     @MainActor
     func testCaptureInputsIgnoreRecentsButDetectPreferencesJournalEditsAndEviction() async throws {
@@ -466,6 +504,527 @@ final class LiveTVPortableSyncTests: XCTestCase {
         _ = try fixture.adapter.apply([recordKey(.source, "server").recordName: malicious], sourceStore: fixture.sources)
         XCTAssertEqual(try fixture.sources.load().servers.first?.accountID, "allowed-account")
         XCTAssertEqual(try fixture.preferences.load().favoriteIDs, ["recoverable-channel"])
+    }
+
+    func testServerDescriptorRoundTripAndUnavailableStorageDoNotDeleteSavedSources() throws {
+        let sender = try makeFixture()
+        let receiver = try makeFixture()
+        let saved = LiveTVSourcesConfiguration(servers: [
+            .init(id: "saved-server", name: "Live playlist", accountID: "iptv-account")
+        ])
+        try sender.sources.save(saved)
+        let initial = try sender.adapter.capture(sourceStore: sender.sources, fallback: [:])
+        _ = try receiver.adapter.apply(initial.mapValues(Optional.some), sourceStore: receiver.sources)
+        XCTAssertTrue(try receiver.sources.load().servers.isEmpty, "A descriptor cannot enroll an account.")
+        let returned = try receiver.adapter.capture(sourceStore: receiver.sources, fallback: initial)
+        XCTAssertEqual(returned, initial, "An unconfigured peer must not invent source deletions.")
+        _ = try sender.adapter.apply(returned.mapValues(Optional.some), sourceStore: sender.sources)
+        let savedWithReceipt = try sender.sources.load()
+        XCTAssertEqual(savedWithReceipt.servers, saved.servers)
+        XCTAssertEqual(savedWithReceipt.playlists, saved.playlists)
+        XCTAssertNotNil(savedWithReceipt.serverSyncCheckpoint)
+        XCTAssertThrowsError(try sender.adapter.capture(sourceStore: UnavailablePortableSources(), fallback: initial))
+        XCTAssertEqual(try sender.adapter.capture(sourceStore: sender.sources, fallback: initial), initial)
+        XCTAssertEqual(try sender.sources.load(), savedWithReceipt)
+        XCTAssertTrue(try LiveTVServerEnrollmentSuppressionStore(
+            defaults: sender.defaults, profileID: profileID
+        ).suppressedAccountIDs().isEmpty)
+    }
+
+    func testDelayedCloudRemovalCannotEraseServerReaddedBeforeCapture() throws {
+        let fixture = try makeFixture()
+        let source = LiveTVServerSource(id: "server", name: "IPTV", accountID: "iptv-account")
+        let key = recordKey(.source, source.id)
+        try fixture.sources.save(.init(servers: [source]))
+        let initial = try fixture.adapter.capture(sourceStore: fixture.sources, fallback: [:])
+        try fixture.sources.save(.empty)
+        let removed = try fixture.adapter.capture(sourceStore: fixture.sources, fallback: initial)
+        try fixture.sources.save(.init(servers: [source]))
+        try LiveTVServerEnrollmentSuppressionStore(defaults: fixture.defaults, profileID: profileID)
+            .setSuppressed(false, accountID: source.accountID)
+
+        _ = try fixture.adapter.apply(removed.mapValues(Optional.some), sourceStore: fixture.sources)
+
+        XCTAssertEqual(try fixture.sources.load().servers, [source])
+        XCTAssertTrue(try LiveTVServerEnrollmentSuppressionStore(
+            defaults: fixture.defaults, profileID: profileID
+        ).suppressedAccountIDs().isEmpty)
+        let captured = try fixture.adapter.capture(sourceStore: fixture.sources, fallback: removed)
+        let record = try LiveTVPortableRecord.decode(XCTUnwrap(captured[key.recordName]), key: key)
+        XCTAssertFalse(record.isDeleted)
+        XCTAssertEqual(record.source?.isEnabled, true)
+    }
+
+    func testDelayedCloudDisableCannotUndoServerReenabledBeforeCapture() throws {
+        let fixture = try makeFixture()
+        let disabled = LiveTVServerSource(id: "server", name: "IPTV", accountID: "iptv-account", isEnabled: false)
+        try fixture.sources.save(.init(servers: [disabled]))
+        let previous = try fixture.adapter.capture(sourceStore: fixture.sources, fallback: [:])
+        var enabled = disabled
+        enabled.isEnabled = true
+        try fixture.sources.save(.init(servers: [enabled]))
+        try LiveTVServerEnrollmentSuppressionStore(defaults: fixture.defaults, profileID: profileID)
+            .setSuppressed(false, accountID: enabled.accountID)
+
+        _ = try fixture.adapter.apply(previous.mapValues(Optional.some), sourceStore: fixture.sources)
+
+        XCTAssertEqual(try fixture.sources.load().servers, [enabled])
+        XCTAssertTrue(try LiveTVServerEnrollmentSuppressionStore(
+            defaults: fixture.defaults, profileID: profileID
+        ).suppressedAccountIDs().isEmpty)
+    }
+
+    func testCapturedServerIntentSurvivesUnacknowledgedCloudApplyRestartAndFallback() throws {
+        let fixture = try makeFixture()
+        let key = recordKey(.source, "server")
+        let disabled = LiveTVServerSource(id: "server", name: "IPTV", accountID: "iptv-account", isEnabled: false)
+        try fixture.sources.save(.init(servers: [disabled]))
+        let old = try fixture.adapter.capture(sourceStore: fixture.sources, fallback: [:])
+        var enabled = disabled
+        enabled.isEnabled = true
+        try fixture.sources.save(.init(servers: [enabled]))
+        try LiveTVServerEnrollmentSuppressionStore(defaults: fixture.defaults, profileID: profileID)
+            .setSuppressed(false, accountID: enabled.accountID)
+        let local = try fixture.adapter.capture(sourceStore: fixture.sources, fallback: old)
+        let restarted = LiveTVPortableSyncAdapter(
+            directory: fixture.root, profileID: profileID, defaults: fixture.defaults, namespace: profileID
+        )
+
+        _ = try restarted.apply(old.mapValues(Optional.some), sourceStore: fixture.sources, localCaptureDigests: [:])
+        XCTAssertEqual(try fixture.sources.load().servers, [enabled])
+        XCTAssertEqual(try restarted.capture(sourceStore: fixture.sources, fallback: old), local)
+        XCTAssertEqual(try fixture.sources.load().servers, [enabled])
+
+        let receipts = local.mapValues { Data(SHA256.hash(data: $0)) }
+        _ = try restarted.apply(
+            [key.recordName: try XCTUnwrap(old[key.recordName])], sourceStore: fixture.sources,
+            localCaptureDigests: receipts
+        )
+        XCTAssertEqual(try fixture.sources.load().servers, [disabled],
+                       "A real server-wins conflict must still converge after the ledger recorded local intent")
+    }
+
+    func testCloudDeletionStillRemovesUnchangedAcknowledgedServer() throws {
+        for hardDeletion in [false, true] {
+            let fixture = try makeFixture()
+            let key = recordKey(.source, "server")
+            try fixture.sources.save(.init(servers: [
+                .init(id: "server", name: "IPTV", accountID: "iptv-account")
+            ]))
+            let local = try fixture.adapter.capture(sourceStore: fixture.sources, fallback: [:])
+            let receipts = local.mapValues { Data(SHA256.hash(data: $0)) }
+            let value = hardDeletion ? nil : try LiveTVPortableRecord(isDeleted: true).encoded()
+            _ = try fixture.adapter.apply(
+                [key.recordName: value], sourceStore: fixture.sources, localCaptureDigests: receipts
+            )
+            XCTAssertTrue(try fixture.sources.load().servers.isEmpty)
+            XCTAssertEqual(try LiveTVServerEnrollmentSuppressionStore(
+                defaults: fixture.defaults, profileID: profileID
+            ).suppressedAccountIDs(), ["iptv-account"])
+        }
+    }
+
+    func testOldCloudStateCannotOverrideFirstLocalServerEnrollment() throws {
+        for deleted in [false, true] {
+            let fixture = try makeFixture()
+            let key = recordKey(.source, "server")
+            let source = LiveTVServerSource(id: "server", name: "New IPTV", accountID: "iptv-account")
+            try fixture.sources.save(.init(servers: [source]))
+            let suppression = LiveTVServerEnrollmentSuppressionStore(defaults: fixture.defaults, profileID: profileID)
+            try suppression.setSuppressed(false, accountID: source.accountID)
+            let remote = deleted ? LiveTVPortableRecord(isDeleted: true) : LiveTVPortableRecord(source: .init(
+                kind: .server, name: "Old IPTV", isEnabled: false, accountID: source.accountID
+            ))
+            _ = try fixture.adapter.apply([
+                key.recordName: try remote.encoded(),
+                recordKey(.serverEnrollment, source.accountID).recordName:
+                    try LiveTVPortableRecord(serverEnrollmentSuppressed: true).encoded()
+            ], sourceStore: fixture.sources, localCaptureDigests: [:])
+            XCTAssertEqual(try fixture.sources.load().servers, [source])
+            XCTAssertTrue(try suppression.suppressedAccountIDs().isEmpty)
+        }
+    }
+
+    func testAcknowledgedEnrollmentTombstoneDoesNotBlockLaterPeerReenable() throws {
+        let fixture = try makeFixture()
+        let key = recordKey(.serverEnrollment, "iptv-account")
+        _ = try fixture.adapter.apply([key.recordName: nil], sourceStore: fixture.sources, localCaptureDigests: [:])
+        _ = try fixture.adapter.apply([
+            key.recordName: try LiveTVPortableRecord(serverEnrollmentSuppressed: false).encoded()
+        ], sourceStore: fixture.sources, localCaptureDigests: [:])
+        XCTAssertTrue(try LiveTVServerEnrollmentSuppressionStore(
+            defaults: fixture.defaults, profileID: profileID
+        ).suppressedAccountIDs().isEmpty)
+    }
+
+    func testSourceFirstCloudDisableAndSplitReenableConvergeBeforeCapture() throws {
+        for intermediateEnrollment in [false, true] {
+            for sourceFirst in [false, true] {
+                let fixture = try makeFixture(includesPlaylistSources: false)
+                let store = LiveTVApprovalAwareSourcesStore(
+                    underlying: fixture.sources,
+                    approvals: .init(defaults: fixture.defaults, profileID: profileID, namespace: profileID)
+                )
+                let server = LiveTVServerSource(id: "server", name: "IPTV", accountID: "iptv-account")
+                let sourceKey = recordKey(.source, server.id)
+                let enrollmentKey = recordKey(.serverEnrollment, server.accountID)
+                try store.save(.init(servers: [server]))
+                let initial = try fixture.adapter.capture(sourceStore: store, fallback: [:])
+                let receipts = initial.mapValues { Data(SHA256.hash(data: $0)) }
+                let disabled = try LiveTVPortableRecord(source: .init(
+                    kind: .server, name: server.name, isEnabled: false, accountID: server.accountID
+                )).encoded()
+                _ = try fixture.adapter.apply(
+                    [sourceKey.recordName: disabled], sourceStore: store, localCaptureDigests: receipts
+                )
+                XCTAssertEqual(try store.load().servers.first?.isEnabled, false)
+                if intermediateEnrollment {
+                    let result = try fixture.adapter.apply([
+                        enrollmentKey.recordName: try LiveTVPortableRecord(serverEnrollmentSuppressed: true).encoded()
+                    ], sourceStore: store, localCaptureDigests: receipts)
+                    XCTAssertEqual(result.appliedCount, 1)
+                }
+                let restarted = LiveTVPortableSyncAdapter(
+                    directory: fixture.root, profileID: profileID, defaults: fixture.defaults,
+                    namespace: profileID, includesPlaylistSources: false
+                )
+                let source: SyncLocalChanges = [sourceKey.recordName: try XCTUnwrap(initial[sourceKey.recordName])]
+                let enrollment: SyncLocalChanges = [
+                    enrollmentKey.recordName: try XCTUnwrap(initial[enrollmentKey.recordName])
+                ]
+                for changes in sourceFirst ? [source, enrollment] : [enrollment, source] {
+                    _ = try restarted.apply(changes, sourceStore: store, localCaptureDigests: receipts)
+                }
+                XCTAssertEqual(try store.load().servers, [server])
+                let captured = try restarted.capture(sourceStore: store, fallback: initial)
+                XCTAssertEqual(captured[enrollmentKey.recordName], initial[enrollmentKey.recordName])
+            }
+        }
+    }
+
+    func testRemoteSuppressionSideEffectDoesNotAcknowledgeAnotherLocalDisable() throws {
+        let fixture = try makeFixture(includesPlaylistSources: false)
+        let store = LiveTVApprovalAwareSourcesStore(
+            underlying: fixture.sources,
+            approvals: .init(defaults: fixture.defaults, profileID: profileID, namespace: profileID)
+        )
+        let remoteServer = LiveTVServerSource(id: "remote", name: "Remote", accountID: "remote-account")
+        var localServer = LiveTVServerSource(id: "local", name: "Local", accountID: "local-account")
+        try store.save(.init(servers: [remoteServer, localServer]))
+        let initial = try fixture.adapter.capture(sourceStore: store, fallback: [:])
+        let receipts = initial.mapValues { Data(SHA256.hash(data: $0)) }
+        localServer.isEnabled = false
+        try store.save(.init(servers: [remoteServer, localServer]))
+        _ = try fixture.adapter.apply([
+            recordKey(.source, remoteServer.id).recordName: try LiveTVPortableRecord(source: .init(
+                kind: .server, name: remoteServer.name, isEnabled: false, accountID: remoteServer.accountID
+            )).encoded()
+        ], sourceStore: store, localCaptureDigests: receipts)
+
+        _ = try fixture.adapter.apply([
+            recordKey(.serverEnrollment, localServer.accountID).recordName:
+                try LiveTVPortableRecord(serverEnrollmentSuppressed: false).encoded()
+        ], sourceStore: store, localCaptureDigests: receipts)
+
+        XCTAssertEqual(try LiveTVServerEnrollmentSuppressionStore(
+            defaults: fixture.defaults, profileID: profileID
+        ).suppressedAccountIDs(), [remoteServer.accountID, localServer.accountID])
+        XCTAssertEqual(try store.load().servers.first { $0.id == localServer.id }, localServer)
+    }
+
+    @MainActor
+    func testRemoteSuppressionSurvivesFailedObservationCommitAndRetry() async throws {
+        let gate = PortableJournalWriteGate()
+        let fixture = try makeFixture(
+            requiresPreparedJournal: true, includesPlaylistSources: false,
+            writeFile: { data, url in
+                if gate.shouldFail && url.lastPathComponent == "observed-local.json" {
+                    gate.shouldFail = false
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+                try data.write(to: url, options: .atomic)
+            }
+        )
+        let store = LiveTVApprovalAwareSourcesStore(
+            underlying: fixture.sources,
+            approvals: .init(defaults: fixture.defaults, profileID: profileID, namespace: profileID)
+        )
+        let server = LiveTVServerSource(id: "server", name: "IPTV", accountID: "iptv-account")
+        let sourceKey = recordKey(.source, server.id).recordName
+        let enrollmentKey = recordKey(.serverEnrollment, server.accountID).recordName
+        try store.save(.init(servers: [server]))
+        try await fixture.adapter.prepareForOperation()
+        let initial = try await fixture.adapter.committingJournal {
+            try fixture.adapter.capture(sourceStore: store, fallback: [:])
+        }
+        let receipts = initial.mapValues { Data(SHA256.hash(data: $0)) }
+        let disable: SyncLocalChanges = [
+            sourceKey: try LiveTVPortableRecord(source: .init(
+                kind: .server, name: server.name, isEnabled: false, accountID: server.accountID
+            )).encoded()
+        ]
+        try await fixture.adapter.prepareForOperation(records: disable)
+        gate.shouldFail = true
+        do {
+            _ = try await fixture.adapter.committingJournal {
+                try fixture.adapter.apply(disable, sourceStore: store, localCaptureDigests: receipts)
+            }
+            XCTFail("The observation commit must fail")
+        } catch {
+            XCTAssertEqual((error as NSError).code, CocoaError.fileWriteNoPermission.rawValue)
+        }
+        let restarted = LiveTVPortableSyncAdapter(
+            directory: fixture.root, profileID: profileID, defaults: fixture.defaults,
+            namespace: profileID, includesPlaylistSources: false
+        )
+        _ = try restarted.apply(disable, sourceStore: store, localCaptureDigests: receipts)
+        _ = try restarted.apply([
+            enrollmentKey: try LiveTVPortableRecord(serverEnrollmentSuppressed: true).encoded()
+        ], sourceStore: store, localCaptureDigests: receipts)
+        _ = try restarted.apply([
+            sourceKey: try XCTUnwrap(initial[sourceKey]),
+            enrollmentKey: try XCTUnwrap(initial[enrollmentKey])
+        ], sourceStore: store, localCaptureDigests: receipts)
+        XCTAssertEqual(try store.load().servers, [server])
+        let captured = try restarted.capture(sourceStore: store, fallback: initial)
+        XCTAssertEqual(captured[enrollmentKey], initial[enrollmentKey])
+    }
+
+    func testLocalSuppressionDecisionsReplaceDurableRemoteProvenance() throws {
+        let fixture = try makeFixture()
+        let suppression = LiveTVServerEnrollmentSuppressionStore(defaults: fixture.defaults, profileID: profileID)
+        let disabled = LiveTVSourcesConfiguration(servers: [
+            .init(id: "server", name: "IPTV", accountID: "iptv-account", isEnabled: false)
+        ])
+        try suppression.prepareChange(previous: .empty, updated: disabled, fromSync: true)
+        XCTAssertTrue(try suppression.wasAppliedFromSync(accountID: "iptv-account"))
+        try suppression.prepareChange(previous: disabled, updated: disabled)
+        XCTAssertFalse(try suppression.wasAppliedFromSync(accountID: "iptv-account"))
+        try suppression.prepareChange(previous: disabled, updated: disabled, fromSync: true)
+        XCTAssertFalse(try suppression.wasAppliedFromSync(accountID: "iptv-account"),
+                       "A remote save must not relabel an already-local restriction")
+        try suppression.setSuppressed(false, accountID: "iptv-account", fromSync: true)
+        let reopened = LiveTVServerEnrollmentSuppressionStore(defaults: fixture.defaults, profileID: profileID)
+        XCTAssertTrue(try reopened.wasAppliedFromSync(accountID: "iptv-account"))
+        try reopened.setSuppressed(false, accountID: "iptv-account")
+        XCTAssertFalse(try reopened.wasAppliedFromSync(accountID: "iptv-account"))
+    }
+
+    @MainActor
+    func testRemoteSourceSurvivesFailedWrapperCommitAndRetry() async throws {
+        for captureFirst in [false, true] {
+            for mutation in ["disable", "rename", "delete", "local-edit", "local-readd"] {
+                let gate = PortableJournalWriteGate()
+                let sourceKey = recordKey(.source, "server").recordName
+                let fixture = try makeFixture(
+                    requiresPreparedJournal: true, includesPlaylistSources: false,
+                    writeFile: { data, url in
+                        if gate.shouldFail, url.pathExtension == "record",
+                           let record = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                           record["name"] as? String == sourceKey {
+                            gate.shouldFail = false
+                            throw CocoaError(.fileWriteNoPermission)
+                        }
+                        try data.write(to: url, options: .atomic)
+                    }
+                )
+                let store = LiveTVApprovalAwareSourcesStore(
+                    underlying: fixture.sources,
+                    approvals: .init(defaults: fixture.defaults, profileID: profileID, namespace: profileID)
+                )
+                let server = LiveTVServerSource(id: "server", name: "IPTV", accountID: "iptv-account")
+                let enrollmentKey = recordKey(.serverEnrollment, server.accountID).recordName
+                try store.save(.init(servers: [server]))
+                try await fixture.adapter.prepareForOperation()
+                let initial = try await fixture.adapter.committingJournal {
+                    try fixture.adapter.capture(sourceStore: store, fallback: [:])
+                }
+                let receipts = initial.mapValues { Data(SHA256.hash(data: $0)) }
+                let remote = ["delete", "local-readd"].contains(mutation) ? LiveTVPortableRecord(isDeleted: true)
+                    : LiveTVPortableRecord(source: .init(
+                        kind: .server, name: mutation == "rename" ? "Renamed" : server.name,
+                        isEnabled: mutation == "rename", accountID: server.accountID
+                    ))
+                let change: SyncLocalChanges = [sourceKey: try remote.encoded()]
+                try await fixture.adapter.prepareForOperation(records: change)
+                gate.shouldFail = true
+                do {
+                    _ = try await fixture.adapter.committingJournal {
+                        try fixture.adapter.apply(change, sourceStore: store, localCaptureDigests: receipts)
+                    }
+                    XCTFail("The source wrapper commit must fail")
+                } catch {
+                    XCTAssertEqual((error as NSError).code, CocoaError.fileWriteNoPermission.rawValue)
+                }
+                XCTAssertFalse(gate.shouldFail)
+                let restarted = LiveTVPortableSyncAdapter(
+                    directory: fixture.root, profileID: profileID, defaults: fixture.defaults,
+                    namespace: profileID, includesPlaylistSources: false
+                )
+                if mutation == "local-edit" {
+                    var local = try store.load()
+                    local.servers[0].name = "Local rename"
+                    try store.save(local)
+                }
+                if mutation == "local-readd" {
+                    try store.save(.init(servers: [.init(
+                        id: "replacement", name: server.name, accountID: server.accountID
+                    )]))
+                }
+                if captureFirst {
+                    _ = try restarted.capture(sourceStore: store, fallback: initial)
+                }
+                if mutation == "local-readd" {
+                    let report = try restarted.apply([
+                        enrollmentKey: try LiveTVPortableRecord(serverEnrollmentSuppressed: true).encoded()
+                    ], sourceStore: store, localCaptureDigests: receipts)
+                    XCTAssertEqual(report.appliedCount, 0)
+                    XCTAssertEqual(try store.load().servers.first?.isEnabled, true)
+                    continue
+                }
+                let report = try restarted.apply(change, sourceStore: store, localCaptureDigests: receipts)
+                if mutation == "local-edit" {
+                    XCTAssertEqual(report.appliedCount, 0)
+                    XCTAssertEqual(try store.load().servers.first?.name, "Local rename")
+                    continue
+                }
+                XCTAssertEqual(report.appliedCount, 1, "\(mutation), capture first: \(captureFirst)")
+                _ = try restarted.apply([
+                    sourceKey: try XCTUnwrap(initial[sourceKey]),
+                    enrollmentKey: try XCTUnwrap(initial[enrollmentKey])
+                ], sourceStore: store, localCaptureDigests: receipts)
+                if mutation != "delete" {
+                    XCTAssertEqual(try store.load().servers, [server])
+                }
+                let suppression = LiveTVServerEnrollmentSuppressionStore(
+                    defaults: fixture.defaults, profileID: profileID
+                )
+                XCTAssertFalse(try suppression.suppressedAccountIDs().contains(server.accountID))
+            }
+        }
+    }
+
+    func testCapturedRemoteDeletionCannotOverwriteNewerPendingServerDescriptor() throws {
+        let fixture = try makeFixture(includesPlaylistSources: false)
+        let store = LiveTVApprovalAwareSourcesStore(
+            underlying: fixture.sources,
+            approvals: .init(defaults: fixture.defaults, profileID: profileID, namespace: profileID)
+        )
+        let server = LiveTVServerSource(id: "server", name: "IPTV", accountID: "iptv-account")
+        let sourceKey = recordKey(.source, server.id).recordName
+        try store.save(.init(servers: [server]))
+        let initial = try fixture.adapter.capture(sourceStore: store, fallback: [:])
+        let receipts = initial.mapValues { Data(SHA256.hash(data: $0)) }
+        let deletion = try LiveTVPortableRecord(isDeleted: true).encoded()
+        _ = try fixture.adapter.apply([sourceKey: deletion], sourceStore: store, localCaptureDigests: receipts)
+        var fallback = initial
+        fallback[sourceKey] = deletion
+        _ = try fixture.adapter.capture(sourceStore: store, fallback: fallback)
+        let report = try fixture.adapter.apply(
+            [sourceKey: try XCTUnwrap(initial[sourceKey])], sourceStore: store, localCaptureDigests: receipts
+        )
+        XCTAssertEqual(report.appliedCount, 1)
+        XCTAssertTrue(try store.load().servers.isEmpty)
+        let captured = try fixture.adapter.capture(sourceStore: store, fallback: initial)
+        XCTAssertEqual(captured[sourceKey], initial[sourceKey])
+    }
+
+    @MainActor
+    func testDeletionReplacesCheckpointOnlyPendingServerAfterFailedFirstCommit() async throws {
+        for hardDelete in [false, true] {
+            let sourceKey = recordKey(.source, "pending-server").recordName
+            let fixture = try makeFixture(
+                requiresPreparedJournal: true, includesPlaylistSources: false,
+                writeFile: { data, url in
+                    if url.pathExtension == "record",
+                       let record = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       record["name"] as? String == sourceKey {
+                        throw CocoaError(.fileWriteNoPermission)
+                    }
+                    try data.write(to: url, options: .atomic)
+                }
+            )
+            let descriptor = try LiveTVPortableRecord(source: .init(
+                kind: .server, name: "Pending server", isEnabled: true, accountID: "account"
+            )).encoded()
+            let change: SyncLocalChanges = [sourceKey: descriptor]
+            try await fixture.adapter.prepareForOperation(records: change)
+            do {
+                _ = try await fixture.adapter.committingJournal {
+                    try fixture.adapter.apply(change, sourceStore: fixture.sources, localCaptureDigests: [:])
+                }
+                XCTFail("The first descriptor wrapper must fail after the source checkpoint is saved")
+            } catch {
+                XCTAssertEqual((error as NSError).code, CocoaError.fileWriteNoPermission.rawValue)
+            }
+            XCTAssertNotNil(try fixture.sources.load().serverSyncCheckpoint)
+            let restarted = LiveTVPortableSyncAdapter(
+                directory: fixture.root, profileID: profileID, defaults: fixture.defaults,
+                namespace: profileID, includesPlaylistSources: false
+            )
+            let tombstone = try LiveTVPortableRecord(isDeleted: true).encoded()
+            let removal: SyncLocalChanges = [sourceKey: hardDelete ? nil : tombstone]
+            let report = try restarted.apply(removal, sourceStore: fixture.sources, localCaptureDigests: [:])
+            XCTAssertEqual(report.appliedCount, 1)
+            let captured = try restarted.capture(
+                sourceStore: fixture.sources, fallback: hardDelete ? [:] : [sourceKey: tombstone]
+            )
+            XCTAssertEqual(captured[sourceKey], tombstone)
+        }
+    }
+
+    func testRemovingRemotelyDisabledSourceProtectsEnrollmentBeforeLedgerAcknowledgment() throws {
+        for captureRemoval in [false, true] {
+            let fixture = try makeFixture(includesPlaylistSources: false)
+            let store = LiveTVApprovalAwareSourcesStore(
+                underlying: fixture.sources,
+                approvals: .init(defaults: fixture.defaults, profileID: profileID, namespace: profileID)
+            )
+            let server = LiveTVServerSource(id: "server", name: "IPTV", accountID: "iptv-account")
+            let sourceKey = recordKey(.source, server.id).recordName
+            let enrollmentKey = recordKey(.serverEnrollment, server.accountID).recordName
+            try store.save(.init(servers: [server]))
+            let initial = try fixture.adapter.capture(sourceStore: store, fallback: [:])
+            let oldReceipts = initial.mapValues { Data(SHA256.hash(data: $0)) }
+            let disabled: [String: Data] = [
+                sourceKey: try LiveTVPortableRecord(source: .init(
+                    kind: .server, name: server.name, isEnabled: false, accountID: server.accountID
+                )).encoded(),
+                enrollmentKey: try LiveTVPortableRecord(serverEnrollmentSuppressed: true).encoded()
+            ]
+            _ = try fixture.adapter.apply(
+                disabled.mapValues(Optional.some), sourceStore: store, localCaptureDigests: oldReceipts
+            )
+            try store.save(.empty)
+            var removal: [String: Data]?
+            if captureRemoval {
+                removal = try fixture.adapter.capture(sourceStore: store, fallback: disabled)
+            }
+            let restarted = LiveTVPortableSyncAdapter(
+                directory: fixture.root, profileID: profileID, defaults: fixture.defaults,
+                namespace: profileID, includesPlaylistSources: false
+            )
+            _ = try restarted.apply([
+                enrollmentKey: try XCTUnwrap(initial[enrollmentKey])
+            ], sourceStore: store, localCaptureDigests: oldReceipts)
+            _ = try restarted.apply([
+                sourceKey: try XCTUnwrap(initial[sourceKey])
+            ], sourceStore: store, localCaptureDigests: oldReceipts)
+            XCTAssertTrue(try store.load().servers.isEmpty)
+            XCTAssertEqual(try LiveTVServerEnrollmentSuppressionStore(
+                defaults: fixture.defaults, profileID: profileID
+            ).suppressedAccountIDs(), [server.accountID])
+
+            if let removal {
+                let receipts = removal.mapValues { Data(SHA256.hash(data: $0)) }
+                _ = try restarted.apply([
+                    enrollmentKey: try XCTUnwrap(initial[enrollmentKey])
+                ], sourceStore: store, localCaptureDigests: receipts)
+                XCTAssertTrue(try LiveTVServerEnrollmentSuppressionStore(
+                    defaults: fixture.defaults, profileID: profileID
+                ).suppressedAccountIDs().isEmpty)
+            }
+        }
     }
 
     func testOptInHydratesPreviouslyFetchedRemoteFavoritesWithoutErasingLocalChoices() throws {
@@ -1763,6 +2322,7 @@ final class LiveTVPortableSyncTests: XCTestCase {
 
     private func makeFixture(
         enabled: Bool = true, requiresPreparedJournal: Bool = false,
+        includesPlaylistSources: Bool = true,
         writeFile: @escaping @Sendable (Data, URL) throws -> Void = {
             try $0.write(to: $1, options: .atomic)
         }
@@ -1782,7 +2342,8 @@ final class LiveTVPortableSyncTests: XCTestCase {
             defaults: defaults,
             adapter: .init(
                 directory: root, profileID: profileID, defaults: defaults, namespace: profileID,
-                requiresPreparedJournal: requiresPreparedJournal, writeFile: writeFile
+                requiresPreparedJournal: requiresPreparedJournal, includesPlaylistSources: includesPlaylistSources,
+                writeFile: writeFile
             ),
             sources: PortableTestSources(),
             preferences: .init(defaults: defaults, namespace: profileID)

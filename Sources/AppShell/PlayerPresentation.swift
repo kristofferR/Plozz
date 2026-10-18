@@ -52,6 +52,11 @@ struct PlayerPresentation: View {
     let showDiagnostics: Bool
     let themePalette: ThemePalette
     let versionPreferences: any VersionPreferenceStoring
+    let prepareVersion: (PlaybackVersionChoiceModel, MediaItem) async throws -> MediaItem
+    let versionAuthorizationScope: [String]
+    @Environment(\.dismiss) private var dismiss
+    @State private var versionChoice = PlaybackVersionChoiceModel()
+    @State private var versionChoiceFailed = false
 
     /// The currently-active play request; changes when auto-advancing episodes.
     @State private var activeRequest: PlayRequest
@@ -69,13 +74,17 @@ struct PlayerPresentation: View {
         makeFailover: @escaping (_ failedItem: MediaItem, _ tried: Set<String>) -> MediaItem?,
         showDiagnostics: Bool,
         themePalette: ThemePalette,
-        versionPreferences: any VersionPreferenceStoring
+        versionPreferences: any VersionPreferenceStoring,
+        prepareVersion: @escaping (PlaybackVersionChoiceModel, MediaItem) async throws -> MediaItem,
+        versionAuthorizationScope: [String]
     ) {
         self.make = make
         self.makeFailover = makeFailover
         self.showDiagnostics = showDiagnostics
         self.themePalette = themePalette
         self.versionPreferences = versionPreferences
+        self.prepareVersion = prepareVersion
+        self.versionAuthorizationScope = versionAuthorizationScope
         self._activeRequest = State(initialValue: request)
     }
 
@@ -98,7 +107,17 @@ struct PlayerPresentation: View {
                         + "item=\(activeRequest.item.id) "
                         + "tapToPresentation=\(HandoffDiagnostics.ms(activeRequest.requestedAt))"
                 )
-                viewModel = make(activeRequest, nil, nil)
+                do {
+                    activeRequest = try await preparedRequest(activeRequest)
+                    guard !Task.isCancelled, isPresented else { return }
+                    viewModel = make(activeRequest, nil, nil)
+                } catch is CancellationError {
+                    if isPresented { dismiss() }
+                    return
+                } catch {
+                    showVersionChoiceFailure()
+                    return
+                }
                 updateVersionMenu()
                 ScreenshotSeed.holdPlayerControlsIfRequested(viewModel)
                 HandoffDiagnostics.emit(
@@ -111,8 +130,30 @@ struct PlayerPresentation: View {
         .onAppear { isPresented = true }
         .onDisappear {
             isPresented = false
+            versionChoice.cancel()
             handoffTask?.cancel()
             viewModel?.controls.versions.onSelect = nil
+        }
+        .playbackVersionChoice(versionChoice)
+        .environment(\.themePalette, themePalette)
+        .onChange(of: versionChoice.prompt?.id) { _, id in
+            if id != nil { viewModel?.setPaused(true) }
+        }
+        .onChange(of: versionAuthorizationScope) { _, _ in
+            guard versionChoice.isPreparing else { return }
+            versionChoice.cancel()
+            handoffTask?.cancel()
+            dismiss()
+        }
+        // Even a no-op handler consumes Back; loaded playback owns the command.
+        .onExitCommand(perform: viewModel == nil ? {
+            versionChoice.cancel()
+            dismiss()
+        } : nil)
+        .alert("Couldn't load versions", isPresented: $versionChoiceFailed) {
+            Button("Close player") { dismiss() }
+        } message: {
+            Text("Please try playing this video again.")
         }
         .onChange(of: versionItem) { _, _ in updateVersionMenu() }
         .onChange(of: viewModel?.currentMediaSourceID) { _, _ in updateVersionMenu() }
@@ -213,7 +254,23 @@ struct PlayerPresentation: View {
         guard let outgoing = viewModel, handoffTask == nil, isPresented else { return }
         outgoing.controls.versions.options = []
         outgoing.controls.versions.onSelect = nil
+        let incomingRequest = request
         handoffTask = Task { @MainActor in
+            let request: PlayRequest
+            do {
+                // An in-player version change or source failover is already a
+                // concrete selection, not another Play/Next action.
+                request = preparesEpisodeHandoff || playlistIndex != nil
+                    ? try await preparedRequest(incomingRequest) : incomingRequest
+            } catch is CancellationError {
+                handoffTask = nil
+                if isPresented { dismiss() }
+                return
+            } catch {
+                handoffTask = nil
+                showVersionChoiceFailure()
+                return
+            }
             let prepared = preparesEpisodeHandoff
                 ? await outgoing.prepareEpisodeHandoff(to: request.item) : nil
             guard !Task.isCancelled, isPresented, viewModel === outgoing else {
@@ -237,6 +294,24 @@ struct PlayerPresentation: View {
             handoffTask = nil
             updateVersionMenu()
         }
+    }
+
+    private func preparedRequest(_ request: PlayRequest) async throws -> PlayRequest {
+        let item = try await prepareVersion(versionChoice, request.item)
+        try Task.checkCancellation()
+        guard isPresented else { throw CancellationError() }
+        return PlayRequest(
+            item: item, startPosition: request.startPosition, traceID: request.traceID,
+            requestedAt: request.requestedAt, versionPreferences: versionPreferences,
+            playlist: request.playlist
+        )
+    }
+
+    private func showVersionChoiceFailure() {
+        guard isPresented else { return }
+        viewModel?.setPaused(true)
+        PlozzLog.playback.error("Could not prepare playback version choices.")
+        versionChoiceFailed = true
     }
 }
 #endif

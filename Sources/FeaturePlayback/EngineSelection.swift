@@ -21,6 +21,7 @@ enum EngineSelection {
         plozzigenAvailable: Bool,
         capabilities: MediaCapabilities,
         subtitleRule: SubtitlePolicy.Rule,
+        hearingImpairedPreference: HearingImpairedPreference? = nil,
         audioRouteIsAirPlay: Bool = false
     ) -> PlaybackEngineKind {
         if request.streamingOptions != nil, request.isTranscoding { return .native }
@@ -83,7 +84,8 @@ enum EngineSelection {
         if kind == .native, !request.isTranscoding, plozzigenAvailable,
            request.subtitleTracks.defaultSubtitleNeedsHybridEngine(
                mode: subtitleRule.mode,
-               preferredLanguage: subtitleRule.preferredLanguage) {
+               preferredLanguage: subtitleRule.preferredLanguage,
+               hearingImpairedPreference: hearingImpairedPreference) {
             PlozzLog.playback.info("Default subtitle is image-based; routing to Plozzigen so it can be rendered on-device")
             kind = .plozzigen
         }

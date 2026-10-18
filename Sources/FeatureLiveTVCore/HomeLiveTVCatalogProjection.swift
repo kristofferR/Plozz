@@ -12,8 +12,10 @@ public enum HomeLiveTVCatalogProjection {
         guard authorization.profileID == profileID, model.preferencesIssue == nil else { return .empty }
         let hidden = model.effectiveHiddenChannelIDs
         return .build(
-            recentIDs: model.recentChannelIDs, favoriteIDs: model.favoriteOrder,
-            fallbackIDs: model.channels.prefix(HomeLiveTVSnapshot.maximumCandidateCount).map(\.id)
+            recentIDs: model.recentChannelIDs,
+            favoriteIDs: model.homeFavoriteChannelIDs,
+            fallbackIDs: model.channels.lazy.filter { !hidden.contains($0.id) }
+                .prefix(HomeLiveTVSnapshot.maximumCandidateCount).map(\.id)
         ) { id in
             guard !hidden.contains(id), let channel = model.channel(id: id),
                   let sourceID = channel.configuredSourceID else { return nil }
@@ -44,7 +46,7 @@ public enum HomeLiveTVCatalogProjection {
                     serverAuthorizationID: serverAuthorizationID
                 ),
                 name: channel.name, sourceName: sourceName, number: channel.number,
-                logoURL: channel.logoURL
+                logoURL: channel.logoURL, organizationMetadata: channel.organizationMetadata
             )
         }
     }

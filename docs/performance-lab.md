@@ -95,6 +95,12 @@ informational: allocator caches and framework lifetime make them unsuitable
 for a blanket byte threshold. Lifecycle scenarios additionally assert weak
 references actually release.
 
+`native-poster-indicators` exercises the actual native-poster coordinator's
+foreground path: 72 completed overlays across 24 posters, three visible episode
+badges, and changing playback progress. Each sample uses cold geometry. The
+distinct-bitmap counter exposes redundant synchronous rendering separately from
+wall/CPU time; `native-poster-composition` covers source artwork, not this path.
+
 ## Native Home navigation attribution
 
 For focus/scroll lag rather than isolated work counts, run the production Home
@@ -155,6 +161,80 @@ without pretending a sample count measures frame smoothness.
 | `diagnostics` | 10,000 operation attempts with recording disabled/enabled, plus 100 bounded snapshot encodes. Measures recorder and event-time serialization overhead without starting Sentry or creating uploads. |
 | `network` | `catalog-cached-refresh`: 1,000-channel loopback M3U import with a 100-ms header delay, then an expired-catalog refresh held while three cached reads complete. Verifies one refresh and actual replacement visibility. Cold/cached foreground timings are separate counters; whole-cycle wall time includes setup, controlled waiting and settling. No external playlist or stream links are fetched. |
 
+For network-file startup and seek overhead, select `network-file-read-ahead`.
+It exercises the production transport reader with four scattered metadata probes
+followed by 64 MiB of verified sequential consumption. The synthetic source
+advertises 32 MiB requests and adds 5 ms latency per read. Counters distinguish
+consumed bytes, fetched bytes, request count and largest request; read-ahead may
+reduce round trips while increasing unused sequential bytes. This measures reader
+work and synthetic latency, not real WebDAV throughput, TLS/HTTP allocation cost,
+video decode, or device smoothness. Resident snapshots are not peak memory.
+Pair it with the hosted WebDAV playback checks in
+[Playback engines](playback-engines.md#media-share-disc-images) when changing
+actual network playback.
+
+`disc-probe-cache` performs 21 scattered, overlapping 2 KiB metadata reads
+through the same production reader and 5 ms synthetic-latency source. It
+models alternating disc-directory regions, separately from the sequential
+workload, and records actual transport requests/bytes as well as completed
+probes. Reuse must not change returned bytes, clone isolation or cache bounds.
+
+`http-response-assembly` separately measures the production HTTP delegate's
+body accumulation: 32 MiB delivered in 2,048 callbacks of 16 KiB, followed by
+byte-for-byte validation. It has no network delay and starts no URL task;
+this isolates callback CPU/allocation cost from server throughput. Task state
+must keep the body uniquely owned while appending, rather than repeatedly
+copying the growing `Data` out of dictionary-held value state. Response-size
+limits, ordered delivery and cancellation have separate correctness controls.
+
+`webdav-playback-window` verifies a 32 MiB production WebDAV read with the
+same fixture accepting either one full range or two 16 MiB ranges. Synthetic
+delivery delay is 400 ms for the full range and 200 ms per half, modeling
+per-connection throughput. Counters distinguish consumed bytes from HTTP
+request count. This isolates overlap and assembly cost; it does not promise
+parallel requests will increase throughput on a shared-bandwidth server.
+The retained single-request path separately checks identity drift, EOF and
+cancellation.
+
+`webdav-paced-playback` consumes and verifies a complete 128 MiB file through
+the production WebDAV byte source and transport reader. Its synthetic HTTP
+responses accept both single windows and the former two-range implementation,
+with 100 ms per-request latency plus a size-dependent transfer delay. A paced
+32 MiB/s consumer separates download waits from downstream work. Counters
+include time inside reader calls, requests, requested range bytes and consumed bytes;
+the entire file must be delivered exactly once. Use this workload to measure
+download/consumption overlap, not just the latency of an isolated range.
+
+This is a deterministic byte-pipeline model, not decoded 4K playback, a public
+server bandwidth measurement or a frame-stall count. The single-window scenario
+can get slower when removing parallel connections even as paced consumption
+gets faster with fewer requests. Read-ahead may fetch one unused future window
+on a seek or stop; this EOF-bounded workload alone does not measure that waste.
+Cancellation, failed-prefetch, sparse-probe and clone tests cover those paths,
+and hosted loopback playback separately checks engine integration. Keep public
+service credentials out of local benchmarks and do not use repeated remote
+playback loops after receiving throttling responses.
+
+`webdav-cached-seeks` uses the same paced file and HTTP delays, adding 31
+back-and-forth 2 KiB probes two MiB behind the consumer. These targets remain
+inside the current read-ahead window. It measures whether cached seeks cancel
+and recreate an already useful next-window request. Every main byte and probe
+must still be delivered; explicit cancellation and seeks outside both windows
+retain separate correctness coverage. Requested range bytes include cancelled
+attempts, so they are **not** bytes transferred over the network. This is a
+controlled seek pattern, not a trace or frequency claim about every demuxer.
+
+For decoded local integration, `WebDAVDiscPlaybackHostedTests` accepts
+`PLOZZ_WEBDAV_LOCAL_PLAYBACK_FIXTURE`, the filename of a synthetic `.mkv`
+already staged in the owned test host's Caches directory. The loopback-only
+test adds 80 ms response latency and 1 ms per 64 KiB, seeks to 35/5/20 seconds,
+then requires over 58 seconds of advancement during a 60-second observation.
+Use a fixture longer than 85 seconds; the measured workload uses a generated
+90-second 3840x2160 10-bit HEVC / six-channel AC-3 file at approximately
+96 Mbps. It is not the remote Blu-ray ISO or proof of public-service performance.
+The test skips unless explicitly configured and never interprets this filename
+as a network address. Remove staged copies from the owned simulators afterward.
+
 For Home metadata work, select `home-metadata-publication`,
 `home-observed-metadata-publication`, `home-row-metadata-updates`, and
 `home-row-metadata-reuse` on either platform.
@@ -169,6 +249,25 @@ workload with the in-memory diagnostic recorder disabled/enabled. The enabled
 variant does not start Sentry or upload anything.
 Credits, sort metadata, membership/order, and provider parity
 remain correctness controls; unchanged identity must not hide changed metadata.
+
+For card-activation and menu stalls, `mobile-home-card-routing` updates 24 real
+mobile Home cards against a four-source identity index and counts source
+resolutions without activating a card. Detail routing belongs in the presented
+destination, and direct-play routing in the action, so browsing should resolve
+zero sources. `source-menu-version-presentation` builds 1,024 production version
+rows per sample on either platform and compares every title and supplemental
+fact with the original output.
+
+The tvOS-only `native-poster-composition` converts twelve generated 2160x3240
+extended-range images into native poster surfaces. Each sample changes the
+presentation dimming to require twelve cold compositions despite the shared
+bitmap cache; all twelve real output callbacks must complete. It records total
+and main-thread compositions and synchronous request latency separately from
+whole-workload wall time and CPU. Moving work off-main is not eliminating its
+CPU or temporary memory cost. Generated wide-gamut images exaggerate retained
+memory, and the bounded parallel workers can increase peak working memory.
+Warm first-paint reuse, pixel equivalence, cancellation and focus ownership are
+separate hosted correctness controls, not substitutes for completed cold work.
 
 The matrix uses 500 library items per provider and 1,000 cached IPTV channels
 when enabled. Startup/discovery happens before measurement; each warm sample

@@ -15,6 +15,7 @@ struct PlozziOSSyncSetupSettingsView: View {
     @State private var showScanner = false
     @State private var showCodeEntry = false
     @State private var showReceive = false
+    @State private var scannedSourceInvite: SyncSetupSourceInvite?
     @State private var serverToReceive: SyncedAccountDescriptor?
     @State private var serverToSignIn: SyncedAccountDescriptor?
     @State private var serverPrompt: SyncedAccountDescriptor?
@@ -59,15 +60,17 @@ struct PlozziOSSyncSetupSettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { if case .idle = model.phase { model.startDiscovery() } }
         .onDisappear { model.stopDiscovery() }
-        .fullScreenCover(isPresented: $showReceive) {
-            PlozziOSSyncSetupReceiveView(appModel: appModel) { showReceive = false }
+        .plozzFullScreenCover(isPresented: $showReceive) {
+            PlozziOSSyncSetupReceiveView(appModel: appModel, sourceInvite: scannedSourceInvite) {
+                showReceive = false
+            }
         }
-        .fullScreenCover(item: $serverToReceive) { server in
+        .plozzFullScreenCover(item: $serverToReceive) { server in
             PlozziOSSyncSetupReceiveView(appModel: appModel, requestedServer: server) {
                 serverToReceive = nil
             }
         }
-        .sheet(item: $serverPrompt, onDismiss: consumeServerPromptFollowUp) { server in
+        .plozzSheet(item: $serverPrompt, onDismiss: consumeServerPromptFollowUp) { server in
             SyncedServerSetupPrompt(
                 descriptor: server, palette: palette,
                 onSignIn: {
@@ -84,10 +87,10 @@ struct PlozziOSSyncSetupSettingsView: View {
                 }
             )
         }
-        .fullScreenCover(isPresented: $showAddShare, onDismiss: appModel.refreshPendingSyncedServers) {
+        .plozzFullScreenCover(isPresented: $showAddShare, onDismiss: appModel.refreshPendingSyncedServers) {
             PlozziOSUnifiedAddShareView(appModel: appModel)
         }
-        .sheet(item: $serverToSignIn, onDismiss: {
+        .plozzSheet(item: $serverToSignIn, onDismiss: {
             appModel.finishManagedServerPresentation()
             appModel.refreshPendingSyncedServers()
         }) { server in
@@ -98,9 +101,16 @@ struct PlozziOSSyncSetupSettingsView: View {
             )
             .presentationSizing(.page)
         }
-        .fullScreenCover(isPresented: $showScanner) {
+        .plozzFullScreenCover(isPresented: $showScanner, onDismiss: {
+            if scannedSourceInvite != nil { showReceive = true }
+        }) {
             SyncSetupScannerScreen(
                 onCode: { code in
+                    if let invite = SyncSetupSourceInvite.decode(code) {
+                        scannedSourceInvite = invite
+                        showScanner = false
+                        return
+                    }
                     showScanner = false
                     guard !handled else { return }
                     handled = true
@@ -109,7 +119,7 @@ struct PlozziOSSyncSetupSettingsView: View {
                 onCancel: { showScanner = false }
             )
         }
-        .sheet(isPresented: $showCodeEntry) {
+        .plozzSheet(isPresented: $showCodeEntry) {
             SyncSetupCodeEntryScreen(
                 onSubmit: { code in
                     showCodeEntry = false
@@ -158,6 +168,7 @@ struct PlozziOSSyncSetupSettingsView: View {
                 )) {
                     Label("iCloud Sync", systemImage: "icloud")
                 }
+                .disabled(appModel.cloudSyncStatus.isRecovering)
                 if appModel.syncSetup.isEnabled {
                     HStack {
                         SyncStatusLine(provider: syncStatusProvider)
@@ -166,6 +177,7 @@ struct PlozziOSSyncSetupSettingsView: View {
                         Spacer()
                         Button("Sync Now") { appModel.syncCloudNow() }
                             .font(.footnote.weight(.semibold))
+                            .disabled(appModel.cloudSyncStatus.isRecovering)
                     }
                 }
             } footer: {
@@ -201,7 +213,7 @@ struct PlozziOSSyncSetupSettingsView: View {
                         .buttonStyle(.plain)
                     }
                 }
-                Button { showScanner = true } label: {
+                Button { scannedSourceInvite = nil; showScanner = true } label: {
                     Label("Scan QR Code", systemImage: "qrcode.viewfinder")
                 }
                 Button { showCodeEntry = true } label: {
@@ -212,7 +224,7 @@ struct PlozziOSSyncSetupSettingsView: View {
             }
 
             SettingsSectionGroup("This Device") {
-                Button { showReceive = true } label: {
+                Button { scannedSourceInvite = nil; showReceive = true } label: {
                     Label("Set Up From Another Device", systemImage: "qrcode")
                 }
             }
@@ -254,16 +266,14 @@ struct PlozziOSSyncSetupSettingsView: View {
                 }
             }
 
-            if appModel.syncSetup.isEnabled {
-                SettingsSectionGroup {
-                    NavigationLink {
-                        PlozziOSSyncTroubleshootingView(appModel: appModel)
-                    } label: {
-                        Label(
-                            "Troubleshooting",
-                            systemImage: "wrench.and.screwdriver"
-                        )
-                    }
+            SettingsSectionGroup {
+                NavigationLink {
+                    PlozziOSSyncTroubleshootingView(appModel: appModel)
+                } label: {
+                    Label(
+                        "Troubleshooting",
+                        systemImage: "wrench.and.screwdriver"
+                    )
                 }
             }
         }
@@ -286,7 +296,10 @@ struct PlozziOSSyncSetupSettingsView: View {
     }
 
     private var syncStatusProvider: SyncStatusProvider {
-        SyncStatusProvider {
+        SyncStatusProvider(inventory: {
+            guard let sync = appModel.cloudSync else { throw CocoaError(.featureUnsupported) }
+            return try await sync.dataInventory()
+        }) {
             SyncStatusPresentation(
                 summary: appModel.cloudSyncStatus.summary,
                 isSyncing: appModel.cloudSyncStatus.phase == .syncing,
@@ -301,6 +314,7 @@ struct PlozziOSSyncSetupSettingsView: View {
 private struct PlozziOSSyncTroubleshootingView: View {
     let appModel: PlozziOSAppModel
     @State private var showResetConfirm = false
+    @State private var showErasureReview = false
 
     var body: some View {
         SettingsPageList {
@@ -319,6 +333,8 @@ private struct PlozziOSSyncTroubleshootingView: View {
                 Text("These should match on every device.")
             }
 
+            SyncDataBreakdown(provider: statusProvider)
+
             SettingsSectionGroup("Recovery") {
                 SyncRecoveryWarning()
                 Button {
@@ -326,19 +342,37 @@ private struct PlozziOSSyncTroubleshootingView: View {
                 } label: {
                     Label("Reload From iCloud", systemImage: "arrow.down.circle")
                 }
-                .disabled(appModel.cloudSyncStatus.isRecovering)
+                .disabled(appModel.cloudSyncStatus.isRecovering || !appModel.syncSetup.isEnabled)
                 .accessibilityIdentifier("cloud-sync-reload")
                 Button(role: .destructive) {
                     showResetConfirm = true
                 } label: {
                     Label("Reset Sync", systemImage: "arrow.counterclockwise.icloud")
                 }
-                .disabled(appModel.cloudSyncStatus.isRecovering)
+                .disabled(appModel.cloudSyncStatus.isRecovering || !appModel.syncSetup.isEnabled)
             }
             LiveTVPortableSyncPendingSettings()
+            if !appModel.profiles.activeProfile.isKids, !appModel.managementRequiresParentalPIN {
+                SettingsSectionGroup {
+                    Button { showErasureReview = true } label: {
+                        Label("Erase Sync Data", systemImage: "trash")
+                            .foregroundStyle(.red)
+                    }
+                    .disabled(appModel.cloudSyncStatus.isRecovering)
+                    .accessibilityIdentifier("cloud-sync-erase")
+                }
+            }
         }
         .navigationTitle("Troubleshooting")
         .navigationBarTitleDisplayMode(.inline)
+        .plozzSheet(isPresented: $showErasureReview) {
+            SyncEraseDataView(
+                profileID: appModel.profiles.activeProfileID,
+                isAllowed: !appModel.profiles.activeProfile.isKids && !appModel.managementRequiresParentalPIN,
+                status: statusProvider,
+                erase: { appModel.eraseCloudSyncData() }
+            )
+        }
         .confirmationDialog(
             "Reset synced data?",
             isPresented: $showResetConfirm,
@@ -350,6 +384,20 @@ private struct PlozziOSSyncTroubleshootingView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Replaces iCloud data with this device’s copy. Other devices keep their logins.")
+        }
+    }
+
+    private var statusProvider: SyncStatusProvider {
+        SyncStatusProvider(inventory: {
+            guard let sync = appModel.cloudSync else { throw CocoaError(.featureUnsupported) }
+            return try await sync.dataInventory()
+        }) {
+            SyncStatusPresentation(
+                summary: appModel.cloudSyncStatus.summary,
+                isSyncing: appModel.cloudSyncStatus.phase == .syncing,
+                accountTag: appModel.cloudSyncStatus.accountTag,
+                isRecovering: appModel.cloudSyncStatus.isRecovering
+            )
         }
     }
 }

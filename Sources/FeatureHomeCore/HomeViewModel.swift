@@ -1676,6 +1676,18 @@ public final class HomeViewModel {
                 freshness: heroFreshnessSnapshot(),
                 isEligible: { source, item in
                     guard source != .featured else { return true }
+                    if source == .collection {
+                        // The cached bucket has no per-collection membership. If
+                        // any selection loses access, require a fresh sample.
+                        guard !settings.collections.isEmpty,
+                              settings.collections.allSatisfy({ selection in
+                                  accounts.contains(where: selection.matches)
+                                      && selection.libraryKey.map(visibility.isEnabled) != false
+                              }),
+                              settings.collections.contains(where: {
+                                  item.sourceAccountID == $0.accountID
+                              }) else { return false }
+                    }
                     return item.isVisibleOnHome { key in
                         guard visibility.isEnabled(key) else { return false }
                         if source == .watchlist { return true }
@@ -1694,7 +1706,8 @@ public final class HomeViewModel {
                 $0.isVisibleOnHome(isLibraryVisible: visibility.isEnabled)
             }
         }
-        let durable = HeroDurableSnapshot.filter(stored)
+        let permitted = settings.allowsDiscovery ? stored : stored.filter { $0.discoverySources.isEmpty }
+        let durable = HeroDurableSnapshot.filter(permitted)
         let rehydrated = mediaItemActionHandler?
             .rehydratePersistedArtwork(durable) ?? durable
         if cachedHeroSelections.count >= 8 { cachedHeroSelections.removeAll() }
@@ -1729,6 +1742,47 @@ public final class HomeViewModel {
             scoped = scoped.selectingSource(first)
         }
         return scoped
+    }
+
+    public func heroCollectionContent(
+        _ selection: HeroCollectionSelection, limit: Int, hideWatched: Bool
+    ) async throws -> MediaPage {
+        guard let account = accounts.first(where: selection.matches) else {
+            return MediaPage(items: [], startIndex: 0, totalCount: 0)
+        }
+        let visibility = currentVisibility()
+        var result = try await HeroCollectionLoader.load(
+            selection: selection, limit: limit, provider: account.provider, visibility: visibility,
+            seed: heroFreshnessSnapshot().sessionSeed
+        )
+        let providers = Dictionary(accounts.map { ($0.account.id, $0.provider) }, uniquingKeysWith: { first, _ in first })
+        let identitySources = identitySources
+        result.items = await HeroCandidateWatchStateEnricher.enrich(
+            result.items, enabled: hideWatched,
+            sourceRefs: { item in
+                identitySources(item).filter { source in
+                    providers[source.accountID] != nil
+                        && (source.accountID != item.sourceAccountID || source.itemID != item.id)
+                        && source.libraryID.map { visibility.isEnabled("\(source.accountID):\($0)") } != false
+                }
+            },
+            fetch: { source in
+                guard let provider = providers[source.accountID] else { return nil }
+                do {
+                    return try await provider.item(id: source.itemID).taggingSource(source.accountID)
+                } catch is CancellationError {
+                    return nil
+                } catch {
+                    if !Task.isCancelled, (error as? AppError) != .cancelled {
+                        PlozzLog.app.debug("Hero collection alternate watch state could not be loaded")
+                    }
+                    return nil
+                }
+            }
+        )
+        try Task.checkCancellation()
+        guard currentVisibility() == visibility else { throw CancellationError() }
+        return result
     }
 
     public func heroFreshnessSnapshot() -> HeroFreshnessSnapshot {

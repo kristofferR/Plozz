@@ -32,6 +32,9 @@ actor IPTVPlaybackProxy {
     private var refusal: (status: Int, retryAfter: TimeInterval?)?
     private var playbackURL: URL?
     private var deliveryFailure: PlaybackDeliveryFailure?
+    private var livePlaylistURL: URL?
+    private var diagnosticSequence = 0
+    private let diagnosticStarted = ProcessInfo.processInfo.systemUptime
 
     init(
         origin: URL, headers: [String: String], formatHint: MediaFormatHint = .init(),
@@ -50,7 +53,7 @@ actor IPTVPlaybackProxy {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
         listener = try NWListener(using: parameters)
-        diagnostic = diagnostics.begin(layer: .iptvProxy, content: content)
+        diagnostic = diagnostics.begin(layer: .iptvProxy, content: content, captureForPresentation: true)
     }
 
     func start() async throws -> URL {
@@ -95,6 +98,7 @@ actor IPTVPlaybackProxy {
     func stop() async {
         if let shutdown { await shutdown.value; return }
         stopped = true
+        livePlaylistURL = nil
         listener.newConnectionHandler = nil
         listener.cancel()
         http.cancel()
@@ -224,6 +228,7 @@ actor IPTVPlaybackProxy {
         var sentResponse = false
         var diagnosticStage: PlaybackFailureDiagnostic.Stage?
         let responseEvidence = IPTVPlaybackResponseEvidence()
+        var receivedBytes = 0
         do {
             var head = Data()
             while head.range(of: Data("\r\n\r\n".utf8)) == nil {
@@ -248,7 +253,7 @@ actor IPTVPlaybackProxy {
                 try await Self.send(connection, data: Self.failureHead(refusal.status, retryAfter: refusal.retryAfter))
                 return
             }
-            var outgoing = IPTVCredential.sameOrigin(origin, url) ? headers : [:]
+            var outgoing: [String: String] = [:]
             for field in text.components(separatedBy: "\r\n").dropFirst() {
                 guard let colon = field.firstIndex(of: ":") else { continue }
                 let name = field[..<colon].lowercased()
@@ -258,14 +263,14 @@ actor IPTVPlaybackProxy {
                 }
             }
             diagnosticStage = .response
-            let (bytes, response) = try await http.bytes(
-                url: url, headers: outgoing, method: String(request[0]),
-                receivedResponse: { status, mimeType in responseEvidence.record(status: status, mimeType: mimeType) }
+            let (bytes, response) = try await openUpstream(
+                url: url, forwardedHeaders: outgoing, method: String(request[0]), evidence: responseEvidence
             )
             defer { bytes.task.cancel() }
             let upstreamTask = bytes.task
             try await withTaskCancellationHandler {
                 if request[0] == "HEAD" {
+                    responseEvidence.finish(outcome: .complete, receivedBytes: 0)
                     diagnosticStage = nil
                     try await Self.send(connection, data: responseHead(response, chunked: false))
                     return
@@ -273,23 +278,40 @@ actor IPTVPlaybackProxy {
                 diagnosticStage = .body
                 var iterator = bytes.makeAsyncIterator()
                 var prefix = Data()
-                while prefix.count < 16, let byte = try await iterator.next() { prefix.append(byte) }
+                while prefix.count < 16, let byte = try await iterator.next() {
+                    prefix.append(byte)
+                    receivedBytes += 1
+                }
+                responseEvidence.received(receivedBytes)
                 let contentType = response.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
                 let prefixText = String(decoding: prefix, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-                let manifest = contentType.contains("mpegurl") || prefixText.hasPrefix("#EXTM3U")
+                let hasManifestHeader = prefixText.hasPrefix("#EXTM3U")
                     || prefixText.hasPrefix("\u{FEFF}#EXTM3U")
+                let manifest = contentType.contains("mpegurl") || hasManifestHeader
                 if manifest {
                     responseEvidence.detectHLS()
                     var body = prefix
                     while let byte = try await iterator.next() {
                         guard body.count < 8 * 1_024 * 1_024 else { throw IPTVError.oversizedRecord }
                         body.append(byte)
-                        if body.count.isMultiple(of: 65_536) { try Task.checkCancellation() }
+                        receivedBytes += 1
+                        if body.count.isMultiple(of: 65_536) {
+                            responseEvidence.received(receivedBytes)
+                            try Task.checkCancellation()
+                        }
                     }
                     guard let text = String(data: body, encoding: .utf8) else { throw IPTVError.malformed }
+                    responseEvidence.playlist(Self.playlistEvidence(text))
                     diagnosticStage = .manifest
                     let rewritten = try rewrite(text, baseURL: response.url ?? url)
+                    try Task.checkCancellation()
+                    if isLive, url == origin, hasManifestHeader {
+                        // Reopening an Xtream entrypoint can mint new session URLs
+                        // for the same HLS media sequence. Refresh its delivery URL.
+                        livePlaylistURL = response.url
+                    }
                     let data = Data(rewritten.utf8)
+                    responseEvidence.finish(outcome: .complete, receivedBytes: receivedBytes)
                     diagnosticStage = nil
                     try await Self.send(connection, data: Data(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: \(data.count)\r\nConnection: close\r\n\r\n".utf8
@@ -304,7 +326,9 @@ actor IPTVPlaybackProxy {
                     diagnosticStage = .body
                     while let byte = try await iterator.next() {
                         chunk.append(byte)
+                        receivedBytes += 1
                         if chunk.count == 65_536 {
+                            responseEvidence.received(receivedBytes)
                             try Task.checkCancellation()
                             diagnosticStage = nil
                             try await Self.sendChunk(connection, data: chunk)
@@ -312,19 +336,28 @@ actor IPTVPlaybackProxy {
                             diagnosticStage = .body
                         }
                     }
+                    responseEvidence.finish(outcome: .complete, receivedBytes: receivedBytes)
                     diagnosticStage = nil
                     if !chunk.isEmpty { try await Self.sendChunk(connection, data: chunk) }
                     try await Self.send(connection, data: Data("0\r\n\r\n".utf8))
                 }
             } onCancel: { upstreamTask.cancel() }
         } catch {
+            let cancelled = Task.isCancelled || error is CancellationError
+                || (error as NSError).domain == NSURLErrorDomain && (error as NSError).code == NSURLErrorCancelled
+            responseEvidence.finish(
+                outcome: cancelled || diagnosticStage == nil ? .consumerClosed : .upstreamFailure,
+                receivedBytes: receivedBytes,
+                networkCode: (error as NSError).domain == NSURLErrorDomain ? (error as NSError).code : nil
+            )
             if !Task.isCancelled, !(error is CancellationError), let diagnosticStage {
                 let failure = (error as? IPTVError)?.setupFailure ?? .sanitized(error)
                 let evidence = responseEvidence.snapshot
-                diagnostic?.fail(
+                let failureDiagnostic = diagnostic?.fail(
                     stage: diagnosticStage, reason: failure.reason,
                     domain: failure.networkCode == nil ? .none : .url, code: failure.networkCode,
-                    httpStatus: evidence.status, format: evidence.format
+                    httpStatus: evidence.status, format: evidence.format,
+                    evidence: .init(delivery: deliveryFailure?.evidence)
                 )
                 if let status = evidence.status, [401, 403, 429, 451, 509].contains(status) {
                     let retryAfter: TimeInterval?
@@ -337,7 +370,7 @@ actor IPTVPlaybackProxy {
                     case 451: appError = .accessRestricted
                     default: appError = .invalidResponse
                     }
-                    deliveryFailure?.record(appError)
+                    deliveryFailure?.record(appError, diagnostic: failureDiagnostic)
                     refusal = (status, retryAfter)
                 }
             }
@@ -354,6 +387,45 @@ actor IPTVPlaybackProxy {
         }
     }
 
+    private func openUpstream(
+        url: URL, forwardedHeaders: [String: String], method: String,
+        evidence: IPTVPlaybackResponseEvidence
+    ) async throws -> (URLSession.AsyncBytes, HTTPURLResponse) {
+        func fetch(_ target: URL) async throws -> (URLSession.AsyncBytes, HTTPURLResponse) {
+            let scoped = IPTVCredential.sameOrigin(origin, target) ? headers : [:]
+            diagnosticSequence = min(1_000_000, diagnosticSequence + 1)
+            var request = PlaybackDeliveryEvidence.Request(
+                sequence: diagnosticSequence, resource: url == origin ? .root : .child,
+                method: method == "HEAD" ? .head : .get,
+                startedMilliseconds: min(86_400_000, max(0, Int(
+                    (ProcessInfo.processInfo.systemUptime - diagnosticStarted) * 1_000
+                )))
+            )
+            request.rangeRequested = forwardedHeaders.keys.contains { $0.lowercased() == "range" }
+            evidence.begin(request, delivery: deliveryFailure)
+            return try await http.bytes(
+                url: target, headers: scoped.merging(forwardedHeaders) { _, forwarded in forwarded }, method: method,
+                receivedResponse: { response in
+                    evidence.record(response: response, target: target, origin: self.origin)
+                }
+            )
+        }
+        let target = isLive && url == origin ? livePlaylistURL ?? url : url
+        do {
+            return try await fetch(target)
+        } catch {
+            guard target != url, !Task.isCancelled, !(error is CancellationError),
+                  let status = evidence.snapshot.status, [401, 403, 404, 410].contains(status) else { throw error }
+            evidence.finish(outcome: .upstreamFailure, receivedBytes: 0)
+            // Renew only an expired redirected session, once. A refusal from
+            // the original entrypoint still follows the terminal failure path.
+            livePlaylistURL = nil
+            evidence.reset()
+            PlozzLog.playback.debug("Renewing expired IPTV live delivery")
+            return try await fetch(url)
+        }
+    }
+
     private static func failureHead(_ status: Int, retryAfter: TimeInterval? = nil) -> Data {
         let retry = retryAfter.flatMap {
             $0.isFinite && $0 >= 0 ? "Retry-After: \(String(format: "%.0f", ceil($0)))\r\n" : nil
@@ -365,19 +437,123 @@ actor IPTVPlaybackProxy {
         private let lock = NSLock()
         private var status: Int?
         private var format: PlaybackFailureDiagnostic.Format = .unknown
+        private var request: PlaybackDeliveryEvidence.Request?
+        private var delivery: PlaybackDeliveryFailure?
+        private var started = ProcessInfo.processInfo.systemUptime
 
         var snapshot: (status: Int?, format: PlaybackFailureDiagnostic.Format) {
             lock.withLock { (status, format) }
         }
 
-        func record(status: Int, mimeType: String?) {
+        func begin(_ request: PlaybackDeliveryEvidence.Request, delivery: PlaybackDeliveryFailure?) {
             lock.withLock {
-                self.status = status
-                format = .init(mimeType: mimeType)
+                self.request = request
+                self.delivery = delivery
+                started = ProcessInfo.processInfo.systemUptime
+                delivery?.recordRequest(request)
             }
         }
 
-        func detectHLS() { lock.withLock { format = .hls } }
+        private func update(_ change: (inout PlaybackDeliveryEvidence.Request) -> Void) {
+            lock.withLock {
+                guard var request else { return }
+                change(&request)
+                request.elapsedMilliseconds = min(86_400_000, max(0, Int(
+                    (ProcessInfo.processInfo.systemUptime - started) * 1_000
+                )))
+                self.request = request
+                delivery?.recordRequest(request)
+            }
+        }
+
+        func record(response: HTTPURLResponse, target: URL, origin: URL) {
+            lock.withLock {
+                status = response.statusCode
+                format = .init(mimeType: response.mimeType)
+            }
+            update {
+                $0.status = response.statusCode
+                $0.format = .init(mimeType: response.mimeType)
+                $0.outcome = .receiving
+                $0.redirected = response.url.map { $0 != target }
+                $0.crossOrigin = response.url.map { !IPTVCredential.sameOrigin(origin, $0) }
+                let length = response.expectedContentLength
+                $0.expectedBytes = (0...9_007_199_254_740_991).contains(length) ? Int(length) : nil
+                $0.rangeResponse = IPTVPlaybackProxy.rangeEvidence(response.value(forHTTPHeaderField: "Content-Range"))
+            }
+        }
+
+        func received(_ count: Int) { update { $0.receivedBytes = min(9_007_199_254_740_991, count) } }
+        func playlist(_ value: PlaybackDeliveryEvidence.Playlist) { update { $0.playlist = value } }
+        func finish(outcome: PlaybackDeliveryEvidence.Outcome, receivedBytes: Int, networkCode: Int? = nil) {
+            update {
+                // A failed loopback write cannot undo a completely received upstream response.
+                if $0.outcome != .complete { $0.outcome = outcome }
+                $0.receivedBytes = min(9_007_199_254_740_991, receivedBytes)
+                $0.networkCode = networkCode
+            }
+        }
+        func detectHLS() {
+            lock.withLock { format = .hls }
+            update { $0.format = .hls }
+        }
+        func reset() { lock.withLock { status = nil; format = .unknown } }
+    }
+
+    nonisolated static func rangeEvidence(_ value: String?) -> PlaybackDeliveryEvidence.RangeResponse {
+        guard let value else { return .absent }
+        let fields = value.split(separator: " ")
+        guard fields.count == 2, fields[0].lowercased() == "bytes" else { return .invalid }
+        let parts = fields[1].split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return .invalid }
+        if parts[0] == "*", Int(parts[1]).map({ $0 >= 0 }) == true { return .valid }
+        let bounds = parts[0].split(separator: "-", omittingEmptySubsequences: false)
+        guard bounds.count == 2, let start = Int(bounds[0]), let end = Int(bounds[1]),
+              start >= 0, end >= start else { return .invalid }
+        if parts[1] != "*", Int(parts[1]).map({ $0 > end }) != true { return .invalid }
+        return .valid
+    }
+
+    nonisolated static func playlistEvidence(_ text: String) -> PlaybackDeliveryEvidence.Playlist {
+        var value = PlaybackDeliveryEvidence.Playlist(
+            hasHeader: false, isMaster: false, targetDurationMilliseconds: nil,
+            maximumSegmentMilliseconds: nil, mediaSequence: nil, segments: 0,
+            hasEndList: false, hasByteRanges: false, hasMap: false, hasEncryption: false
+        )
+        func milliseconds(_ raw: Substring) -> Int? {
+            guard let seconds = Double(raw), seconds.isFinite, (0...86_400).contains(seconds) else { return nil }
+            return Int((seconds * 1_000).rounded())
+        }
+        for raw in text.split(whereSeparator: \.isNewline) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line == "#EXTM3U" || line == "\u{FEFF}#EXTM3U" { value.hasHeader = true }
+            if line.hasPrefix("#EXT-X-STREAM-INF:") { value.isMaster = true }
+            if line.hasPrefix("#EXT-X-TARGETDURATION:") {
+                value.targetDurationMilliseconds = milliseconds(line.dropFirst(22))
+            }
+            if line.hasPrefix("#EXT-X-MEDIA-SEQUENCE:"),
+               let sequence = Int(line.dropFirst(22)), (0...9_007_199_254_740_991).contains(sequence) {
+                value.mediaSequence = sequence
+            }
+            if line.hasPrefix("#EXTINF:") {
+                value.segments = min(1_000_000, value.segments + 1)
+                if let duration = milliseconds(line.dropFirst(8).split(separator: ",").first ?? "") {
+                    value.maximumSegmentMilliseconds = max(value.maximumSegmentMilliseconds ?? 0, duration)
+                }
+            }
+            if line == "#EXT-X-ENDLIST" { value.hasEndList = true }
+            if line.hasPrefix("#EXT-X-BYTERANGE:") { value.hasByteRanges = true }
+            if line.hasPrefix("#EXT-X-MAP:") { value.hasMap = true }
+            if line.hasPrefix("#EXT-X-KEY:") {
+                // Quoted URI text is not an encryption-method attribute.
+                let method = line.dropFirst(11).split(separator: "\"", omittingEmptySubsequences: false)
+                    .enumerated().filter { $0.offset.isMultiple(of: 2) }
+                    .flatMap { $0.element.split(separator: ",") }
+                    .first { $0.hasPrefix("METHOD=") }?.dropFirst(7)
+                if let method, !method.isEmpty, method != "NONE" { value.hasEncryption = true }
+            }
+        }
+        return value
     }
 
     func rewrite(_ manifest: String, baseURL: URL) throws -> String {

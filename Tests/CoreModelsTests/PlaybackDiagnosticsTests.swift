@@ -128,6 +128,20 @@ final class PlaybackDiagnosticsHDRTests: XCTestCase {
         XCTAssertNil(PlaybackDiagnostics.channelDescription(layout: nil, channels: nil))
     }
 
+    func testPlozzigenNeverInfersItsActiveAudioPipelineFromSourceMetadata() {
+        for codec in ["truehd", "mlp", "dts", "eac3", "aac"] {
+            for channels in [2, 6, 8] {
+                let diagnostics = PlaybackDiagnostics.base(
+                    from: .init(audio: .init(codec: codec, profile: "Dolby Atmos", channels: channels)),
+                    mode: .plozzigen,
+                    capabilities: .init(maxOutputChannels: 8, supportsAtmos: true)
+                )
+                XCTAssertNil(diagnostics.audioOutputDescription, "\(codec), \(channels)")
+                XCTAssertNil(diagnostics.audioPipelineDescription, "\(codec), \(channels)")
+            }
+        }
+    }
+
     func testAudioOutputDescriptionReportsAtmosPassthroughExpectation() {
         let atmosRoute = MediaCapabilities(maxOutputChannels: 6, supportsAtmos: true)
         XCTAssertEqual(

@@ -109,8 +109,14 @@ class API:
     def __init__(self, service, token, write=False):
         if not token:
             raise BridgeError(f"Missing {service} credential.")
+        if service == "App Store Connect" and write:
+            raise BridgeError("App Store Connect access is read-only.")
         self.service = service
-        self.base = {"Discord": "https://discord.com/api/v10", "GitHub": "https://api.github.com"}[service]
+        self.base = {
+            "Discord": "https://discord.com/api/v10",
+            "GitHub": "https://api.github.com",
+            "App Store Connect": "https://api.appstoreconnect.apple.com/v1",
+        }[service]
         self.authorization = ("Bot " if service == "Discord" else "Bearer ") + token
         self.write = write
         self.opener = build_opener(NoRedirect())

@@ -190,6 +190,38 @@ public struct SyncLedger: Codable, Hashable, Sendable {
         entries.values.contains { $0.syncedValue != nil }
     }
 
+    /// Inventory absence is only a candidate. Never use unsent local intent as
+    /// evidence of a missed remote deletion.
+    public func inventoryDeletionCandidates(
+        serverNames: Set<SyncRecordID>
+    ) -> [SyncRecordID: SyncLedgerEntry] {
+        guard !resyncing else { return [:] }
+        return entries.filter { name, entry in
+            !serverNames.contains(name) && entry.syncedValue != nil
+                && entry.syncedValue == entry.localValue && !entry.dirty && !entry.pendingDelete
+        }
+    }
+
+    /// Call after refreshing local capture. Only explicit per-record server
+    /// deletions whose baseline and intent stayed unchanged may repair the mirror.
+    public mutating func applyInventoryDeletions(
+        confirmedDeleted: Set<SyncRecordID>,
+        candidates: [SyncRecordID: SyncLedgerEntry],
+        now: Int64
+    ) -> SyncLocalChanges {
+        guard !resyncing else { return [:] }
+        let deleted = confirmedDeleted.filter { name in
+            guard let current = entries[name], var original = candidates[name],
+                  !current.dirty, !current.pendingDelete,
+                  current.syncedValue != nil, current.syncedValue == current.localValue else { return false }
+            // A first unchanged capture can add a receipt without changing intent.
+            original.localCaptureDigest = current.localCaptureDigest
+            return current == original
+        }
+        guard !deleted.isEmpty else { return [:] }
+        return applyFetched(saved: [], deleted: deleted.sorted(), now: now)
+    }
+
     /// The last-known canonical bytes per record — server baseline where we have one,
     /// otherwise the pending local value. The app's `captureRecords` uses this as a
     /// FALLBACK for records it can't currently express locally (e.g. a setting whose

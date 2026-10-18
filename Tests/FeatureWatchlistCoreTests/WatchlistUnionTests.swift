@@ -14,6 +14,31 @@ final class WatchlistUnionTests: XCTestCase {
     private let plex = WatchlistDestinationID(rawValue: "plex")!
     private let jellyfin = WatchlistDestinationID(rawValue: "jellyfin")!
 
+    func testTrackerAttributionSurvivesNativePersistenceAndRetractsOnDisconnect() throws {
+        let tracker = try XCTUnwrap(WatchlistDestinationID(rawValue: "wetrakr"))
+        let alias = MediaAliasID()
+        let url = try XCTUnwrap(URL(string: "https://wetrakr.com/movies/42"))
+        let entry = try XCTUnwrap(NativeWatchlistEntry(
+            aliasID: alias, kind: .movie,
+            presentation: .init(title: "Movie"), index: 0,
+            attribution: .init(source: .wetrakr, sourceURL: url)
+        ))
+        var native = NativeWatchlistView()
+        native.applySuccess(destinationID: tracker, entries: [entry], identityScope: "first")
+        native = try JSONDecoder().decode(NativeWatchlistView.self, from: JSONEncoder().encode(native))
+        let model = WatchlistModel()
+        try model.activate(profileID: "p")
+        let union = model.union(profileID: "p", nativeView: native, aliasSnapshot: .empty, enabledDestinationIDs: [tracker])
+        let resolved = WatchlistPresentationResolver.resolve(
+            union: union, aliasSnapshot: .empty, currentItemsByAliasID: [:]
+        )
+        XCTAssertEqual(resolved.first?.item.metadataProvenance.wetrakrWatchlistURL, url)
+        native.discardCachedEntries(for: tracker, unlessIdentityScopeMatches: "disconnected")
+        XCTAssertTrue(model.union(
+            profileID: "p", nativeView: native, aliasSnapshot: .empty, enabledDestinationIDs: [tracker]
+        ).orderedEntries.isEmpty)
+    }
+
     private func view(
         _ buckets: [(WatchlistDestinationID, [MediaAliasID])]
     ) -> NativeWatchlistView {

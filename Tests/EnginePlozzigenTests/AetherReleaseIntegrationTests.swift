@@ -5,11 +5,11 @@ import XCTest
 @testable import EnginePlozzigen
 
 final class AetherReleaseIntegrationTests: XCTestCase {
-    func testResolvedEngineAndSourceCreditIdentifyPinnedSubtitleFix() throws {
-        XCTAssertEqual(AetherEngine.version, "7.34.1")
+    func testResolvedEngineAndSourceCreditIdentifyPinnedDTSXIntegration() throws {
+        XCTAssertEqual(AetherEngine.version, "7.36.0")
         let credit = try XCTUnwrap(PlozzAttributions.entries.first { $0.title == "AetherEngine" })
         XCTAssertTrue(credit.detail.contains(
-            "https://github.com/brandomoore/AetherEngine/tree/4b7552a06c4cf646bb94eb7eb273946f8b916a70"
+            "https://github.com/brandomoore/AetherEngine/tree/299a3d9ea767e2382158c2a3d137c4b1d302ab4a"
         ))
     }
 
@@ -58,7 +58,7 @@ final class AetherReleaseIntegrationTests: XCTestCase {
         }
     }
 
-    func testDisablingTrueHDAtmosKeepsTheExistingChannelBridge() {
+    func testDisablingSpatialAudioKeepsTheExistingChannelBridge() {
         for channels in [0, 2, 6, 8] {
             let options = PlozzigenVideoEngine.onDemandLoadOptions(
                 audioChannels: channels, trueHDAtmosEnabled: false
@@ -73,12 +73,24 @@ final class AetherReleaseIntegrationTests: XCTestCase {
     func testTrueHDLegalCreditIncludesSourceAndBothLicenses() throws {
         let credit = try XCTUnwrap(PlozzAttributions.entries.first { $0.title == "LibTrueHD" })
         XCTAssertTrue(credit.detail.contains(
-            "https://github.com/superuser404notfound/LibTrueHD/tree/2.2.0"
+            "https://github.com/superuser404notfound/LibTrueHD/tree/2.3.0"
         ))
         XCTAssertTrue(credit.detail.contains("Quick104"))
         XCTAssertTrue(credit.detail.contains("Rainbaby"))
         XCTAssertTrue(credit.detail.contains("LibTrueHDNotices.txt"))
         XCTAssertEqual(Set(credit.licenses.map(\.label)), ["MIT", "Apache-2.0"])
+    }
+
+    func testDTSXLegalCreditIncludesSourceAndLicense() throws {
+        let credit = try XCTUnwrap(PlozzAttributions.entries.first { $0.title == "LibDTSX" })
+        XCTAssertTrue(credit.detail.contains(
+            "https://github.com/superuser404notfound/LibDTSX/tree/1.0.1"
+        ))
+        XCTAssertTrue(credit.detail.contains("kristofferR"))
+        XCTAssertTrue(credit.detail.contains("harletty"))
+        XCTAssertTrue(credit.detail.contains("LibDTSXNotices.txt"))
+        XCTAssertTrue(credit.detail.contains("LibDTSXLicense.txt"))
+        XCTAssertEqual(credit.licenses.map(\.label), ["Apache-2.0"])
     }
 
     func testReleasedProbeCancellationAPIIsAvailable() {

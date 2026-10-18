@@ -94,17 +94,17 @@ public final class IPTVSetupDiagnostics: @unchecked Sendable {
 
     public func begin(
         source: IPTVSetupDiagnostic.Source, authentication: IPTVSetupDiagnostic.Authentication,
-        entry: IPTVSetupDiagnostic.Entry
+        entry: IPTVSetupDiagnostic.Entry, captureForPresentation: Bool = false
     ) -> IPTVSetupAttempt? {
         let generation = lock.withLock { () -> UUID? in
             guard sink != nil, remainingAttempts > 0 else { return nil }
             remainingAttempts -= 1
             return self.generation
         }
-        guard let generation else { return nil }
+        guard captureForPresentation || generation != nil else { return nil }
         let attempt = IPTVSetupAttempt(source: source, authentication: authentication, entry: entry) {
             [weak self] diagnostic in
-            guard let self else { return }
+            guard let self, let generation else { return }
             self.lock.withLock {
                 guard self.generation == generation else { return }
                 self.sink?(diagnostic)
@@ -137,6 +137,10 @@ public final class IPTVSetupAttempt: @unchecked Sendable {
     private var httpStatus: Int?
     private var response: IPTVSetupDiagnostic.Response?
     private var transportFailure: IPTVSetupDiagnostic.Failure?
+    private var completedDiagnostic: IPTVSetupDiagnostic?
+
+    /// Owned by the initiating form, independently of remote telemetry consent.
+    public var diagnostic: IPTVSetupDiagnostic? { lock.withLock { completedDiagnostic } }
 
     fileprivate init(
         source: IPTVSetupDiagnostic.Source, authentication: IPTVSetupDiagnostic.Authentication,
@@ -205,7 +209,9 @@ public final class IPTVSetupAttempt: @unchecked Sendable {
             let failure = failure?.reason == .network ? transportFailure ?? failure : failure
             let outcome: IPTVSetupDiagnostic.Outcome = failure?.reason == .cancelled
                 ? .cancelled : failure == nil ? .succeeded : .failed
-            sink(snapshot(outcome: outcome, failure: outcome == .failed ? failure : nil))
+            let diagnostic = snapshot(outcome: outcome, failure: outcome == .failed ? failure : nil)
+            completedDiagnostic = diagnostic
+            sink(diagnostic)
         }
     }
 

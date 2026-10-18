@@ -3,13 +3,14 @@ import XCTest
 import CoreModels
 import CoreNetworking
 @testable import TraktService
+@testable import CoreTrackerAuth
 @testable import TestSupportNetworking
 
 private let config = TraktConfig(clientID: "client")
 private let rotatedJSON = """
 {"access_token":"new-access","refresh_token":"new-refresh","expires_in":604800,"created_at":\(Int(Date().timeIntervalSince1970))}
 """
-private let expired = TraktTokens(accessToken: "old-access", refreshToken: "old-refresh", expiresAt: .distantPast)
+private let expired = TrackerTokens(accessToken: "old-access", refreshToken: "old-refresh", expiresAt: .distantPast)
 
 final class TraktPKCETests: XCTestCase {
     func testRFC7636ChallengeAndSecretlessAuthorization() throws {
@@ -141,9 +142,23 @@ private actor DelayRecorder {
 
 final class TraktCredentialLifecycleTests: XCTestCase {
     @MainActor
+    func testCallbackFailurePreservesInvalidResponsePresentation() async {
+        let http = RecordingHTTPClient()
+        let store = InMemoryTrackerTokenStore()
+        let service = TraktService(config: config, http: http, tokenStore: store)
+        service.connect { _, callback in
+            try XCTUnwrap(URL(string: callback.absoluteString + "?code=approved&state=wrong"))
+        }
+        await service.connectTask?.value
+        XCTAssertEqual(service.phase, .error(AppError.invalidResponse.userMessage))
+        XCTAssertNil(store.load())
+        XCTAssertTrue(http.sent.isEmpty)
+    }
+
+    @MainActor
     func testCancelAfterCredentialCommitDoesNotPretendDisconnected() async {
         let http = SuspendedSettingsHTTPClient()
-        let store = InMemoryTraktTokenStore()
+        let store = InMemoryTrackerTokenStore()
         let service = TraktService(config: config, http: http, tokenStore: store)
         var notifications = 0
         service.onConnectionAvailable = { notifications += 1 }
@@ -185,7 +200,7 @@ final class TraktCredentialLifecycleTests: XCTestCase {
     @MainActor
     func testProfileSwitchInvalidatesBrowserCallbackBeforeExchange() async {
         let http = RecordingHTTPClient()
-        let store = InMemoryTraktTokenStore()
+        let store = InMemoryTrackerTokenStore()
         let service = TraktService(config: config, http: http, tokenStore: store)
         let began = expectation(description: "Browser opened")
         var resume: CheckedContinuation<URL, Never>?
@@ -216,7 +231,7 @@ final class TraktCredentialLifecycleTests: XCTestCase {
         let http = RecordingHTTPClient()
         http.stub(pathSuffix: "/oauth/token", json: rotatedJSON)
         http.stub(pathSuffix: "/users/settings", json: #"{"user":{"username":"viewer"}}"#)
-        let store = InMemoryTraktTokenStore()
+        let store = InMemoryTrackerTokenStore()
         let service = TraktService(config: config, http: http, tokenStore: store)
         var notifications = 0
         service.onConnectionAvailable = {
@@ -237,7 +252,7 @@ final class TraktCredentialLifecycleTests: XCTestCase {
     func testDurableScrobblePropagatesRefreshFailureWithoutSendingStop() async throws {
         let http = RecordingHTTPClient()
         http.stub(pathSuffix: "/oauth/token", json: "{}", status: 500)
-        let store = InMemoryTraktTokenStore(tokens: expired)
+        let store = InMemoryTrackerTokenStore(tokens: expired)
         let scrobbler = TraktScrobbler(config: config, http: http, tokenStore: store)
         do {
             try await scrobbler.scrobbleResult(
@@ -254,8 +269,8 @@ final class TraktCredentialLifecycleTests: XCTestCase {
 
     func testIndependentAdaptersShareOneSingleUseRefresh() async throws {
         let http = ControlledRefreshHTTPClient()
-        let store = InMemoryTraktTokenStore(tokens: expired)
-        let coordinator = TraktTokenCoordinator()
+        let store = InMemoryTrackerTokenStore(tokens: expired)
+        let coordinator = TrackerTokenCoordinator()
         let auth = TraktAuthService(config: config, http: http)
         let first = Task { try await coordinator.accessToken(store: store.snapshot(), auth: auth) }
         await http.waitUntilStarted()
@@ -270,8 +285,8 @@ final class TraktCredentialLifecycleTests: XCTestCase {
 
     func testDisconnectRejectsLateRefreshFromAnotherStoreInstance() async throws {
         let http = ControlledRefreshHTTPClient()
-        let store = InMemoryTraktTokenStore(tokens: expired)
-        let coordinator = TraktTokenCoordinator()
+        let store = InMemoryTrackerTokenStore(tokens: expired)
+        let coordinator = TrackerTokenCoordinator()
         let refresh = Task {
             try await coordinator.accessToken(store: store.snapshot(), auth: TraktAuthService(config: config, http: http))
         }
@@ -291,7 +306,7 @@ final class TraktCredentialLifecycleTests: XCTestCase {
         let http = RecordingHTTPClient()
         http.stub(pathSuffix: "/oauth/token", json: rotatedJSON)
         let store = FailingTraktTokenStore(tokens: expired)
-        let coordinator = TraktTokenCoordinator()
+        let coordinator = TrackerTokenCoordinator()
         let auth = TraktAuthService(config: config, http: http)
         do {
             _ = try await coordinator.accessToken(store: store, auth: auth)
@@ -311,9 +326,9 @@ final class TraktCredentialLifecycleTests: XCTestCase {
         let http = RecordingHTTPClient()
         http.stubEmpty(pathSuffix: "/scrobble/stop")
         http.stub(pathSuffix: "/users/settings", json: #"{"user":{"username":"B"}}"#)
-        let store = InMemoryTraktTokenStore(tokens: TraktTokens(accessToken: "a", refreshToken: "a-refresh", expiresAt: .distantFuture))
+        let store = InMemoryTrackerTokenStore(tokens: TrackerTokens(accessToken: "a", refreshToken: "a-refresh", expiresAt: .distantFuture))
         store.setNamespace("B")
-        try store.save(TraktTokens(accessToken: "b", refreshToken: "b-refresh", expiresAt: .distantFuture))
+        try store.save(TrackerTokens(accessToken: "b", refreshToken: "b-refresh", expiresAt: .distantFuture))
         store.setNamespace(nil)
         let service = TraktService(config: config, http: http, tokenStore: store)
         let bound = service.playbackScrobbler()
@@ -326,19 +341,19 @@ final class TraktCredentialLifecycleTests: XCTestCase {
     }
 }
 
-private final class FailingTraktTokenStore: TraktTokenStoring, @unchecked Sendable {
+private final class FailingTraktTokenStore: TrackerTokenStoring, @unchecked Sendable {
     enum Failure: Error { case write }
-    private let underlying: InMemoryTraktTokenStore
+    private let underlying: InMemoryTrackerTokenStore
     private let lock = NSLock()
     private var failNextWrite = true
 
-    init(tokens: TraktTokens?) { underlying = InMemoryTraktTokenStore(tokens: tokens) }
+    init(tokens: TrackerTokens?) { underlying = InMemoryTrackerTokenStore(tokens: tokens) }
     var coordinationID: String { underlying.coordinationID }
-    func snapshot() -> any TraktTokenStoring { self }
+    func snapshot() -> any TrackerTokenStoring { self }
     func setNamespace(_ namespace: String?) { underlying.setNamespace(namespace) }
-    func load() -> TraktTokens? { underlying.load() }
+    func load() -> TrackerTokens? { underlying.load() }
     func clear() throws { try underlying.clear() }
-    func save(_ tokens: TraktTokens) throws {
+    func save(_ tokens: TrackerTokens) throws {
         lock.lock()
         defer { lock.unlock() }
         if failNextWrite {

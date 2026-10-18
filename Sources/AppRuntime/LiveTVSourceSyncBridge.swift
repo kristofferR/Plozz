@@ -250,9 +250,10 @@ public final class LiveTVSourceSyncBridge {
     private var epoch: String { LiveTVPortableSyncPreferenceStore.storageEpoch(defaults: defaults) }
     private var removedKey: String { "com.plozz.liveTV.sources.removed." + epoch }
     private func removedProfiles() throws -> Set<String> {
-        guard let value = defaults.object(forKey: removedKey) else { return [] }
+        let pending = profiles.pendingSyncedDeletionProfileIDs
+        guard let value = defaults.object(forKey: removedKey) else { return pending }
         guard let ids = value as? [String] else { throw LiveTVPortableStateError.invalidRecord }
-        return Set(ids)
+        return Set(ids).union(pending)
     }
 
     private func admit(_ snapshot: SyncChannelSnapshot) throws {

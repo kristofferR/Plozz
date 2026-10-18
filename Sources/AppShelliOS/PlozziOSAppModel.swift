@@ -23,6 +23,7 @@ import ProviderSilo
 import ProviderShare
 import SeerService
 import SimklService
+import WetrakrService
 import TraktService
 import UIKit
 
@@ -45,8 +46,19 @@ final class PlozziOSAppModel {
     var canEnterApp: Bool { admissionContext.canEnterApp }
     var isLiveTVProfileAuthorized: Bool { isActiveProfileAuthorized }
 
+    var liveTVAdmissionDiagnostic: String { // l10n:content - diagnostic log fields, never display copy.
+        guard HandoffDiagnostics.isEnabled else { return "" }
+        return "canEnter=\(canEnterApp) chooseProfile=\(mustChooseProfile)"
+            + " launchSelectionPending=\(requiresLaunchProfileSelection && !didCompleteLaunchProfileSelection)"
+            + " lockedSwitch=\(lockedSwitch != nil) parentalSwitch=\(parentalSwitch != nil)"
+            + " identitySelection=\(pendingIdentityAccount != nil) librarySelection=\(pendingLibrarySelection != nil)"
+            + " firstRun=\(pendingFirstRunStep != nil) profileOnboarding=\(profileOnboardingStep != nil)"
+            + " plexPIN=\(plexHomeUsers.pendingPlexPINRequest != nil) needsUnlock=\(activeProfileNeedsUnlock)"
+            + " identityPending=\(profiles.activeProfile.awaitsIdentity(amongAccounts: accountsProviders.activeAccountIDs))"
+            + " actionableIdentityPending=\(accountsProviders.activeProfileAwaitsIdentity)"
+    }
+
     var isActiveProfileAuthorized: Bool {
-        let profile = profiles.activeProfile
         return canEnterApp && !mustChooseProfile
             && (!requiresLaunchProfileSelection || didCompleteLaunchProfileSelection)
             && lockedSwitch == nil && parentalSwitch == nil
@@ -54,7 +66,7 @@ final class PlozziOSAppModel {
             && pendingFirstRunStep == nil && profileOnboardingStep == nil
             && plexHomeUsers.pendingPlexPINRequest == nil
             && !activeProfileNeedsUnlock
-            && !profile.awaitsIdentity(amongAccounts: accountsProviders.activeAccountIDs)
+            && !accountsProviders.activeProfileAwaitsIdentity
     }
     var allowsStandalonePlayback: Bool { admissionContext.explicitStandaloneChoice }
     var pendingStandaloneLiveTVEntry: Bool { appAdmission.pendingLiveTVEntry }
@@ -350,6 +362,7 @@ final class PlozziOSAppModel {
     let seerService: SeerService
     let traktService: TraktService
     let simklService: SimklService
+    let wetrakrService: WetrakrService
     let anilistService: AniListService
     let malService: MALService
     let crashReporting: CrashReportingSettingsModel
@@ -390,8 +403,8 @@ final class PlozziOSAppModel {
     /// the capture environment seeded this launch — see ``PlozziOSScreenshotSeed``.
     let screenshotDirector = PlozziOSScreenshotDirector()
     /// A pairing invite captured from a Sync & Setup universal link
-    /// (`https://plozz.app/pair#…`). When set, the root presents the pairing send
-    /// flow and auto-sends this device's setup to the device that showed the QR.
+    /// (`https://plozz.app/pair#…`). The invite type selects receiving from a TV
+    /// or the existing send flow; either direction requires its own confirmation.
     var pendingPairingInvite: String?
     @ObservationIgnored
     private(set) var plexHomeUsers: PlexHomeUsersModel!
@@ -550,19 +563,27 @@ final class PlozziOSAppModel {
 
     var accountError: String?
 
-    init(appAdmissionStore: any AppAdmissionStoring = AppAdmissionStore()) {
+    init(
+        appAdmissionStore: any AppAdmissionStoring = AppAdmissionStore(),
+        accountStore suppliedAccountStore: AccountStore? = nil,
+        profileStore: (any ProfilePersisting)? = nil
+    ) {
         let appAdmission = AppAdmissionModel(store: appAdmissionStore)
         self.appAdmission = appAdmission
         let authenticatedHTTPResolver = ManagedAuthenticatedHTTPResolver()
         let accountStore: AccountStore
         var launchErrors: [String] = []
-        do {
-            accountStore = try DefaultAccountStoreFactory.make()
-        } catch {
-            accountStore = DefaultAccountStoreFactory.makeCredentialOnlyFallback()
-            launchErrors.append(
-                "Network-share credential storage is unavailable: \(error.localizedDescription)"
-            )
+        if let suppliedAccountStore {
+            accountStore = suppliedAccountStore
+        } else {
+            do {
+                accountStore = try DefaultAccountStoreFactory.make()
+            } catch {
+                accountStore = DefaultAccountStoreFactory.makeCredentialOnlyFallback()
+                launchErrors.append(
+                    "Network-share credential storage is unavailable: \(error.localizedDescription)"
+                )
+            }
         }
         let mediaShareRuntime = DefaultMediaShareRuntime.make(
             accountStore: accountStore,
@@ -588,7 +609,7 @@ final class PlozziOSAppModel {
             durableLocalStateStore: durableLocalStateStore
         )
         let profiles = ProfilesModel(
-            store: ProfileStore(
+            store: profileStore ?? ProfileStore(
                 secureStore: KeychainStore(service: "com.plozz.app.household")
             ),
             defaultActiveAccountIDs: accountStore.activeAccountIDs()
@@ -614,6 +635,7 @@ final class PlozziOSAppModel {
         TraktSharedRefreshBootstrap.install()
         let traktService = TraktServiceFactory.make(namespace: trackerNamespace)
         let simklService = SimklServiceFactory.make(namespace: trackerNamespace)
+        let wetrakrService = WetrakrServiceFactory.make(namespace: trackerNamespace)
         let anilistService = AniListServiceFactory.make(namespace: trackerNamespace)
         let malService = MALServiceFactory.make(namespace: trackerNamespace)
         self.accountStore = accountStore
@@ -652,13 +674,15 @@ final class PlozziOSAppModel {
         }
         self.traktService = traktService
         self.simklService = simklService
+        self.wetrakrService = wetrakrService
         self.anilistService = anilistService
         self.malService = malService
         self.crashReporting = CrashReportingSettingsModel()
         self.crashReportingController = CrashReportingController()
         self.requiresLaunchProfileSelection = requiresLaunchProfileSelection
         let initialSettings = PlozziOSSettingsModel(
-            namespace: profiles.activeNamespace
+            namespace: profiles.activeNamespace,
+            allowsDiscovery: { !profiles.activeProfile.isKids }
         )
         self.settings = initialSettings
         self.seriesTrackStore = SeriesTrackPreferenceStore(
@@ -742,7 +766,6 @@ final class PlozziOSAppModel {
         )
         accountsProviders.tokenResolver = { [weak self] accountID in
             self?.plexHomeUsers.resolvedToken(for: accountID)
-                ?? accountStore.token(for: accountID)
         }
         accountsProviders.onAccountsInvalidated = { [weak self] in
             self?.mediaItemActionHandler.invalidateAccountCaches()
@@ -750,6 +773,9 @@ final class PlozziOSAppModel {
             self?.universalWatchlistRetryScheduler = nil
             self?.universalWatchlistShouldResumeAuthentication = true
             Task { await self?.prepareUniversalWatchlist() }
+        }
+        accountsProviders.onActiveAccountsChanged = { [weak self] _, _ in
+            self?.plexHomeUsers.activeAccountsDidChange()
         }
         accountsProviders.credentialRevision = { [weak self] account in
             self?.plexHomeUsers.effectiveCredentialRevision(for: account)
@@ -791,7 +817,9 @@ final class PlozziOSAppModel {
                 credentialRevision: accountsProviders.credentialRevision(account),
                 baseURL: baseURL,
                 token: token,
-                resourceResolver: accountsProviders.provider(forAccountID: account.id) as? any ProviderHTTPResourceResolving
+                resourceResolver: accountsProviders.provider(forAccountID: account.id) as? any ProviderHTTPResourceResolving,
+                originProvider: accountsProviders.provider(forAccountID: account.id) as? any AuthenticatedHTTPOriginProviding,
+                connectionScopeKey: account.connectionScopeKey
             )
         }
         do {
@@ -840,6 +868,12 @@ final class PlozziOSAppModel {
         // on) and start observing local config changes to publish them.
         self.traktService.onConnectionAvailable = { [weak self] in
             Task { await self?.resumeUniversalWatchlistAuthentication() }
+        }
+        self.wetrakrService.onConnectionChanged = { [weak self] in
+            Task {
+                guard let self, let destination = self.wetrakrService.watchlistDestination else { return }
+                await self.trackerWatchlistConnectionChanged(destination: destination)
+            }
         }
         prepareMediaAliasLedger()
         startCloudSyncIfEnabled()
@@ -1054,7 +1088,8 @@ final class PlozziOSAppModel {
     /// presentation via `pendingPairingInvite`.
     @discardableResult
     func handleIncomingURL(_ url: URL) -> Bool {
-        guard SyncPairingInvite.decode(url.absoluteString) != nil else { return false }
+        guard SyncPairingInvite.decode(url.absoluteString) != nil
+            || SyncSetupSourceInvite.decode(url.absoluteString) != nil else { return false }
         // Following a pairing link sends this household's servers, profiles and
         // credentials to the device that produced it, and that device opens in a
         // grown-up profile — so it's withheld inside an enforced Kids Profile.
@@ -1065,7 +1100,15 @@ final class PlozziOSAppModel {
 
     /// Debug-only: clear all accounts + profiles so the app returns to the
     /// first-run / onboarding empty state (used to test Sync & Setup receive).
-    func resetToFirstRunForDebugging() {
+    @discardableResult
+    func resetToFirstRunForDebugging(afterSyncErasure: Bool = false) -> Bool {
+        do {
+            try accountStore.clearAll()
+        } catch {
+            PlozzLog.auth.error("First-run reset could not remove every account")
+            accountError = error.localizedDescription
+            return false
+        }
         // Clear cross-device sync state too, so a debug reset is a truly clean slate
         // for re-testing "new server from another device": pull each account's
         // iCloud-Keychain portable credential (stops auto-connect) and wipe the
@@ -1078,10 +1121,17 @@ final class PlozziOSAppModel {
         HouseholdDevicesStore().removeAll()
         pendingSyncedServers = []
         pendingSyncedServerPrompt = nil
-        try? accountStore.clearAll()
         accountsProviders.reloadAccounts()
+        guard accountsProviders.accounts.isEmpty else { return false }
         plexHomeUsers.resetAllForDebug()
-        profiles.resetToPristineDefaultForDebugging()
+        do {
+            if afterSyncErasure { try profiles.resetToPristineDefaultAfterSyncErasure() }
+            else { profiles.resetToPristineDefaultForDebugging() }
+        } catch {
+            PlozzLog.sync.error("First-run reset could not remove every profile")
+            accountError = error.localizedDescription
+            return false
+        }
         resetLiveTVPortableSync()
         if accountsProviders.accounts.isEmpty { appAdmission.resetForDebugging() }
         pendingLibrarySelection = nil
@@ -1090,6 +1140,7 @@ final class PlozziOSAppModel {
         // Bypass the lock gate deliberately: this is the debug "reset to first
         // run" path and it has just wiped the profiles back to a pristine default.
         performSelectProfile(profiles.activeProfileID)
+        return true
     }
 
     /// Everything guarding entry to a profile, in ONE observable property.
@@ -1586,7 +1637,16 @@ final class PlozziOSAppModel {
             await Task.yield()
             resumeProfileOnboardingIfNeeded()
         }
-        settings = PlozziOSSettingsModel(namespace: profiles.activeNamespace)
+        refreshActiveProfileConfiguration()
+    }
+
+    /// Reapply settings and reconcile sources without granting a new profile
+    /// activation or discarding an unchanged Plex authentication in progress.
+    func refreshActiveProfileConfiguration() {
+        settings = PlozziOSSettingsModel(
+            namespace: profiles.activeNamespace,
+            allowsDiscovery: { [profiles] in !profiles.activeProfile.isKids }
+        )
         seriesTrackStore = SeriesTrackPreferenceStore(
             namespace: profiles.activeNamespace
         )
@@ -1594,8 +1654,8 @@ final class PlozziOSAppModel {
             namespace: profiles.activeNamespace
         )
         transitionDownloads(to: profiles.activeProfileID)
-        plexHomeUsers.ensurePlexIdentityForActiveProfile()
         reloadAccountsAndCrashContext()
+        plexHomeUsers.ensurePlexIdentityForActiveProfile()
         identityIndex.reset()
         identityIndex.warmIdentityIndex()
         drainWatchOutbox()
@@ -1649,9 +1709,13 @@ final class PlozziOSAppModel {
     private var trackerScopedNamespace: String??
 
     /// See `UniversalWatchlistHost.ensureTrackersScopedToActiveProfile()`.
+    var trackersAreScopedToActiveProfile: Bool {
+        guard let scoped = trackerScopedNamespace else { return false }
+        return scoped == profiles.activeNamespace
+    }
+
     func ensureTrackersScopedToActiveProfile() async {
-        let ns = profiles.activeNamespace
-        if let scoped = trackerScopedNamespace, scoped == ns { return }
+        guard !trackersAreScopedToActiveProfile else { return }
         await updateTrackersForActiveProfile()
     }
 
@@ -1659,10 +1723,13 @@ final class PlozziOSAppModel {
         let namespace = profiles.activeNamespace
         trackerProfileGeneration &+= 1
         let generation = trackerProfileGeneration
+        trackerScopedNamespace = nil
         guard generation == trackerProfileGeneration else { return }
         await traktService.setActiveProfile(namespace: namespace)
         guard generation == trackerProfileGeneration else { return }
         await simklService.setActiveProfile(namespace: namespace)
+        guard generation == trackerProfileGeneration else { return }
+        await wetrakrService.setActiveProfile(namespace: namespace)
         guard generation == trackerProfileGeneration else { return }
         await anilistService.setActiveProfile(namespace: namespace)
         guard generation == trackerProfileGeneration else { return }
@@ -1721,6 +1788,7 @@ final class PlozziOSAppModel {
             scrobbler: PlozziOSTrackerScrobbler(
                 trakt: traktService.playbackScrobbler(),
                 simkl: SimklServiceFactory.make(namespace: namespace).scrobbler,
+                wetrakr: wetrakrService.playbackScrobbler(),
                 anilist: AniListServiceFactory.make(namespace: namespace).scrobbler,
                 mal: MALServiceFactory.make(namespace: namespace).scrobbler
             )
@@ -1895,6 +1963,7 @@ final class PlozziOSAppModel {
         let namespace = profile.settingsNamespace(isDefault: profiles.isDefault(profile))
         let trakt = TraktServiceFactory.make(namespace: namespace).scrobbler
         let simkl = SimklServiceFactory.make(namespace: namespace).scrobbler
+        let wetrakr = WetrakrServiceFactory.make(namespace: namespace).playbackScrobbler()
         let anilist = AniListServiceFactory.make(namespace: namespace).scrobbler
         let mal = MALServiceFactory.make(namespace: namespace).scrobbler
         let store: any WatchMutationStoring
@@ -1965,6 +2034,13 @@ final class PlozziOSAppModel {
                     item: intent.makeScrobbleItem(),
                     progress: intent.progress,
                     event: .stop
+                )
+            },
+            wetrakrAccountIdentity: { wetrakr.accountIdentity },
+            applyWetrakr: { intent, capturedAt, key, identity in
+                try await wetrakr.recordWatch(
+                    item: intent.makeScrobbleItem(), capturedAt: capturedAt,
+                    idempotencyKey: key, expectedAccountIdentity: identity
                 )
             },
             allAccountIDs: { [weak self] in
@@ -2370,7 +2446,10 @@ final class PlozziOSAppModel {
                 reloadAccountsAndCrashContext()
                 return
             }
-            settings = PlozziOSSettingsModel(namespace: profiles.activeNamespace)
+            settings = PlozziOSSettingsModel(
+                namespace: profiles.activeNamespace,
+                allowsDiscovery: { [profiles] in !profiles.activeProfile.isKids }
+            )
             seriesTrackStore = SeriesTrackPreferenceStore(
                 namespace: profiles.activeNamespace
             )
@@ -2378,9 +2457,11 @@ final class PlozziOSAppModel {
                 namespace: profiles.activeNamespace
             )
             transitionDownloads(to: profiles.activeProfileID)
-            plexHomeUsers.ensurePlexIdentityForActiveProfile()
         }
         reloadAccountsAndCrashContext()
+        if profiles.activeProfileID != previousActiveProfileID {
+            plexHomeUsers.ensurePlexIdentityForActiveProfile()
+        }
         identityIndex.reset()
         identityIndex.warmIdentityIndex()
         drainWatchOutbox()
@@ -2573,7 +2654,8 @@ final class PlozziOSAppModel {
             homeUserID: user.id,
             name: user.name,
             avatarURL: user.avatarURL?.absoluteString,
-            requiresPIN: user.requiresPIN
+            requiresPIN: user.requiresPIN,
+            pinRequirementVerified: user.pinRequirementVerified
         )
         var profile = profiles.activeProfile
         for accountID in pending.applyToAccountIDs {

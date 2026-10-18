@@ -5,6 +5,13 @@ import XCTest
 @testable import FeatureHome
 
 final class HeroRefreshTriggerTests: XCTestCase {
+    func testKidsPolicyDisablesShowcaseDiscoveryAndRejectsPreviouslyLoadedSlides() {
+        var settings = HeroSettings.default
+        settings.style = .followsFocus
+        settings.showsDiscoverRow = true
+        XCTAssertNotNil(HomeView.curationSettings(for: settings))
+        XCTAssertNil(HomeView.curationSettings(for: settings.applyingDiscoveryPolicy(allowed: false)))
+    }
     @MainActor
     func testShowcaseKeepsWatchedTitlesThroughCacheAndLoadedDisplayPasses() {
         #if os(tvOS)

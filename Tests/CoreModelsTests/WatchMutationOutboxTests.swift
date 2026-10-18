@@ -16,6 +16,9 @@ private final class FakeWatchApplier: WatchMutationApplying, @unchecked Sendable
     private(set) var simklScrobbles: [TraktScrobbleIntent] = []
     private(set) var anilistScrobbles: [TraktScrobbleIntent] = []
     private(set) var malScrobbles: [TraktScrobbleIntent] = []
+    private(set) var wetrakrWrites: [(Date, String, String)] = []
+    var wetrakrAccountIdentity: String?
+    var wetrakrFails = false
 
     /// Accounts whose writes currently fail (simulating an offline / asleep server).
     var failingAccounts: Set<String> = []
@@ -50,6 +53,16 @@ private final class FakeWatchApplier: WatchMutationApplying, @unchecked Sendable
         lock.lock(); malScrobbles.append(intent); lock.unlock()
     }
 
+    func scrobbleWetrakr(
+        _ intent: TraktScrobbleIntent, capturedAt: Date,
+        idempotencyKey: String, expectedAccountIdentity: String
+    ) async throws {
+        lock.lock()
+        wetrakrWrites.append((capturedAt, idempotencyKey, expectedAccountIdentity))
+        lock.unlock()
+        if wetrakrFails { throw AppError.serverUnreachable }
+    }
+
     func expandTargets(for mutation: WatchMutation) async -> WatchTargetExpansion {
         targetExpansion
     }
@@ -57,6 +70,60 @@ private final class FakeWatchApplier: WatchMutationApplying, @unchecked Sendable
 
 private func target(_ account: String, _ item: String) -> WatchMutationTarget {
     WatchMutationTarget(accountID: account, itemID: item)
+}
+
+final class WetrakrWatchMutationTests: XCTestCase {
+    private func mutation() -> WatchMutation {
+        WatchMutation(
+            capturedAt: Date(timeIntervalSince1970: 1000),
+            canonicalMediaID: "tmdb:1", played: true, targets: [],
+            trakt: .init(kind: .movie, title: "Movie", year: nil, seasonNumber: nil,
+                         episodeNumber: nil, providerIDs: ["Tmdb": "1"], progress: 100)
+        )
+    }
+
+    func testCapturesConnectionAndTimestampBeforePersistingAndRetrying() async throws {
+        let applier = FakeWatchApplier()
+        applier.wetrakrAccountIdentity = "first-grant"
+        applier.wetrakrFails = true
+        let reconciler = WatchStateReconciler(store: InMemoryWatchMutationStore(), applier: applier)
+        await reconciler.enqueue(mutation())
+        var state = await reconciler.snapshot()
+        XCTAssertEqual(state.pending.first?.wetrakrAccountIdentity, "first-grant")
+        XCTAssertEqual(state.pending.first?.wetrakrCapturedAt, Date(timeIntervalSince1970: 1000))
+        let restored = try JSONDecoder().decode(WatchOutboxState.self, from: JSONEncoder().encode(state))
+        XCTAssertEqual(restored, state)
+        await reconciler.drain()
+        state = await reconciler.snapshot()
+        XCTAssertEqual(state.pending.first?.wetrakrPending, true)
+        applier.wetrakrAccountIdentity = "second-grant"
+        applier.wetrakrFails = false
+        await reconciler.drain()
+        XCTAssertEqual(applier.wetrakrWrites.count, 2)
+        XCTAssertEqual(applier.wetrakrWrites[0].0, applier.wetrakrWrites[1].0)
+        XCTAssertEqual(applier.wetrakrWrites[0].1, applier.wetrakrWrites[1].1)
+        XCTAssertEqual(applier.wetrakrWrites[1].2, "first-grant")
+        let final = await reconciler.snapshot()
+        XCTAssertTrue(final.pending.isEmpty)
+    }
+
+    func testLaterSignInDoesNotRetroactivelyUploadAWatchedTitle() async {
+        let applier = FakeWatchApplier()
+        let reconciler = WatchStateReconciler(store: InMemoryWatchMutationStore(), applier: applier)
+        await reconciler.enqueue(mutation())
+        applier.wetrakrAccountIdentity = "later-grant"
+        await reconciler.drain()
+        XCTAssertTrue(applier.wetrakrWrites.isEmpty)
+    }
+
+    func testOlderOutboxRecordsDoNotAcquireANewTracker() throws {
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(mutation())) as? [String: Any])
+        json.removeValue(forKey: "wetrakrPending")
+        json.removeValue(forKey: "wetrakrAccountIdentity")
+        json.removeValue(forKey: "wetrakrCapturedAt")
+        let decoded = try JSONDecoder().decode(WatchMutation.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertFalse(decoded.wetrakrPending)
+    }
 }
 
 private func playedMutation(canonical: String = "imdb:tt1", played: Bool = true, capturedAt: Date, targets: [WatchMutationTarget], trakt: TraktScrobbleIntent? = nil) -> WatchMutation {

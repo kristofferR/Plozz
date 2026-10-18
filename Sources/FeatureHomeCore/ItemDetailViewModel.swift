@@ -2234,6 +2234,11 @@ public final class ItemDetailViewModel {
     /// keeps routing to the right provider.
     private func tagged(_ item: MediaItem) -> MediaItem {
         var tagged = activeSourceAccountID.map { item.taggingSource($0) } ?? item
+        if item.kind == state.value?.item.kind,
+           let url = state.value?.item.metadataProvenance.wetrakrWatchlistURL {
+            tagged.metadataProvenance[MetadataField(rawValue: "watchlist.wetrakr")] =
+                MetadataAttribution(source: .wetrakr, sourceURL: url)
+        }
         tagged.rejectedSourceIDs.formUnion(rejectedSourceIDs)
         tagged.sources.removeAll { tagged.rejectedSourceIDs.contains($0.id) }
         if editionOpeningSource?.matches(tagged) == true {

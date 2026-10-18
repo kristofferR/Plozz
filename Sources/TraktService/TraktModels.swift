@@ -1,51 +1,6 @@
 import CoreModels
 import Foundation
 
-// MARK: - Stored tokens
-
-/// The OAuth tokens persisted after a successful Trakt connection.
-///
-/// Trakt access tokens expire (currently after seven days), so
-/// the refresh token is kept to silently renew them. `createdAt` + `expiresIn`
-/// derive the absolute expiry used to decide when to refresh.
-public struct TraktTokens: Codable, Sendable, Equatable {
-    public var accessToken: String
-    public var refreshToken: String
-    public var accountIdentity: String?
-    /// Absolute expiry instant (createdAt + expiresIn).
-    public var expiresAt: Date
-
-    public init(
-        accessToken: String,
-        refreshToken: String,
-        expiresAt: Date,
-        accountIdentity: String? = nil
-    ) {
-        self.accessToken = accessToken
-        self.refreshToken = refreshToken
-        self.expiresAt = expiresAt
-        self.accountIdentity = accountIdentity
-    }
-
-    /// Treated as expired a few minutes early so a scrobble never races the
-    /// deadline with a token the server is about to reject.
-    public var isExpired: Bool {
-        Date() >= expiresAt.addingTimeInterval(-300)
-    }
-
-    public var stableAccountIdentity: String {
-        accountIdentity ?? WatchlistReconciliationIdentity.credential(
-            refreshToken.isEmpty ? accessToken : refreshToken
-        )
-    }
-
-    public func inheritingAccountIdentity(from previous: Self) -> Self {
-        var value = self
-        value.accountIdentity = previous.stableAccountIdentity
-        return value
-    }
-}
-
 // MARK: - OAuth device-code DTOs
 
 /// Response to `POST /oauth/device/code`: the code the user types plus polling

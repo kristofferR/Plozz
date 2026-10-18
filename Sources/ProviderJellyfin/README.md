@@ -27,6 +27,11 @@ supported capability remains at parity.
 
 ## Invariants
 
+- Approved alternate addresses share one resolver across ordinary and interactive
+  API requests. Artwork and newly resolved playback resources use the selected
+  origin, including its reverse-proxy prefix. Public identity probes carry no
+  bearer. Single-address accounts retain their existing zero-probe behavior.
+  Jellyfin and Emby use the same route selection and fallback policy.
 - **No UI imports.** Pure logic + DTOs. Compiles on Linux.
 - **Never logs tokens.** All `Authorization` / `X-MediaBrowser-Token` headers
   flow through `CoreNetworking` redaction.
@@ -36,6 +41,14 @@ supported capability remains at parity.
   implementation; provider-specific branches are limited to API differences.
 - **Co-equal with `ProviderPlex`.** Any new `MediaProvider` capability must be
   implemented here whenever it's implemented for Plex (and vice versa).
+
+## Episode identity and order
+
+`DisplayOrder` is retained as `MediaItem.episodeOrdering` for community-marker
+coordinate conversion, including Jellyfin/Emby's DVD (`altdvd`) and alternate
+(`alttwo`) spellings. Missing order stays absent; unrecognized values stay
+unknown. Episode `ProviderIds.Tvdb` identifies the episode, not its series.
+The owning series provides its separate TVDB ID and order during playback.
 
 ## Library recommendations
 
@@ -95,6 +108,34 @@ Quality remains a prediction of negotiation, not a measurement of server output.
 duplicates, pagination/failure, and matching request/quality profiles for Jellyfin
 and Emby. Universal-profile syntax is defined by released Jellyfin's
 [`UniversalAudioController`](https://github.com/jellyfin/jellyfin/blob/v10.11.0/Jellyfin.Api/Controllers/UniversalAudioController.cs).
+
+## Playback negotiation
+
+Forced conversion disables both `AllowVideoStreamCopy` and
+`AllowAudioStreamCopy` in PlaybackInfo's body and query. Disabling DirectStream
+alone does not prohibit codec copying inside HLS. A rejected forced rendition
+cannot fall back to the same original file or a different requested version.
+Ordinary negotiation and lossless remux retain the server's copy permissions.
+When video encoding is necessary, Automatic chooses the first supported codec
+in the server-issued list rather than replacing `hevc,h264` with H.264.
+
+Negotiation owns its play session until it returns a usable `PlaybackRequest`.
+Detail failures, cancellation, rejected retries, and invalid final locators
+release the owned session. Best-effort remux pins the selected source and
+releases whichever decision is abandoned. Cleanup is awaited independently of
+the caller's cancellation and always includes both device and play-session IDs.
+Server/network cleanup failures remain diagnostic failures, not proof of release.
+
+Protocol references: Jellyfin's pinned
+[`MediaInfoHelper`](https://github.com/jellyfin/jellyfin/blob/e53a6d3e6ae29cb05c55c7b8edf2d237a1f75c16/Jellyfin.Api/Helpers/MediaInfoHelper.cs),
+[`EncodingHelper`](https://github.com/jellyfin/jellyfin/blob/e53a6d3e6ae29cb05c55c7b8edf2d237a1f75c16/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs),
+and [`HlsSegmentController`](https://github.com/jellyfin/jellyfin/blob/e53a6d3e6ae29cb05c55c7b8edf2d237a1f75c16/Jellyfin.Api/Controllers/HlsSegmentController.cs);
+Emby's pinned
+[`PlaybackInfoRequest` and encoding-stop schema](https://github.com/MediaBrowser/Emby.SDK/blob/1faf8176df7ede9152c38f27a5925e6ccaf5e12b/Resources/OpenApi/openapi_v3.json);
+Swiftfin's ordered
+[`AVPlayer transcoding profiles`](https://github.com/jellyfin/Swiftfin/blob/791fe1249e12ffd066c763f28b4291866a14ac49/Shared/Objects/VideoPlayerType/VideoPlayerType%2BAVPlayer.swift).
+`JellyfinPlaybackNegotiationTests` covers both backends, including cancellation
+against a transport that requires an uncancelled cleanup request.
 
 ## Transcode dynamic range
 

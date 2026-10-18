@@ -3,6 +3,70 @@ import Foundation
 import XCTest
 
 final class IPTVSetupDiagnosticTests: XCTestCase {
+    func testLocalReportWorksWithoutConsentAndCannotReplayAfterOptIn() throws {
+        let diagnostics = IPTVSetupDiagnostics()
+        let attempt = try XCTUnwrap(diagnostics.begin(
+            source: .xtream, authentication: .xtream, entry: .addAccount, captureForPresentation: true
+        ))
+        let buffer = SetupDiagnosticBuffer()
+        diagnostics.start { buffer.append($0) }
+        attempt.advance(to: .channels)
+        attempt.willRequest()
+        attempt.received(status: 403, response: .html)
+        attempt.finish(.init(.authentication))
+        XCTAssertTrue(buffer.values.isEmpty)
+        let report = PlaybackDiagnosticReport.setup(try XCTUnwrap(attempt.diagnostic))
+        XCTAssertTrue(report.supportText.contains("stage=channels"))
+        XCTAssertTrue(report.supportText.contains("http_status=403"))
+        XCTAssertTrue(report.supportText.contains("requests=1"))
+        XCTAssertTrue(String(localized: try XCTUnwrap(report.message)).contains("HTTP 403"))
+        attempt.finish()
+        XCTAssertEqual(attempt.diagnostic?.outcome, .failed)
+    }
+
+    func testLocalCaptureDoesNotBypassRemoteAttemptBudget() throws {
+        let diagnostics = IPTVSetupDiagnostics()
+        let buffer = SetupDiagnosticBuffer()
+        diagnostics.start { buffer.append($0) }
+        for _ in 0..<IPTVSetupDiagnostics.maximumAttempts {
+            diagnostics.begin(source: .playlistURL, authentication: .url, entry: .addAccount)?.finish()
+        }
+        let count = buffer.values.count
+        let local = try XCTUnwrap(diagnostics.begin(
+            source: .playlistURL, authentication: .url, entry: .addAccount, captureForPresentation: true
+        ))
+        local.finish(.init(.timeout, networkCode: -1001))
+        XCTAssertEqual(local.diagnostic?.failure?.networkCode, -1001)
+        XCTAssertEqual(buffer.values.count, count)
+    }
+
+    func testStorageFailureDoesNotBlameAnEarlierHTTPResponse() throws {
+        let attempt = try XCTUnwrap(IPTVSetupDiagnostics().begin(
+            source: .playlistURL, authentication: .url, entry: .addAccount, captureForPresentation: true
+        ))
+        attempt.received(status: 503, response: .html)
+        attempt.advance(to: .persistence)
+        attempt.finish(.init(.storage, sqliteCode: 13))
+        let report = PlaybackDiagnosticReport.setup(try XCTUnwrap(attempt.diagnostic))
+        XCTAssertNil(report.message)
+        XCTAssertTrue(report.supportText.contains("stage=persistence"))
+        XCTAssertTrue(report.supportText.contains("sqlite_code=13"))
+    }
+
+    func testHTTPStatusRemainsAnIdentifierAcrossLocales() throws {
+        let attempt = try XCTUnwrap(IPTVSetupDiagnostics().begin(
+            source: .playlistURL, authentication: .url, entry: .addAccount, captureForPresentation: true
+        ))
+        attempt.received(status: 503, response: .html)
+        attempt.finish(.init(.network))
+        let report = PlaybackDiagnosticReport.setup(try XCTUnwrap(attempt.diagnostic))
+        for identifier in ["en", "ar", "fa"] {
+            var message = try XCTUnwrap(report.message)
+            message.locale = Locale(identifier: identifier)
+            XCTAssertTrue(String(localized: message).contains("HTTP 503"), identifier)
+        }
+    }
+
     func testSQLiteCodesAreBoundedAndApplyOnlyToStorageFailures() {
         XCTAssertEqual(IPTVSetupDiagnostic.Failure(.storage, sqliteCode: 13).sqliteCode, 13)
         XCTAssertEqual(IPTVSetupDiagnostic.Failure(.storage, sqliteCode: 1811).sqliteCode, 1811)

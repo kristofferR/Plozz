@@ -6,7 +6,7 @@ import XCTest
 @MainActor
 final class CloudSyncRecoveryFeedbackTests: XCTestCase {
     func testBothActionsUseSharedProgressThenCompletionToast() async {
-        for action in [CloudSyncRecoveryAction.reload, .reset] {
+        for action in [CloudSyncRecoveryAction.reload, .reset, .erase] {
             let presenter = TransientStatusPresenter(announcement: { _ in })
             let status = CloudSyncStatus()
             let gate = RecoveryFeedbackGate()
@@ -38,7 +38,7 @@ final class CloudSyncRecoveryFeedbackTests: XCTestCase {
     }
 
     func testEveryFailureProducesWarningRatherThanSuccess() async {
-        for action in [CloudSyncRecoveryAction.reload, .reset] {
+        for action in [CloudSyncRecoveryAction.reload, .reset, .erase] {
             for result in [CloudSyncRecoveryResult.failed, .unavailable, .interrupted] {
                 let presenter = TransientStatusPresenter(announcement: { _ in })
                 let status = CloudSyncStatus()

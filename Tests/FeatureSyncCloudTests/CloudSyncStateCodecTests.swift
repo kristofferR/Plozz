@@ -1,5 +1,6 @@
 import CoreModels
 import CoreSecureStore
+import CryptoKit
 import Foundation
 import XCTest
 @testable import FeatureSyncCloud
@@ -82,6 +83,39 @@ final class CloudSyncStateCodecTests: XCTestCase {
         XCTAssertEqual(after.count, 2)
         XCTAssertEqual(before.intersection(after).count, 1)
         XCTAssertTrue(try XCTUnwrap(CloudSyncSealedLedger.load(from: file, codec: codec)).hasSamePersistedState(as: expected))
+    }
+
+    func testVersionOneSealedIndexRemainsReadableAndUpgradesWithoutLosingServerBaselines() throws {
+        struct Reference: Codable { let file: UUID; let digest: Data; let bytes: Int }
+        struct Index: Codable {
+            let format: Int
+            let checkpoint: SyncLedger.Checkpoint
+            let records: [String: Reference]
+        }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let file = folder.appendingPathComponent("ledger")
+        let directory = file.appendingPathExtension("entries")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try FileManager.default.removeItem(at: folder) }
+        let codec = CloudSyncStateCodec(context: "fixture", secureStore: CodecTestSecureStore())
+        let value = Data("credential-fixture".utf8)
+        let entry = SyncLedgerEntry(
+            syncedValue: value, syncedEditedAt: 10, systemFields: Data([2]),
+            localValue: value, editedAt: 10, dirty: false, localCaptureDigest: Data([3])
+        )
+        let ledger = SyncLedger(checkpoint: SyncLedger().checkpoint, entries: ["one": entry])
+        let bytes = try JSONEncoder().encode(entry)
+        let reference = Reference(file: UUID(), digest: Data(SHA256.hash(data: bytes)), bytes: bytes.count)
+        let old = directory.appendingPathComponent(reference.file.uuidString + ".sealed")
+        try codec.encode(bytes).write(to: old)
+        try codec.encode(JSONEncoder().encode(Index(
+            format: 1, checkpoint: ledger.checkpoint, records: ["one": reference]
+        ))).write(to: file)
+        XCTAssertTrue(try XCTUnwrap(CloudSyncSealedLedger.load(from: file, codec: codec)).hasSamePersistedState(as: ledger))
+        try CloudSyncSealedLedger.save(ledger, to: file, codec: codec)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: old.path))
+        XCTAssertTrue(CloudSyncStateCodec.isSealed(try Data(contentsOf: file)))
+        XCTAssertTrue(try XCTUnwrap(CloudSyncSealedLedger.load(from: file, codec: codec)).hasSamePersistedState(as: ledger))
     }
 
     func testRejectedSaveKeepsCommittedIndexAndLedgerReadable() throws {

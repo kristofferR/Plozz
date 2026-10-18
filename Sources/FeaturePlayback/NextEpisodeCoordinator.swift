@@ -109,6 +109,7 @@ final class NextEpisodeCoordinator {
     /// path (Jellyfin) calls it from ``maybeStartWindowedNextPrefetch()``.
     func startNextEpisodePrefetch(trigger: String) {
         guard let host, let next = host.nextEpisodeCandidate,
+              host.upNextProvider.kind != .silo,
               !isPreparingHandoff, !didStartNextEpisodePrefetch, prefetchedNext == nil,
               nextEpisodePrefetchTask == nil else { return }
         didStartNextEpisodePrefetch = true
@@ -140,6 +141,9 @@ final class NextEpisodeCoordinator {
     /// range evidence as eager Next. Only HDR playback needs an on-demand probe.
     func prepareHandoff(to episode: MediaItem) async -> PlayerViewModel.PrefetchedPlayback? {
         guard !Task.isCancelled, !isPreparingHandoff else { return nil }
+        // Silo reaps sessions without playback activity independently of their
+        // signed URL expiry. Open only when the incoming player will use it.
+        guard host?.upNextProvider.kind != .silo else { return nil }
         isPreparingHandoff = true
         defer { isPreparingHandoff = false }
         if prefetchTarget?.id == episode.id,

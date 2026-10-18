@@ -5,9 +5,12 @@ import CoreUI
 /// Shared metrics for the Settings detail panes so spacing is consistent (and
 /// tunable in one place) across every feature form.
 enum SettingsMetrics {
-    /// Vertical gap between top-level sections within a detail pane (the enable
-    /// toggle and each headed group). Deliberately generous for the 10-foot UI.
+    /// Legacy split panes and workspace forms share the same control-group spacing.
+    #if os(tvOS)
+    static let sectionSpacing = SettingsFormMetrics.controlSpacing
+    #else
     static let sectionSpacing: CGFloat = 80
+    #endif
 }
 
 /// One row in a Settings master/detail split. The left list shows the row's
@@ -18,6 +21,12 @@ enum SettingsMetrics {
 /// toggle revealing Movies/TV/Anime). Set `indented` for those revealed
 /// children so they read as nested under their parent toggle.
 struct SettingsSplitRow: Identifiable {
+    enum Presentation {
+        case inline
+        case compactRow
+        case labeledControl
+        case page
+    }
     enum SectionStart {
         case heading(Text)
         case divider
@@ -33,6 +42,59 @@ struct SettingsSplitRow: Identifiable {
     let sectionStart: SectionStart?
     let subpage: SettingsDetailSubpage?
     let detail: () -> AnyView
+    var presentation: Presentation = .inline
+    var route: SettingsRoute?
+    var summary: Text?
+    var childRows: (() -> [SettingsSplitRow])?
+    var hasGroupedContent = false
+    var hasIllustratedContent = false
+
+    func illustratedContent() -> Self {
+        var row = self
+        row.hasIllustratedContent = true
+        return row
+    }
+
+    func groupedContent() -> Self {
+        var row = self
+        row.hasGroupedContent = true
+        return row
+    }
+
+    static func page(
+        id: String, title: LocalizedStringResource,
+        rows: @escaping () -> [SettingsSplitRow]
+    ) -> Self {
+        var row = Self(id: id, title: title) { EmptyView() }
+        row.presentation = .page
+        row.childRows = rows
+        return row
+    }
+
+    func page(summary: Text? = nil) -> Self {
+        var row = self
+        row.presentation = .page
+        row.summary = summary
+        return row
+    }
+
+    func compactRow() -> Self {
+        var row = self
+        row.presentation = .compactRow
+        return row
+    }
+
+    func labeledControl() -> Self {
+        var row = self
+        row.presentation = .labeledControl
+        return row
+    }
+
+    func destination(_ route: SettingsRoute) -> Self {
+        var row = self
+        row.route = route
+        return row
+    }
 
     /// A row whose label is app COPY — the common case.
     ///
@@ -149,6 +211,7 @@ struct SettingsSplitLayout: View {
     @State private var focusRestoreGeneration = 0
     #if os(tvOS)
     @Environment(\.resetFocus) private var resetFocus
+    @Environment(\.settingsInWorkspace) private var inWorkspace
     #endif
 
     init(
@@ -191,6 +254,18 @@ struct SettingsSplitLayout: View {
     }
 
     var body: some View {
+        #if os(tvOS)
+        if inWorkspace {
+            SettingsFormLayout(title: Text(title), rows: rows)
+        } else {
+            legacyBody
+        }
+        #else
+        legacyBody
+        #endif
+    }
+
+    private var legacyBody: some View {
         GeometryReader { geo in
             HStack(alignment: .top, spacing: 60) {
                 masterList
@@ -461,7 +536,7 @@ private struct SettingsMasterRowLabel: View {
                     .frame(width: 26)
             }
             row.title
-                .font(.callout.weight(.medium))
+                .font(SettingsRowMetrics.titleFont)
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)
             Spacer(minLength: 12)
@@ -499,7 +574,7 @@ struct SettingsRevealSection<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        SettingsControlRows(nonTVSpacing: 20) {
             Toggle(isOn: $isOn) {
                 Text(masterLabel)
             }
@@ -511,7 +586,7 @@ struct SettingsRevealSection<Content: View>: View {
                             .settingsSectionHeader()
                             .padding(.top, 4)
                     }
-                    content()
+                    SettingsControlRows(nonTVSpacing: 16, content: content)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .transition(.opacity.combined(with: .move(edge: .top)))
@@ -531,19 +606,29 @@ struct SettingsRevealSection<Content: View>: View {
 struct SettingsDetailGroup<Content: View>: View {
     let title: LocalizedStringResource
     var description: LocalizedStringResource? = nil
+    var illustrated = false
     @ViewBuilder var content: () -> Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(title)
                 .settingsSectionHeader()
+                #if os(tvOS)
+                .padding(.horizontal, SettingsFormMetrics.headingInset)
+                #endif
             if let description {
                 Text(description)
                     .settingsSectionDescription()
                     .fixedSize(horizontal: false, vertical: true)
+                    #if os(tvOS)
+                    .padding(.horizontal, SettingsFormMetrics.headingInset)
+                    #endif
             }
-            content()
-                .padding(.top, 4)
+            #if os(tvOS)
+            SettingsControlGroup(illustrated: illustrated, content: content)
+            #else
+            content().padding(.top, 4)
+            #endif
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

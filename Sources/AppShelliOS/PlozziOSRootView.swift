@@ -6,6 +6,7 @@ import CrashReporting
 import FeatureHomeCore
 import FeatureProfiles
 import FeatureSettings
+import FeatureSyncSetup
 import Foundation
 import SwiftUI
 import UIKit
@@ -119,7 +120,7 @@ public struct PlozziOSRootView: View {
         }
         // One opaque cover for profile PIN then Plex PIN. Separate presentations
         // briefly exposed the tab shell between them.
-        .fullScreenCover(isPresented: profileAccessGateBinding) {
+        .plozzFullScreenCover(isPresented: profileAccessGateBinding) {
             PlozziOSProfileAccessGateView(
                 appModel: appModel, onCancel: downloadNotifications.cancelPending
             )
@@ -133,7 +134,7 @@ public struct PlozziOSRootView: View {
         // inside the Settings sheet and is presented from there instead — a cover
         // asked for from this view while Settings is up would never appear. See
         // `ProfileOnboardingOrigin`.
-        .fullScreenCover(isPresented: Binding(
+        .plozzFullScreenCover(isPresented: Binding(
             get: { appModel.isPresentingProfileOnboarding(from: .launch) },
             set: { if !$0 { appModel.cancelProfileOnboarding() } }
         )) {
@@ -149,7 +150,7 @@ public struct PlozziOSRootView: View {
         // the question would gate the watchlist import while nothing ever asked
         // it. The two are mutually exclusive on `isSettingsPresented` so they
         // can't both try.
-        .sheet(item: Binding(
+        .plozzSheet(item: Binding(
             get: { appModel.isSettingsPresented ? nil : appModel.pendingIdentityAccount },
             set: { if $0 == nil { appModel.resolveIdentityPromptForPending() } }
         )) { account in
@@ -174,7 +175,7 @@ public struct PlozziOSRootView: View {
         .onChange(of: appModel.pendingServersNeedingSetup.map(\.id)) { _, _ in
             considerColdLaunchDetection()
         }
-        .fullScreenCover(isPresented: $showDetectedCover, onDismiss: {
+        .plozzFullScreenCover(isPresented: $showDetectedCover, onDismiss: {
             if detectedFollowUpReceive {
                 detectedFollowUpReceive = false
                 showReceiveFromDetected = true
@@ -215,7 +216,7 @@ public struct PlozziOSRootView: View {
                  ? "Sign this device in to “\(syncSetupOfferServerName!)”."
                  : "Send your servers and sign-in so it’s ready to watch.")
         }
-        .sheet(item: serverPromptBinding, onDismiss: consumeServerPromptFollowUp) { descriptor in
+        .plozzSheet(item: serverPromptBinding, onDismiss: consumeServerPromptFollowUp) { descriptor in
             SyncedServerSetupPrompt(
                 descriptor: descriptor,
                 palette: resolvedPalette,
@@ -234,21 +235,19 @@ public struct PlozziOSRootView: View {
             )
             .preferredColorScheme(resolvedPalette.isLight ? .light : .dark)
         }
-        .fullScreenCover(item: $pairingServer) { descriptor in
+        .plozzFullScreenCover(item: $pairingServer) { descriptor in
             PlozziOSSyncSetupReceiveView(appModel: appModel, requestedServer: descriptor) {
                 pairingServer = nil
             }
             .preferredColorScheme(resolvedPalette.isLight ? .light : .dark)
         }
-        .fullScreenCover(isPresented: $showReceiveFromDetected) {
+        .plozzFullScreenCover(isPresented: $showReceiveFromDetected) {
             PlozziOSSyncSetupReceiveView(appModel: appModel) {
                 showReceiveFromDetected = false
             }
             .preferredColorScheme(resolvedPalette.isLight ? .light : .dark)
         }
         .background { AppBackground(palette: resolvedPalette) }
-        .environment(\.themePalette, resolvedPalette)
-        .environment(\.gradientBackgroundsEnabled, appModel.settings.theme.gradientEnabled)
         .environment(\.familyGuidanceProvider, appModel.familyGuidance)
         // See the tvOS root: reading `dynamicTypeSize` is what rebuilds the metrics
         // when the reader's text size changes, rather than only on relaunch.
@@ -308,7 +307,7 @@ public struct PlozziOSRootView: View {
                     ? .resolve($0, records: appModel.downloads.records) : .library
             }
         ))
-        .sheet(
+        .plozzSheet(
             isPresented: $showingAddServer,
             onDismiss: {
                 serverSetupSeed = nil
@@ -328,7 +327,7 @@ public struct PlozziOSRootView: View {
                 .preferredColorScheme(addServerPresentationColorScheme)
                 .presentationSizing(.page)
         }
-        .sheet(
+        .plozzSheet(
             item: plexUserSelectionBinding
         ) { selection in
             PlozziOSPlexUserSelectionView(
@@ -337,7 +336,7 @@ public struct PlozziOSRootView: View {
             )
             .preferredColorScheme(addServerPresentationColorScheme)
         }
-        .sheet(
+        .plozzSheet(
             item: librarySelectionBinding
         ) { selection in
             PlozziOSLibrarySelectionView(
@@ -353,7 +352,7 @@ public struct PlozziOSRootView: View {
         // `item:` the cover tore down and rebuilt on every step change — because
         // FirstRunStep is its own Identifiable id — so the flow dismissed to
         // Home and re-presented between screens. Steps now cross-fade inside it.
-        .fullScreenCover(isPresented: firstRunPresentedBinding) {
+        .plozzFullScreenCover(isPresented: firstRunPresentedBinding) {
             PlozziOSFirstRunView(
                 step: appModel.pendingFirstRunStep,
                 appModel: appModel,
@@ -365,7 +364,7 @@ public struct PlozziOSRootView: View {
                 releaseNotes.prepareForStartup()
             }
         }
-        .sheet(
+        .plozzSheet(
             isPresented: Binding(
                 get: { releaseNotes.hasPendingStartupNotes },
                 set: { presented in
@@ -388,14 +387,25 @@ public struct PlozziOSRootView: View {
                 receivePairingURL(url)
             }
         }
-        .sheet(item: pendingPairingBinding) { pairing in
-            PlozziOSSyncSetupDeepLinkView(
-                appModel: appModel,
-                invite: pairing.invite,
-                onClose: { appModel.pendingPairingInvite = nil }
-            )
+        .plozzSheet(item: pendingPairingBinding) { pairing in
+            Group {
+                if let invite = SyncSetupSourceInvite.decode(pairing.invite) {
+                    PlozziOSSyncSetupReceiveView(
+                        appModel: appModel, sourceInvite: invite,
+                        onClose: { appModel.pendingPairingInvite = nil }
+                    )
+                } else {
+                    PlozziOSSyncSetupDeepLinkView(
+                        appModel: appModel,
+                        invite: pairing.invite,
+                        onClose: { appModel.pendingPairingInvite = nil }
+                    )
+                }
+            }
             .preferredColorScheme(resolvedPalette.isLight ? .light : .dark)
         }
+        .environment(\.themePalette, resolvedPalette)
+        .environment(\.gradientBackgroundsEnabled, appModel.settings.theme.gradientEnabled)
     }
 
     private struct PlozziOSCrashScreenObserver: View {
@@ -1077,6 +1087,7 @@ struct PlozziOSTabShell: View {
                 isActive: effectiveSelectedDestination == .liveTV && !isShowingMorePage,
                 profileID: appModel.profiles.activeProfileID,
                 preferencesNamespace: appModel.profiles.activeNamespace,
+                playbackOrientation: appModel.settings.playback.settings.orientation,
                 accountsProviders: appModel.accountsProviders,
                 authenticatedHTTPResolver: appModel.authenticatedHTTPResolver,
                 connectServer: onAddServer,
@@ -1379,7 +1390,7 @@ struct PlozziOSTabShell: View {
             // when the sheet is actually gone.
             if presented { appModel.noteSettingsPresented(true) }
         }
-        .fullScreenCover(isPresented: $showingProfileSwitcher, onDismiss: {
+        .plozzFullScreenCover(isPresented: $showingProfileSwitcher, onDismiss: {
             // The gates `selectProfile` can raise are covers on the ROOT. Asking
             // for one while this cover is still dismissing can be dropped, and
             // because the gate's binding stays true SwiftUI never re-requests it —
@@ -1404,7 +1415,7 @@ struct PlozziOSTabShell: View {
                 onCancel: { showingProfileSwitcher = false }
             )
         }
-        .sheet(isPresented: $showingSettings, onDismiss: {
+        .plozzSheet(isPresented: $showingSettings, onDismiss: {
             appModel.noteSettingsPresented(false)
             if wantsProfileSwitcher {
                 wantsProfileSwitcher = false
@@ -1497,7 +1508,7 @@ struct PlozziOSTabShell: View {
     /// within that scope, then a real profile or credential change replaces it.
     private var homeContentIdentity: String {
         let credentials = appModel.accounts
-            .map { "\($0.id):\($0.credentialRevision)" }
+            .map(\.connectionScopeKey)
             .sorted()
             .joined(separator: "|")
         let active = appModel.accountsProviders.activeAccountIDs
@@ -1594,7 +1605,7 @@ struct PlozziOSDownloadsTabLabel: View {
 
 // Reject the native transition before it changes navigation insets or scroll position.
 // Rejecting only the SwiftUI selection binding is too late for an action-only tab.
-private struct PlozziOSSettingsTabAction: UIViewControllerRepresentable {
+struct PlozziOSSettingsTabAction: UIViewControllerRepresentable {
     let tabIndex: Int?
     let action: () -> Void
 
@@ -1644,6 +1655,11 @@ private struct PlozziOSSettingsTabAction: UIViewControllerRepresentable {
                         owner = tabs
                     }
                     if tabs.delegate !== self {
+                        // SwiftUI can overlap old and replacement bridges. Never
+                        // chain them: a later layout would link the old one back.
+                        if let previous = tabs.delegate as? Controller {
+                            previous.restore()
+                        }
                         previousDelegate = tabs.delegate
                         tabs.delegate = self
                     }
@@ -1755,7 +1771,7 @@ private struct PlozziOSDestinationView: View {
 
     private var activeAccountsIdentity: String {
         let credentials = appModel.accounts
-            .map { "\($0.id):\($0.credentialRevision)" }
+            .map(\.connectionScopeKey)
             .joined(separator: "|")
         let active = appModel.accountsProviders.activeAccountIDs
             .sorted()
@@ -1931,7 +1947,7 @@ private struct PlozziOSHomeLandingView: View {
                     PlozziOSSettingsAvatarButton(action: onShowSettings)
                 }
             }
-            .fullScreenCover(isPresented: $showingReceive) {
+            .plozzFullScreenCover(isPresented: $showingReceive) {
                 PlozziOSSyncSetupReceiveView(appModel: appModel) { showingReceive = false }
             }
         } else {

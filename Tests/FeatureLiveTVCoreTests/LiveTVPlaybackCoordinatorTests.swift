@@ -405,12 +405,18 @@ final class LiveTVPlaybackCoordinatorTests: XCTestCase {
         let fixture = CoordinatorFixture(replies: ["one": [.init(lease: first), .init(lease: second)]])
         _ = await fixture.coordinator.watch("one").value
         let oldID = try XCTUnwrap(fixture.preparation.current?.id)
-        fixture.coordinator.playbackFailed(oldID)
+        let report = LiveChannelFailureReport(failure: .bufferingTimedOut)
+        fixture.coordinator.playbackFailed(oldID, report: report)
+        XCTAssertEqual(fixture.coordinator.watchFailure?.playbackFailure, report)
+        XCTAssertEqual(fixture.coordinator.watchFailure?.message, report.message)
+        XCTAssertEqual(fixture.preparation.playbackFailure, report)
         XCTAssertNil(fixture.preparation.current)
         XCTAssertFalse(fixture.preview.isExpanded)
         _ = await fixture.coordinator.watch("one").value
+        XCTAssertNil(fixture.preparation.playbackFailure)
         XCTAssertNotEqual(fixture.preparation.current?.id, oldID)
-        fixture.coordinator.playbackFailed(oldID)
+        fixture.coordinator.playbackFailed(oldID, report: report)
+        XCTAssertNil(fixture.preparation.playbackFailure)
         XCTAssertNotNil(fixture.preparation.current)
         let opens = await fixture.provider.opens
         XCTAssertEqual(opens, ["one", "one"])

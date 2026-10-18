@@ -312,7 +312,9 @@ public final class TraktService {
             phase = .disconnected
         } else {
             PlozzLog.app.error("Trakt connection operation failed")
-            phase = .error((error as? AppError ?? .unknown("")).userMessage)
+            let appError: AppError = error is TraktPKCE.CallbackError
+                ? .invalidResponse : (error as? AppError ?? .unknown(""))
+            phase = .error(appError.userMessage)
         }
     }
 }

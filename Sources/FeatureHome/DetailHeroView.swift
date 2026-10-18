@@ -2038,9 +2038,7 @@ private struct SeriesHeroContentLiftModifier: ViewModifier {
 
     private func heroOffset(receded: Bool) -> CGFloat {
         guard model != nil else { return 0 }
-        if reduceMotion {
-            return receded ? -SeriesEpisodeBrowserLayout.heroContentRecedeLift : 0
-        }
+        // This is the resting layout, not optional animation travel.
         return receded
             ? -SeriesEpisodeBrowserLayout.heroContentRecedeLift
             : SeriesEpisodeBrowserLayout.heroContentRestDrop

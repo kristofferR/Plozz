@@ -32,14 +32,22 @@ struct PlayerMenuRowStack: View {
                 VStack(alignment: .leading, spacing: 2) {
                     row.title
                         .font(.body)
-                        .lineLimit(1)
+                        .lineLimit(row.titleLineLimit)
+                    if let facts = row.facts {
+                        facts
+                            .font(.caption2)
+                            .playerMenuRowSecondary()
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if let subtitle = row.subtitle {
                         subtitle
                             .font(.caption2)
                             .playerMenuRowSecondary()
                             .lineLimit(2)
+                            .truncationMode(row.facts == nil ? .tail : .middle)
                     }
                 }
+                .multilineTextAlignment(.leading)
                 if row.isExternal {
                     // Marks a subtitle that isn't embedded in the video — one you
                     // downloaded this session, or a local sidecar file — so it's
@@ -59,6 +67,7 @@ struct PlayerMenuRowStack: View {
         }
         .buttonStyle(PlayerMenuRowButtonStyle())
         .accessibilityIdentifier("player-option-row-\(row.id)")
+        .accessibilityAddTraits(row.isSelected ? .isSelected : [])
         .focusEffectDisabled()
         .focused($focus, equals: .row(row.id))
     }

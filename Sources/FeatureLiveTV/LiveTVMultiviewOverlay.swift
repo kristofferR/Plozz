@@ -654,7 +654,8 @@ private struct LiveTVMultiviewPaneControl: View {
 
             if let failure = pane.preparation.failure {
                 LiveTVMultiviewFailure(
-                    message: failure.userDescription,
+                    message: pane.preparation.playbackFailure?.message ?? failure.userDescription,
+                    report: pane.preparation.playbackFailure.map(PlaybackDiagnosticReport.playback),
                     hasCurrentPicture: pane.preparation.current != nil,
                     retry: retry, replace: replace, editing: editing
                 )
@@ -735,10 +736,12 @@ private struct LiveTVMultiviewCaption: View {
 
 private struct LiveTVMultiviewFailure: View {
     let message: LocalizedStringResource
+    let report: PlaybackDiagnosticReport?
     let hasCurrentPicture: Bool
     let retry: () -> Void
     let replace: () -> Void
     let editing: () -> Void
+    @State private var showsDetails = false
 
     var body: some View {
         ViewThatFits(in: .vertical) {
@@ -751,15 +754,27 @@ private struct LiveTVMultiviewFailure: View {
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: hasCurrentPicture ? nil : .infinity)
         .background(.black.opacity(0.78))
+        .plozzSheet(isPresented: $showsDetails) {
+            if let report { PlaybackDiagnosticDetailsSheet(report: report) }
+        }
     }
 
     private var actions: some View {
         ViewThatFits(in: .horizontal) {
             HStack {
+                if report != nil {
+                    LiveTVMultiviewAction(
+                        title: "Details", symbol: "info.circle",
+                        action: { showsDetails = true }, editing: editing
+                    )
+                }
                 LiveTVMultiviewAction(title: "Retry", symbol: "arrow.clockwise", action: retry, editing: editing)
                 LiveTVMultiviewAction(title: "Replace", symbol: "arrow.triangle.2.circlepath", action: replace, editing: editing)
             }
             HStack {
+                if report != nil {
+                    Button("Details", systemImage: "info.circle") { showsDetails = true }
+                }
                 Button("Retry", systemImage: "arrow.clockwise", action: retry)
                 Button("Replace", systemImage: "arrow.triangle.2.circlepath", action: replace)
             }

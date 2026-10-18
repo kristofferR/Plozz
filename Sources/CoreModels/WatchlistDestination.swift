@@ -138,6 +138,7 @@ public struct WatchlistExternalID: Codable, Hashable, Sendable, Comparable {
         case tmdb
         case tvdb
         case trakt
+        case wetrakr
         case plex
         // The anime catalogues. A universal identity that stops at the five
         // namespaces the film/TV trackers happen to use is not universal — the
@@ -201,6 +202,10 @@ public struct WatchlistMutationTarget: Codable, Hashable, Sendable {
         if let value = item.providerID(.tvdb) {
             ids.append(WatchlistExternalID(namespace: .tvdb, value: value)!)
         }
+        if let value = item.providerID(.wetrakr),
+           let id = WatchlistExternalID(namespace: .wetrakr, value: value) {
+            ids.append(id)
+        }
         if let value = item.providerIDs.first(where: {
             $0.key.caseInsensitiveCompare("Trakt") == .orderedSame
         })?.value, let id = WatchlistExternalID(namespace: .trakt, value: value) {
@@ -238,6 +243,7 @@ public struct WatchlistMutationTarget: Codable, Hashable, Sendable {
             case .imdb: namespace = .imdb
             case .tmdb: namespace = .tmdb
             case .tvdb: namespace = .tvdb
+            case .wetrakr: namespace = .wetrakr
             case .aniList, .seriesAniList: namespace = .aniList
             case .myAnimeList, .seriesMal: namespace = .myAnimeList
             case .aniDB, .seriesAniDB: namespace = .aniDB
@@ -372,6 +378,7 @@ public struct WatchlistDestinationEntry: Codable, Hashable, Sendable {
     /// Account that supplied `presentation` artwork, when it came from a media
     /// provider rather than a tracker.
     public let presentationAccountID: String?
+    public let attribution: MetadataAttribution?
 
     public init?(
         kind: MediaItemKind,
@@ -379,7 +386,8 @@ public struct WatchlistDestinationEntry: Codable, Hashable, Sendable {
         binding: WatchlistDestinationBinding,
         corroboratedProviderBinding: MediaAliasProviderBindingKey? = nil,
         presentation: MediaAliasPresentation? = nil,
-        presentationAccountID: String? = nil
+        presentationAccountID: String? = nil,
+        attribution: MetadataAttribution? = nil
     ) {
         guard kind == .movie || kind == .series else { return nil }
         self.kind = kind
@@ -388,6 +396,7 @@ public struct WatchlistDestinationEntry: Codable, Hashable, Sendable {
         self.corroboratedProviderBinding = corroboratedProviderBinding
         self.presentation = presentation?.sanitizedForSync()
         self.presentationAccountID = presentationAccountID
+        self.attribution = attribution
     }
 
     /// Alias-ledger evidence produced by a successful destination read. Provider
@@ -401,6 +410,7 @@ public struct WatchlistDestinationEntry: Codable, Hashable, Sendable {
             case .imdb: namespace = .imdb
             case .tmdb: namespace = .tmdb
             case .tvdb: namespace = .tvdb
+            case .wetrakr: namespace = .wetrakr
             case .aniList: namespace = .aniList
             case .myAnimeList: namespace = .myAnimeList
             case .aniDB: namespace = .aniDB

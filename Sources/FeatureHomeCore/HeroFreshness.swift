@@ -119,7 +119,7 @@ public struct HeroFreshnessSnapshot: Equatable, Sendable {
     }
 
     public func ranksDiscovery(_ source: HeroSourceKind, settings: HeroSettings) -> Bool {
-        isEnabled && (source == .featured || source == .randomFromLibrary
+        isEnabled && (source == .featured || source == .randomFromLibrary || source == .collection
             || (source == .watchlist && settings.watchlistDiscoveryEnabled))
     }
 
@@ -223,6 +223,8 @@ public struct HeroFreshnessCandidatePool: Codable, Equatable, Sendable {
         history: HeroExposureHistory
     ) -> HeroFreshnessCandidatePool {
         HeroFreshnessCandidatePool(buckets: buckets.map { bucket in
+            // A new membership window must not perpetuate removed collection titles.
+            guard bucket.source != .collection else { return bucket }
             let old = previous.buckets.first { $0.source == bucket.source }?.items ?? []
             let freshTokens = bucket.items.map { HeroDedupe.tokens(for: $0) }
             let retained = old.filter { item in

@@ -1,12 +1,12 @@
 {
-  "originHash" : "c3da85bf8a64d617580795060a70216e0d54664e24c52ee959db2bd730b7f118",
+  "originHash" : "1187e1ddaf830631ae965c5ad2683128e3c441562e582ac46f97645c1d517e83",
   "pins" : [
     {
       "identity" : "aetherengine",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/brandomoore/AetherEngine",
       "state" : {
-        "revision" : "af350b9bf35be106e3f97ecd521e1ab32be0bdd3"
+        "revision" : "299a3d9ea767e2382158c2a3d137c4b1d302ab4a"
       }
     },
     {
@@ -14,8 +14,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/superuser404notfound/FFmpegBuild",
       "state" : {
-        "revision" : "9baf6d00611548ddfbbabda19493d9ff36d336c1",
-        "version" : "3.7.0"
+        "revision" : "013c48bd4d3073428f31cade039ec4ed958d0ceb",
+        "version" : "3.7.1"
       }
     },
     {
@@ -28,12 +28,21 @@
       }
     },
     {
+      "identity" : "libdtsx",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/superuser404notfound/LibDTSX",
+      "state" : {
+        "revision" : "9906f8fe9b72eb4d79a85754adbba6fa52cfe7b2",
+        "version" : "1.0.1"
+      }
+    },
+    {
       "identity" : "libtruehd",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/superuser404notfound/LibTrueHD",
       "state" : {
-        "revision" : "c54b7eb8df054e9a4796a4fe4832650d615d9b49",
-        "version" : "2.2.0"
+        "revision" : "577de495184254e2c660ebfd6ce3f7d97f45899d",
+        "version" : "2.3.0"
       }
     },
     {

@@ -72,6 +72,51 @@ final class JellyfinTicksTests: XCTestCase {
 }
 
 final class JellyfinProviderMappingTests: XCTestCase {
+    func testSeriesOrderingAndExactEpisodeIDsForJellyfinAndEmby() async throws {
+        for kind in [ProviderKind.jellyfin, .emby] {
+            var session = makeSession()
+            session.server.provider = kind
+            let stub = StubHTTPClient()
+            stub.stub(pathSuffix: "/Users/u1/Items/show", json: """
+            {"Id":"show","Type":"Series","DisplayOrder":"altdvd","ProviderIds":{"Tvdb":"81189"}}
+            """)
+            stub.stub(pathSuffix: "/Users/u1/Items/episode", json: """
+            {"Id":"episode","Type":"Episode","SeriesId":"show","ParentIndexNumber":0,"IndexNumber":1,"ProviderIds":{"Tvdb":"349232"}}
+            """)
+            let provider = JellyfinProvider(session: session, http: stub)
+            let series = try await provider.item(id: "show")
+            let episode = try await provider.item(id: "episode")
+            XCTAssertEqual(series.episodeOrdering, .dvd)
+            XCTAssertEqual(series.providerID(.tvdb), "81189")
+            XCTAssertEqual(episode.providerID(.tvdb), "349232")
+            XCTAssertNil(episode.providerID(.seriesTvdb))
+            XCTAssertEqual(episode.seasonNumber, 0)
+            XCTAssertNil(episode.episodeOrdering)
+        }
+        XCTAssertEqual(JellyfinProvider.episodeOrdering("Aired-order"), .aired)
+        XCTAssertEqual(JellyfinProvider.episodeOrdering("alttwo"), .alternate)
+        XCTAssertEqual(JellyfinProvider.episodeOrdering("absolute"), .absolute)
+        XCTAssertEqual(JellyfinProvider.episodeOrdering("dvd2"), .unknown)
+        XCTAssertNil(JellyfinProvider.episodeOrdering(nil))
+    }
+
+    func testSubtitleAccessibilitySurvivesFlagsAndContainerTitles() throws {
+        let provider = JellyfinProvider(session: makeSession(), http: StubHTTPClient())
+        for metadata in [
+            #""IsHearingImpaired":true"#,
+            #""Title":"English [SDH]""#,
+            #""DisplayTitle":"English (CC)""#
+        ] {
+            let json = #"{"Index":2,"Type":"Subtitle","Codec":"subrip","Language":"eng","# + metadata + "}"
+            let dto = try JSONDecoder.plozz.decode(MediaStreamDto.self, from: Data(json.utf8))
+            XCTAssertTrue(provider.map(stream: dto).isHearingImpaired)
+            XCTAssertTrue(try provider.map(subtitleStream: dto, itemID: "movie", sourceID: "file").isHearingImpaired)
+        }
+        let plain = try JSONDecoder.plozz.decode(MediaStreamDto.self, from: Data(
+            #"{"Index":1,"Type":"Subtitle","Codec":"subrip","Language":"hin","Title":"Hindi"}"#.utf8))
+        XCTAssertFalse(provider.map(stream: plain).isHearingImpaired)
+    }
+
     func testEpisodeCountsUseUnplayedCountNotSeriesChildCount() async throws {
         let stub = StubHTTPClient()
         stub.stub(pathSuffix: "/Users/u1/Items", json: """

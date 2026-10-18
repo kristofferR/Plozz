@@ -41,6 +41,7 @@ final class SettingsCommunityPresentationTests: XCTestCase {
             window.frame = CGRect(origin: .zero, size: size)
             window.rootViewController = UIHostingController(rootView:
                 PlozziOSSettingsView(appModel: model, onClose: {}, systemColorScheme: .dark)
+                    .environment(AppLanguageSettingsModel())
                     .environment(\.horizontalSizeClass, .compact)
                     .environment(\.dynamicTypeSize, textSize)
                     .environment(\.locale, Locale(identifier: "en_US"))
@@ -119,25 +120,52 @@ final class SettingsCommunityPresentationTests: XCTestCase {
         }
     }
 
-    func testExpandedCommunityCodesRemainScannableOnNarrowPhone() async throws {
-        let content = ScrollView {
-            PlozziOSCommunitySettingsSection(showsQRCodes: true)
-        }
-        .settingsPageSurface()
-        _ = try await renderedText(
-            content, size: CGSize(width: 320, height: 568),
-            light: false, name: "compact-expanded-community"
-        )
+    func testMobileCommunityUsesCompactSingleLineLinksWithoutSubtitlesOrQRCodes() async throws {
         let detector = try XCTUnwrap(CIDetector(
             ofType: CIDetectorTypeQRCode,
             context: CIContext(options: [.useSoftwareRenderer: true]),
             options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]
         ))
-        let urls = capturedImages.flatMap { image in
-            detector.features(in: CIImage(cgImage: image))
-                .compactMap { ($0 as? CIQRCodeFeature)?.messageString }
+        for light in [false, true] {
+            for width: CGFloat in [320, 390, 768] {
+                for textSize in [DynamicTypeSize.large, .accessibility3] {
+                    capturedImages.removeAll(keepingCapacity: true)
+                    let content = ScrollView {
+                        PlozziOSCommunitySettingsSection()
+                    }
+                    .settingsPageSurface()
+                    .environment(\.dynamicTypeSize, textSize)
+                    let text = try await renderedText(
+                        content, size: CGSize(width: width, height: 568),
+                        light: light, name: "compact-community-\(Int(width))-\(light)-\(textSize)",
+                        initialOnly: true
+                    )
+                    assertCommunity(in: text)
+                    let image = try XCTUnwrap(capturedImages.last)
+                    XCTAssertTrue(detector.features(in: CIImage(cgImage: image)).isEmpty,
+                                  "Mobile Settings should offer direct links, not scannable codes.")
+                    let request = VNRecognizeTextRequest()
+                    request.recognitionLevel = .accurate
+                    request.recognitionLanguages = ["en-US"]
+                    try VNImageRequestHandler(cgImage: image).perform([request])
+                    func bounds(for label: String) throws -> CGRect {
+                        let candidate = try XCTUnwrap(request.results?.compactMap {
+                            $0.topCandidates(1).first
+                        }.first { $0.string.contains(label) })
+                        let range = try XCTUnwrap(candidate.string.range(of: label))
+                        return try XCTUnwrap(candidate.boundingBox(for: range)).boundingBox
+                    }
+                    let discord = try bounds(for: "Discord")
+                    let github = try bounds(for: "GitHub")
+                    XCTAssertGreaterThan(discord.minY, github.maxY, "Each link must occupy its own readable row.")
+                    if textSize == .large {
+                        let rowSpacing = (discord.midY - github.midY) * CGFloat(image.height)
+                        XCTAssertGreaterThanOrEqual(rowSpacing, 44, "Keep a usable native touch target.")
+                        XCTAssertLessThanOrEqual(rowSpacing, 56, "Community links should be standard-height rows.")
+                    }
+                }
+            }
         }
-        XCTAssertEqual(Set(urls), [AppLinks.discord.absoluteString, AppLinks.repository.absoluteString])
     }
 
     func testCommunityArtworkIsAvailableInMobileAppResources() throws {
@@ -145,6 +173,44 @@ final class SettingsCommunityPresentationTests: XCTestCase {
             let image = try XCTUnwrap(UIImage(named: asset), "\(asset) must be bundled for iOS, not only tvOS.")
             XCTAssertGreaterThan(image.size.width, 0)
             XCTAssertGreaterThan(image.size.height, 0)
+        }
+    }
+
+    func testMozzUsesOfficialLightAndDarkAppIconResources() throws {
+        let light = try XCTUnwrap(UIImage(
+            named: "MozzAppIcon", in: .main, compatibleWith: UITraitCollection(userInterfaceStyle: .light)
+        ))
+        let dark = try XCTUnwrap(UIImage(
+            named: "MozzAppIcon", in: .main, compatibleWith: UITraitCollection(userInterfaceStyle: .dark)
+        ))
+        for image in [light, dark] {
+            XCTAssertEqual(image.size.width, image.size.height)
+            XCTAssertGreaterThanOrEqual(image.size.width, 144)
+        }
+        XCTAssertNotEqual(light.pngData(), dark.pngData(), "Preserve Mozz's separate official dark icon.")
+        XCTAssertEqual(AppLinks.mozzTestFlight.absoluteString, "https://testflight.apple.com/join/dmeawSSM")
+    }
+
+    func testMozzBetaRowStaysReadableOnPhoneAndPadInBothThemes() async throws {
+        for light in [false, true] {
+            for (width, textSize) in [
+                (320.0, DynamicTypeSize.large), (320.0, .accessibility3), (768.0, .large)
+            ] {
+                let text = try await renderedText(
+                    ScrollView {
+                        PlozziOSMoreAppsSettingsSection()
+                    }
+                    .settingsPageSurface()
+                    .environment(\.dynamicTypeSize, textSize),
+                    size: CGSize(width: width, height: 900), light: light,
+                    name: "mozz-beta-\(width)-\(light)-\(textSize)", initialOnly: true
+                )
+                let readable = text.replacingOccurrences(of: "- ", with: "")
+                    .replacingOccurrences(of: "-", with: "")
+                for label in ["Mozz", "Free, open-source music player", "TestFlight public beta"] {
+                    XCTAssertTrue(readable.contains(label.replacingOccurrences(of: "-", with: "")), text)
+                }
+            }
         }
     }
 
@@ -160,34 +226,125 @@ final class SettingsCommunityPresentationTests: XCTestCase {
                     onClose: {},
                     systemColorScheme: light ? .light : .dark
                 )
+                .environment(AppLanguageSettingsModel())
                 .environment(\.horizontalSizeClass, .compact)
                 let text = try await renderedText(
                     content, size: size, light: light,
                     name: "compact-settings-community-\(Int(size.width))-\(light)"
                 )
                 assertCommunity(in: text)
+                XCTAssertTrue(text.contains("Mozz"), text)
+                XCTAssertTrue(text.contains("TestFlight public beta"), text)
                 XCTAssertTrue(text.contains("Help & Diagnostics"), text)
                 XCTAssertTrue(text.contains("Version"), text)
             }
         }
     }
 
-    func testRegularAboutKeepsCommunityLinksInBothThemes() async throws {
+    func testRegularSettingsExposeCommunityLinksInBothThemes() async throws {
+        let model = PlozziOSAppModel()
+        let originalTheme = model.settings.theme.theme
+        defer { model.settings.theme.theme = originalTheme }
         for light in [false, true] {
+            model.settings.theme.theme = light ? .light : .dark
             for size in [CGSize(width: 768, height: 1024), CGSize(width: 844, height: 390)] {
-                let content = NavigationStack {
-                    PlozziOSAboutSettingsView(
-                        hasAccounts: false,
-                        isKidsProfile: false,
-                        onSignOutAll: {}
-                    )
-                }
+                let content = PlozziOSSettingsView(
+                    appModel: model, onClose: {}, systemColorScheme: light ? .light : .dark
+                )
+                .environment(AppLanguageSettingsModel())
+                .environment(\.horizontalSizeClass, .regular)
                 let text = try await renderedText(
                     content, size: size, light: light,
-                    name: "regular-about-community-\(Int(size.width))-\(light)"
+                    name: "regular-settings-community-\(Int(size.width))-\(light)",
+                    leadingColumn: true
                 )
                 assertCommunity(in: text)
+                XCTAssertTrue(text.contains("Mozz"), text)
+                XCTAssertTrue(text.contains("TestFlight public beta"), text)
+                XCTAssertTrue(text.contains("Help & Diagnostics"), text)
+                XCTAssertTrue(text.contains("Version"), text)
             }
+        }
+    }
+
+    func testLibrarySourceNamesStayInlineWithAdaptiveOverflow() async throws {
+        let accounts: [Account] = [
+            ("plex", "Family Plex", ProviderKind.plex),
+            ("jellyfin", "Cinema Server", .jellyfin),
+            ("smb", "Archive NAS", .mediaShare),
+            ("silo", "Weekend Silo", .silo)
+        ].map { id, name, provider in
+            Account(
+                id: id,
+                server: MediaServer(
+                    id: id, name: name, baseURL: URL(string: "https://\(id).example.test")!,
+                    provider: provider
+                ),
+                userID: id, userName: id, deviceID: "test"
+            )
+        }
+        for (width, typeSize) in [
+            (320.0, DynamicTypeSize.large), (320.0, .accessibility3),
+            (390.0, .large), (768.0, .large)
+        ] {
+            let label = ScrollView {
+                SettingsSectionGroup {
+                    PlozziOSSettingsCategoryLabel(
+                        category: .libraries, accounts: accounts, isAccountIncluded: { _ in true }
+                    )
+                }
+            }
+            .settingsPageSurface()
+            .dynamicTypeSize(typeSize)
+            let text = try await renderedText(
+                label, size: CGSize(width: width, height: 844), light: false,
+                name: "library-sources-\(width)-\(typeSize)", initialOnly: true
+            )
+            if typeSize.isAccessibilitySize {
+                XCTAssertTrue(text.contains("Fam"), "Keep part of the source name, not only an ellipsis: \(text)")
+                XCTAssertTrue(text.contains("+3"), text)
+            } else {
+                XCTAssertTrue(text.contains("Family Plex"), text)
+                let visibleCount = ["Family Plex", "Cinema Server", "Archive NAS"]
+                    .filter { text.contains($0) }.count
+                XCTAssertTrue(text.contains("+\(4 - visibleCount) more"), text)
+                if width == 768 { XCTAssertEqual(visibleCount, 3, text) }
+            }
+            XCTAssertFalse(text.contains("Weekend Silo"), text)
+            try assertLibrarySourcesShareOneLine()
+        }
+        let label = ScrollView {
+            SettingsSectionGroup {
+                PlozziOSSettingsCategoryLabel(
+                    category: .libraries, accounts: accounts, isAccountIncluded: { $0 == "silo" }
+                )
+            }
+        }
+        .settingsPageSurface()
+        let text = try await renderedText(
+            label, size: CGSize(width: 320, height: 568), light: false,
+            name: "library-profile-selection", initialOnly: true
+        )
+        XCTAssertTrue(text.contains("Weekend Silo"), text)
+        XCTAssertFalse(text.contains("Family Plex"), text)
+        XCTAssertFalse(text.contains("more"), text)
+        try assertLibrarySourcesShareOneLine()
+    }
+
+    private func assertLibrarySourcesShareOneLine(file: StaticString = #filePath, line: UInt = #line) throws {
+        let image = try XCTUnwrap(capturedImages.last)
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["en-US"]
+        try VNImageRequestHandler(cgImage: image).perform([request])
+        let sources = (request.results ?? []).filter {
+            $0.topCandidates(1).first?.string.contains("Libraries") == false
+        }
+        let midpoints = sources.map { $0.boundingBox.midY * CGFloat(image.height) }
+        let first = try XCTUnwrap(midpoints.first, file: file, line: line)
+        for midpoint in midpoints {
+            XCTAssertEqual(midpoint, first, accuracy: 5,
+                           "Source names and overflow must share one line.", file: file, line: line)
         }
     }
 
@@ -221,13 +378,17 @@ final class SettingsCommunityPresentationTests: XCTestCase {
     }
 
     private func assertCommunity(in text: String, file: StaticString = #filePath, line: UInt = #line) {
-        for label in ["Discord", "GitHub", "QR Codes"] {
+        for label in ["Discord", "GitHub"] {
             XCTAssertTrue(text.contains(label), "Missing \(label): \(text)", file: file, line: line)
+        }
+        for label in ["QR Codes", "Join the community", "Source code and issues"] {
+            XCTAssertFalse(text.contains(label), "Remove redundant mobile community content: \(text)", file: file, line: line)
         }
     }
 
     private func renderedText(
-        _ content: some View, size: CGSize, light: Bool, name: String, initialOnly: Bool = false
+        _ content: some View, size: CGSize, light: Bool, name: String,
+        initialOnly: Bool = false, leadingColumn: Bool = false
     ) async throws -> String {
         let deadline = ContinuousClock.now + .seconds(5)
         while !UIApplication.shared.connectedScenes.contains(where: { $0.activationState == .foregroundActive }),
@@ -254,7 +415,13 @@ final class SettingsCommunityPresentationTests: XCTestCase {
         }
         window.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(200))
-        let scroll = try XCTUnwrap(scrollViews(in: window).first)
+        let scrolls = scrollViews(in: window)
+        // UIKit reports the detail collection as full-width; the narrow scroll owns the sidebar.
+        let scroll = try XCTUnwrap(leadingColumn ? scrolls.first {
+            $0.bounds.width > 0 && $0.bounds.width < window.bounds.width / 2
+        } : scrolls.first, scrolls.map {
+            "\(type(of: $0)): \($0.accessibilityIdentifier ?? "unidentified") \($0.frame)"
+        }.joined(separator: "\n"))
         if initialOnly {
             XCTAssertLessThanOrEqual(scroll.contentSize.width, scroll.bounds.width + 1)
             return try recognizedText(in: window, name: name)
@@ -269,14 +436,19 @@ final class SettingsCommunityPresentationTests: XCTestCase {
             window.layoutIfNeeded()
         }
         XCTAssertLessThanOrEqual(scroll.contentSize.width, scroll.bounds.width + 1)
-        let bottomText = try recognizedText(in: window, name: "\(name)-bottom")
-        scroll.setContentOffset(CGPoint(
-            x: 0,
-            y: max(-scroll.adjustedContentInset.top, scroll.contentOffset.y - scroll.bounds.height * 0.55)
-        ), animated: false)
-        try await Task.sleep(for: .milliseconds(100))
-        window.layoutIfNeeded()
-        return bottomText + " " + (try recognizedText(in: window, name: "\(name)-above-bottom"))
+        var text = try recognizedText(in: window, name: "\(name)-bottom")
+        for index in 0..<12 {
+            let top = -scroll.adjustedContentInset.top
+            if scroll.contentOffset.y <= top { return text }
+            scroll.setContentOffset(CGPoint(
+                x: 0, y: max(top, scroll.contentOffset.y - scroll.bounds.height * 0.55)
+            ), animated: false)
+            try await Task.sleep(for: .milliseconds(100))
+            window.layoutIfNeeded()
+            text += " " + (try recognizedText(in: window, name: "\(name)-above-bottom-\(index)"))
+        }
+        XCTFail("The bounded capture did not reach the top of \(name).")
+        return text
     }
 
     private func recognizedText(in window: UIWindow, name: String) throws -> String {
@@ -299,7 +471,7 @@ final class SettingsCommunityPresentationTests: XCTestCase {
     }
 
     private func scrollViews(in view: UIView) -> [UIScrollView] {
-        (view as? UIScrollView).map { [$0] } ?? view.subviews.flatMap { scrollViews(in: $0) }
+        ((view as? UIScrollView).map { [$0] } ?? []) + view.subviews.flatMap { scrollViews(in: $0) }
     }
 }
 #endif

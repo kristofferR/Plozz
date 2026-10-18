@@ -150,6 +150,7 @@ public actor CloudConfigSyncService {
         let schema: CloudSyncSchemaDescriptor
         let stateFileURL: URL
         let stateCodec: CloudSyncStateCodec?
+        let usesRecordLedger: Bool
         let captureSnapshot: (@Sendable (SyncChannelSnapshot) async throws -> [SyncRecordID: Data])?
         let applySnapshot: (@Sendable (SyncChannelSnapshot) async -> Void)?
         let snapshotAuthority: @Sendable () -> String
@@ -173,6 +174,7 @@ public actor CloudConfigSyncService {
             isHydrated: @escaping @Sendable () -> Bool,
             ledger: SyncLedger,
             stateCodec: CloudSyncStateCodec? = nil,
+            usesRecordLedger: Bool = false,
             captureSnapshot: (@Sendable (SyncChannelSnapshot) async throws -> [SyncRecordID: Data])? = nil,
             applySnapshot: (@Sendable (SyncChannelSnapshot) async -> Void)? = nil,
             snapshotAuthority: @escaping @Sendable () -> String = { "" }
@@ -186,19 +188,32 @@ public actor CloudConfigSyncService {
             self.isHydrated = isHydrated
             self.ledger = ledger
             self.stateCodec = stateCodec
+            self.usesRecordLedger = usesRecordLedger || stateCodec != nil
             self.captureSnapshot = captureSnapshot
             self.applySnapshot = applySnapshot
             self.snapshotAuthority = snapshotAuthority
             self.ledgerAuthority = captureSnapshot == nil ? nil : snapshotAuthority()
         }
 
-        func snapshot(deleted: Set<SyncRecordID> = []) -> SyncChannelSnapshot {
+        func captureReceipts(for names: [SyncRecordID]) -> [SyncRecordID: Data] {
+            var result: [SyncRecordID: Data] = [:]
+            for name in names { result[name] = ledger.entries[name]?.localCaptureDigest }
+            return result
+        }
+
+        func snapshot(
+            deleted: Set<SyncRecordID> = [], changes: SyncLocalChanges = [:],
+            deletedCaptureDigests: [SyncRecordID: Data] = [:]
+        ) -> SyncChannelSnapshot {
             snapshotSequence += 1
             return SyncChannelSnapshot(
                 sequence: snapshotSequence, authority: ledgerAuthority ?? snapshotAuthority(),
                 records: ledger.entries.filter { !$0.value.pendingDelete }.mapValues(\.localValue),
                 deleted: deleted,
-                localCaptureDigests: ledger.entries.compactMapValues(\.localCaptureDigest)
+                localCaptureDigests: deletedCaptureDigests.merging(
+                    ledger.entries.compactMapValues(\.localCaptureDigest)
+                ) { _, current in current },
+                changes: changes
             )
         }
     }
@@ -264,6 +279,8 @@ public actor CloudConfigSyncService {
     /// Bumped every time the engine is rebuilt; events from an older engine are
     /// ignored (generation fencing).
     private var engineGeneration = 0
+    private var accountGeneration = 0
+    private var isReconcilingInventory = false
     /// Set after an iCloud account SWITCH: blocks publishing until we've successfully
     /// fetched the new account's real state, so this device never uploads the previous
     /// household's config into a different Apple ID before learning what's there.
@@ -281,6 +298,7 @@ public actor CloudConfigSyncService {
     /// SHARED: a token reset rebuilds the ONE engine, so every channel's zone is
     /// re-fetched from scratch together.
     private var isFullResyncing = false
+    private var isErasing = false
     /// False after `deactivate()`; true again after the next `activate()`. Fences
     /// every public entry point AND every delegate callback, so a disabled service
     /// can neither publish nor process CloudKit events even if a stale `engine`
@@ -333,6 +351,7 @@ public actor CloudConfigSyncService {
                 stateCodec: extra.stateCodec ?? (schema.encryptsValue
                     ? .deviceLocal(context: configuration.containerIdentifier + ":" + schema.zoneName)
                     : nil),
+                usesRecordLedger: extra.schema == .liveTVStateV1,
                 captureSnapshot: extra.captureSnapshot, applySnapshot: extra.applySnapshot,
                 snapshotAuthority: extra.snapshotAuthority
             ))
@@ -401,6 +420,43 @@ public actor CloudConfigSyncService {
         Task { @MainActor in status.syncedRecordCount = total }
     }
 
+    /// On demand only: opening diagnostics must not parse credentials, fetch CloudKit
+    /// or add a full-ledger scan to the normal status-update path.
+    public func dataInventory() throws -> SyncDataInventory {
+        guard restorePersistedStateIfNeeded() else { throw CocoaError(.fileReadCorruptFile) }
+        var inventory = SyncDataInventory()
+        for channel in channels {
+            inventory.include(channel.ledger) { name in
+                switch channel.schema.recordType {
+                case CloudSyncSchemaDescriptor.configV3.recordType:
+                    switch SyncRecordKey.parse(name)?.kind {
+                    case .profile: .profiles
+                    case .membership: .profileAccess
+                    case .descriptor: .servers
+                    case .setting: .settings
+                    case .removal: .bookkeeping
+                    case nil: .other
+                    }
+                case CloudSyncSchemaDescriptor.trackerTokensV1.recordType:
+                    channel.schema.zoneName.hasPrefix(CloudSyncSchemaDescriptor.liveTVSourcesV1.zoneName)
+                        ? .liveTVSources : .trackerSignIns
+                case CloudSyncSchemaDescriptor.mediaStateV1.recordType:
+                    if channel.schema.zoneName.hasPrefix(CloudSyncSchemaDescriptor.liveTVStateV1.zoneName) {
+                        .liveTVPreferences
+                    } else if WatchlistMediaStateRecordKey.parse(name) != nil {
+                        .watchlist
+                    } else if MediaStateRecordKey.parse(name) != nil {
+                        .mediaMatches
+                    } else {
+                        .other
+                    }
+                default: .other
+                }
+            }
+        }
+        return inventory
+    }
+
     private static func ckCodeName(_ error: CKError) -> String { "\(error.code) (\(error.code.rawValue))" }
 
     /// A fetch of the CURRENT account succeeded (or real data arrived): the server
@@ -419,6 +475,7 @@ public actor CloudConfigSyncService {
     /// peer), then publish genuine local diffs for every channel. Safe to call
     /// repeatedly. Re-arms the service if a prior `deactivate()` had fenced it.
     public func activate() async {
+        guard !isErasing else { return }
         isActive = true
         guard config.isEnabled() else {
             deactivate()
@@ -437,6 +494,7 @@ public actor CloudConfigSyncService {
             return
         }
         guard await accountIsAvailable() else { setStatus(.signedOut); return }
+        guard !isErasing, isActive, config.isEnabled() else { return }
         ensureEngine()
         guard let engine else { return }
         setStatus(.idle)
@@ -548,6 +606,7 @@ public actor CloudConfigSyncService {
         guard isActive, engine === self.engine else { return }
         try? await sendChangesDetached(engine)
         reportRecordCount()
+        await reconcileServerInventoryIfDue()
     }
 
     /// Manual "Sync Now": fetch → publish (every channel) → send.
@@ -569,12 +628,15 @@ public actor CloudConfigSyncService {
         do { try await sendChangesDetached(engine) } catch {
             if syncError == nil { syncError = error }
         }
+        let inventoryReconciled = syncError == nil ? await reconcileServerInventory() : false
         reportRecordCount()
         if let syncError {
             setDiagnostic("sync: \(Self.describe(syncError))")
             setStatus(.error, error: (syncError as NSError).localizedDescription)
-        } else {
+        } else if inventoryReconciled {
             setStatus(.idle, syncedNow: true)
+        } else {
+            setStatus(.error)
         }
     }
 
@@ -605,7 +667,7 @@ public actor CloudConfigSyncService {
     /// creates is deliberate and safe.
     @discardableResult
     public func publishLocalChanges(bypassBaselineGate: Bool = false) async -> Bool {
-        guard isActive, config.isEnabled(), let engine else { return false }
+        guard !isErasing, isActive, config.isEnabled(), let engine else { return false }
         var completed = true
         for channel in channels {
             let published = await publish(channel, engine: engine, bypassBaselineGate: bypassBaselineGate)
@@ -620,7 +682,7 @@ public actor CloudConfigSyncService {
     /// they're shared rather than per-channel.
     private func publish(_ channel: Channel, engine: CKSyncEngine, bypassBaselineGate: Bool) async -> Bool {
         let generation = engineGeneration
-        guard isActive, engine === self.engine else { return false }
+        guard !isErasing, isActive, engine === self.engine else { return false }
         guard !suspendPublishUntilFetch else {
             PlozzLog.sync.info("CloudSync[\(channel.schema.zoneName)]: publish skipped — suspended pending account-switch fetch")
             return false
@@ -662,7 +724,7 @@ public actor CloudConfigSyncService {
             } else {
                 desired = await channel.captureRecords(channel.ledger.syncedValues())
             }
-            guard isActive, engine === self.engine, generation == engineGeneration, config.isEnabled() else { return false }
+            guard !isErasing, isActive, engine === self.engine, generation == engineGeneration, config.isEnabled() else { return false }
             if channel.ledger.remoteRevision == rev { stabilized = true; break }
         }
         // S4: if a remote apply kept interleaving every capture, the snapshot may
@@ -724,6 +786,76 @@ public actor CloudConfigSyncService {
         }
         for channel in channels { channel.ledger = SyncLedger() }
         return persist() ? .completed : .failed
+    }
+
+    /// Explicit household erasure, including records this device never mirrored
+    /// and direct tracker records. Keeps zones so peers receive normal deletions.
+    /// The engine is drained before the shell switches sync off; it stays stopped
+    /// on failure too, so a partial erase cannot silently republish local data.
+    public func eraseAllServerData(
+        trackerStores: [any TraktTokenStoring] = [],
+        authorized: @escaping @Sendable () async -> Bool,
+        stopSync: @escaping @Sendable () async -> Void
+    ) async -> CloudSyncRecoveryResult {
+        guard !isErasing else { return .interrupted }
+        guard hasCloudKitEntitlement,
+              ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
+              NSClassFromString("XCTestCase") == nil else { return .unavailable }
+        isErasing = true
+        defer { isErasing = false }
+        guard await authorized(), await accountIsAvailable() else { return .unavailable }
+        do {
+            let accountID = try await container.userRecordID()
+            guard await authorized() else { return .interrupted }
+            let previousEngine = engine
+            deactivate()
+            if let previousEngine {
+                await Task.detached(priority: .userInitiated) {
+                    await previousEngine.cancelOperations()
+                }.value
+            }
+            await stopSync()
+            let database = container.privateCloudDatabase
+            let zones = Array(Set(channels.flatMap { channel in
+                [channel.schema.zoneID] + channel.schema.legacyZoneIDs
+            }))
+            try await TraktSharedRefresh.shared.withCloudErasure(stores: trackerStores) {
+                try await CloudSyncErasure.run(
+                    zones: zones,
+                    validate: { try await self.validateErasure(accountID: accountID, authorized: authorized) },
+                    records: { try await CloudSyncErasure.recordIDs(in: $0, database: database) },
+                    delete: { try await CloudSyncErasure.delete($0, database: database) }
+                )
+            }
+            guard clearErasedLocalState() else { return .failed }
+            reportRecordCount()
+            return .completed
+        } catch is CancellationError {
+            return .interrupted
+        } catch CloudSyncErasure.Failure.authorizationChanged {
+            setDiagnostic("Erase interrupted by a profile or iCloud account change.")
+            return .interrupted
+        } catch {
+            PlozzLog.sync.error("CloudSync: erase failed (code \((error as NSError).code)); local reset not completed")
+            setDiagnostic("Could not finish erasing synced data; some records may already be deleted.")
+            return .failed
+        }
+    }
+
+    private func validateErasure(
+        accountID: CKRecord.ID, authorized: @Sendable () async -> Bool
+    ) async throws {
+        guard await authorized(), try await container.userRecordID() == accountID else {
+            throw CloudSyncErasure.Failure.authorizationChanged
+        }
+    }
+
+    func clearErasedLocalState() -> Bool {
+        guard restorePersistedStateIfNeeded() else { return false }
+        for channel in channels { channel.ledger = SyncLedger() }
+        engineState = nil
+        didConfirmServerState = false
+        return persist()
     }
 
     /// Erase this app's synced config from iCloud and RE-SEED it from THIS device's
@@ -804,6 +936,7 @@ public actor CloudConfigSyncService {
             markServerStateConfirmed()
             var confirmedDeletedByZone: [String: Set<SyncRecordID>] = [:]
             var finalizedByZone: [String: SyncLocalChanges] = [:]
+            var deletedCaptureDigestsByZone: [String: [SyncRecordID: Data]] = [:]
             for channel in channels {
                 // A fetch that omitted a record is NOT proof the record is gone: CloudKit
                 // reads are eventually consistent, so a record a peer saved moments ago
@@ -829,6 +962,9 @@ public actor CloudConfigSyncService {
                 confirmedDeletedByZone[channel.schema.zoneName] = confirmedDeleted
             }
             for channel in channels {
+                deletedCaptureDigestsByZone[channel.schema.zoneName] = channel.captureReceipts(
+                    for: Array(confirmedDeletedByZone[channel.schema.zoneName, default: []])
+                )
                 finalizedByZone[channel.schema.zoneName] = channel.ledger
                     .endFullResync(
                         confirmedDeleted: confirmedDeletedByZone[
@@ -845,7 +981,10 @@ public actor CloudConfigSyncService {
                       !finalized.isEmpty else {
                     continue
                 }
-                await apply(finalized, to: channel)
+                await apply(
+                    finalized, to: channel,
+                    deletedCaptureDigests: deletedCaptureDigestsByZone[channel.schema.zoneName, default: [:]]
+                )
             }
             guard isActive, engine === self.engine else { return .interrupted }
             // Requeue anything still dirty / pending-delete without re-stamping.
@@ -901,6 +1040,7 @@ public actor CloudConfigSyncService {
     /// required for a valid full resync (`redownloadFromCloud`). Otherwise the change
     /// token is preserved.
     private func rebuildEngine(resetState: Bool) {
+        guard !isErasing else { return }
         guard restorePersistedStateIfNeeded() else { return }
         engineGeneration += 1
         if resetState { engineState = nil }
@@ -980,10 +1120,15 @@ public actor CloudConfigSyncService {
         await Task.detached(priority: .userInitiated, operation: body).value
     }
 
-    private func apply(_ changes: SyncLocalChanges, to channel: Channel) async {
+    private func apply(
+        _ changes: SyncLocalChanges, to channel: Channel, deletedCaptureDigests: [SyncRecordID: Data] = [:]
+    ) async {
         guard persist() else { return }
         if let applySnapshot = channel.applySnapshot {
-            let snapshot = channel.snapshot(deleted: Set(changes.filter { $0.value == nil }.keys))
+            let snapshot = channel.snapshot(
+                deleted: Set(changes.filter { $0.value == nil }.keys), changes: changes,
+                deletedCaptureDigests: deletedCaptureDigests
+            )
             await outsideDelegateContext { await applySnapshot(snapshot) }
         } else {
             let applyRecords = channel.applyRecords
@@ -1034,9 +1179,9 @@ public actor CloudConfigSyncService {
             var needsFullFetch = false
             let additional: [(ledger: SyncLedger, authority: String?)] = try channels.dropFirst().map { channel in
                 let authority = channel.currentAuthority
-                if let codec = channel.stateCodec {
+                if channel.usesRecordLedger {
                     let ledger = try CloudSyncSealedLedger.load(
-                        from: channel.stateFileURL, codec: codec, authority: authority
+                        from: channel.stateFileURL, codec: channel.stateCodec, authority: authority
                     )
                     if ledger == nil { needsFullFetch = true }
                     return (ledger ?? SyncLedger(), authority)
@@ -1102,41 +1247,49 @@ public actor CloudConfigSyncService {
     /// failure can never destroy a record.
     private func verifyDeletionCandidates(
         _ names: [SyncRecordID], schema: CloudSyncSchemaDescriptor
-    ) async -> (confirmedDeleted: Set<SyncRecordID>, stillPresent: [SyncRemoteRecord]) {
+    ) async -> (confirmedDeleted: Set<SyncRecordID>, stillPresent: [SyncRemoteRecord], completed: Bool) {
         var confirmed: Set<SyncRecordID> = []
         var present: [SyncRemoteRecord] = []
+        var completed = true
         let database = container.privateCloudDatabase
         // Chunked so a large candidate set can't exceed CloudKit's per-request limits.
         for chunk in stride(from: 0, to: names.count, by: 200).map({
             Array(names[$0..<min($0 + 200, names.count)])
         }) {
+            guard !Task.isCancelled else { return (confirmed, present, false) }
             let ids = chunk.map { schema.recordID(forRecordName: $0) }
             do {
                 let results = try await database.records(for: ids)
+                if results.count != ids.count { completed = false }
                 for (id, result) in results {
                     switch result {
                     case .success(let record):
                         if let decoded = SyncRemoteRecord(ckRecord: record, schema: schema) {
                             present.append(decoded)
+                        } else {
+                            completed = false
+                            setDiagnostic("Existence check returned an invalid record in \(schema.zoneName); keeping local data.")
                         }
                     case .failure(let error):
                         if let ckError = error as? CKError, ckError.code == .unknownItem {
                             confirmed.insert(id.recordName)
                         } else {
+                            completed = false
                             PlozzLog.sync.info(
-                                "CloudSync: redownload — inconclusive existence check for \(id.recordName): \(Self.describe(error)); keeping"
+                                "CloudSync: inconclusive existence check for \(id.recordName): \(Self.describe(error)); keeping"
                             )
                         }
                     }
                 }
             } catch {
+                completed = false
                 // Whole-request failure proves nothing about any record in it.
                 PlozzLog.sync.info(
-                    "CloudSync: redownload — existence check failed for \(chunk.count) record(s): \(Self.describe(error)); keeping"
+                    "CloudSync: existence check failed for \(chunk.count) record(s): \(Self.describe(error)); keeping"
                 )
             }
         }
-        return (confirmed, present)
+        return (confirmed, present, completed)
     }
 
     // MARK: Convergence check
@@ -1146,7 +1299,8 @@ public actor CloudConfigSyncService {
     private static let inventoryReconcileInterval: TimeInterval = 6 * 60 * 60
 
     private func reconcileServerInventoryIfDue() async {
-        let key = "com.plozz.cloudSync.lastInventoryReconcile.\(config.containerIdentifier)"
+        // The additive-only check did not establish deletion convergence.
+        let key = "com.plozz.cloudSync.lastInventoryReconcile.v2.\(config.containerIdentifier)"
         let last = UserDefaults.standard.double(forKey: key)
         let now = Date().timeIntervalSince1970
         guard last <= 0 || now - last >= Self.inventoryReconcileInterval else {
@@ -1156,8 +1310,9 @@ public actor CloudConfigSyncService {
             PlozzLog.sync.info("CloudSync: inventory check throttled (next in ~\(mins)m)")
             return
         }
-        await reconcileServerInventory()
-        UserDefaults.standard.set(now, forKey: key)
+        if await reconcileServerInventory() {
+            UserDefaults.standard.set(now, forKey: key)
+        }
     }
 
     /// Detect and repair a device that is missing records the server has, in EVERY
@@ -1169,19 +1324,50 @@ public actor CloudConfigSyncService {
     /// devices by eye. This compares the server's full inventory against each
     /// channel's ledger and pulls back anything absent.
     ///
-    /// STRICTLY ADDITIVE. It never deletes: a record present locally but not on the
-    /// server is only logged. Inferring deletion from absence is precisely the bug
-    /// that destroyed records here (see `endFullResync`), and a safety net must not
-    /// be able to cause the harm it exists to catch.
-    public func reconcileServerInventory() async {
-        guard isActive, config.isEnabled(), await accountIsAvailable() else { return }
-        guard restorePersistedStateIfNeeded() else { return }
+    /// Also repairs missed deletions, but NEVER infers deletion from inventory
+    /// absence: a clean server-backed record needs an explicit `unknownItem` and
+    /// unchanged local intent after the existence check.
+    @discardableResult
+    public func reconcileServerInventory() async -> Bool {
+        guard isActive, config.isEnabled(), !isReconcilingInventory,
+              !isErasing, !isFullResyncing, !suspendPublishUntilFetch,
+              let engine else { return false }
+        isReconcilingInventory = true
+        defer { isReconcilingInventory = false }
+        let generation = engineGeneration
+        let account = accountGeneration
+        guard await accountIsAvailable(), restorePersistedStateIfNeeded() else { return false }
+        var completed = true
         for channel in channels {
-            await reconcileServerInventory(for: channel)
+            let repaired = await reconcileServerInventory(
+                for: channel, engine: engine, generation: generation, account: account
+            )
+            completed = completed && repaired
         }
+        return completed
     }
 
-    private func reconcileServerInventory(for channel: Channel) async {
+    private func inventoryContextIsCurrent(
+        _ channel: Channel, engine: CKSyncEngine, generation: Int, account: Int, authority: String?
+    ) -> Bool {
+        let current = !Task.isCancelled && isActive && config.isEnabled()
+            && !isErasing && !isFullResyncing && !suspendPublishUntilFetch
+            && engine === self.engine && generation == engineGeneration && account == accountGeneration
+            && channel.ledgerAuthority == authority && channel.currentAuthority == authority
+        if !current {
+            PlozzLog.sync.info("CloudSync[\(channel.schema.zoneName)]: inventory interrupted by a sync context change")
+        }
+        return current
+    }
+
+    private func reconcileServerInventory(
+        for channel: Channel, engine: CKSyncEngine, generation: Int, account: Int
+    ) async -> Bool {
+        let authority = channel.currentAuthority
+        func isCurrent() -> Bool {
+            inventoryContextIsCurrent(channel, engine: engine, generation: generation, account: account, authority: authority)
+        }
+        guard isCurrent() else { return false }
         let database = container.privateCloudDatabase
         var serverNames: Set<SyncRecordID> = []
         var token: CKServerChangeToken?
@@ -1192,9 +1378,10 @@ public actor CloudConfigSyncService {
                 let batch = try await database.recordZoneChanges(
                     inZoneWith: channel.schema.zoneID, since: token, desiredKeys: []
                 )
+                guard isCurrent() else { return false }
                 for (id, result) in batch.modificationResultsByID {
-                    if case .success = result,
-                       !Self.isDirectTrackerRecord(id.recordName, schema: channel.schema) {
+                    _ = try result.get()
+                    if !Self.isDirectTrackerRecord(id.recordName, schema: channel.schema) {
                         serverNames.insert(id.recordName)
                     }
                 }
@@ -1203,7 +1390,7 @@ public actor CloudConfigSyncService {
             }
         } catch {
             PlozzLog.sync.info("CloudSync[\(channel.schema.zoneName)]: inventory check skipped — \(Self.describe(error))")
-            return
+            return false
         }
 
         let localNames = Set(channel.ledger.entries.keys)
@@ -1213,27 +1400,47 @@ public actor CloudConfigSyncService {
         // Always report the outcome, including the clean one. A check that only
         // speaks up when it finds something is indistinguishable from a check that
         // never ran — which is precisely how the original divergence stayed hidden.
-        // `onlyLocal` is expected while an upload is in flight; it is never acted on.
+        // Local-only records can also be legitimate in-flight uploads.
         PlozzLog.sync.info(
             "CloudSync[\(channel.schema.zoneName)]: inventory — server=\(serverNames.count) local=\(localNames.count) "
                 + "missingLocally=\(missingLocally.count) localOnly=\(onlyLocal.count)"
         )
-        guard !missingLocally.isEmpty else { return }
-
-        PlozzLog.sync.error("CloudSync[\(channel.schema.zoneName)]: inventory GAP — \(missingLocally.count) record(s) on the server are missing locally; repairing")
+        let candidates = channel.ledger.inventoryDeletionCandidates(serverNames: serverNames)
+            .filter { !Self.isDirectTrackerRecord($0.key, schema: channel.schema) }
         let recovered = await fetchRecords(Array(missingLocally), schema: channel.schema)
-        guard !recovered.isEmpty else {
-            setDiagnostic("inventory gap of \(missingLocally.count) record(s) in \(channel.schema.zoneName) — could not fetch them")
-            return
+        guard isCurrent() else { return false }
+        let verdict = await verifyDeletionCandidates(Array(candidates.keys), schema: channel.schema)
+        guard isCurrent() else { return false }
+        let incoming = recovered + verdict.stillPresent
+        guard accepts(incoming, for: channel) else { return false }
+        if !candidates.isEmpty {
+            // Re-capture edits made while CloudKit was in flight before honoring
+            // a deletion. The ledger compares the original candidate afterward.
+            guard await publish(channel, engine: engine, bypassBaselineGate: false),
+                  isCurrent() else { return false }
         }
-        guard accepts(recovered, for: channel) else { return }
-        let changes = channel.ledger.applyFetched(saved: recovered, deleted: [], now: nowMillis())
-        guard persist() else { return }
+        let deletedCaptureDigests = channel.captureReceipts(for: Array(verdict.confirmedDeleted))
+        var changes = channel.ledger.applyInventoryDeletions(
+            confirmedDeleted: verdict.confirmedDeleted, candidates: candidates, now: nowMillis()
+        )
+        let deletedCount = changes.count
+        if !incoming.isEmpty {
+            changes.merge(channel.ledger.applyFetched(saved: incoming, deleted: [], now: nowMillis())) { _, new in new }
+        }
+        guard persist(), isCurrent() else { return false }
         reportRecordCount()
         if !changes.isEmpty {
-            await apply(changes, to: channel)
+            await apply(changes, to: channel, deletedCaptureDigests: deletedCaptureDigests)
         }
-        PlozzLog.sync.info("CloudSync[\(channel.schema.zoneName)]: inventory repaired — recovered \(recovered.count) record(s)")
+        guard isCurrent() else { return false }
+        let completed = verdict.completed && recovered.count == missingLocally.count
+        PlozzLog.sync.info(
+            "CloudSync[\(channel.schema.zoneName)]: inventory repaired — recovered \(recovered.count), confirmedDeleted=\(deletedCount), complete=\(completed)"
+        )
+        if !completed {
+            setDiagnostic("Incomplete inventory verification in \(channel.schema.zoneName); unconfirmed local records were kept and the check will retry.")
+        }
+        return completed
     }
 
     /// Fetch specific records by name for ONE channel's schema, skipping any that
@@ -1283,9 +1490,9 @@ public actor CloudConfigSyncService {
                     engineRevision: channel.isPrimary ? engineStateRevision : nil,
                     authority: channel.ledgerAuthority
                 ) {
-                    if let codec = channel.stateCodec {
+                    if channel.usesRecordLedger {
                         try CloudSyncSealedLedger.save(
-                            channel.ledger, to: channel.stateFileURL, codec: codec, authority: channel.ledgerAuthority
+                            channel.ledger, to: channel.stateFileURL, codec: channel.stateCodec, authority: channel.ledgerAuthority
                         )
                         return
                     }
@@ -1462,6 +1669,7 @@ extension CloudConfigSyncService: CKSyncEngineDelegate {
     // MARK: Event handlers
 
     private func handleAccountChange(_ event: CKSyncEngine.Event.AccountChange) async {
+        accountGeneration += 1
         switch event.changeType {
         case .signIn:
             // Fires on EVERY engine init for the SAME account too. Do NOTHING to any
@@ -1535,11 +1743,12 @@ extension CloudConfigSyncService: CKSyncEngineDelegate {
             }
             guard !incoming.isEmpty || !deletedNames.isEmpty else { continue }
             guard accepts(incoming, for: channel) else { return }
+            let deletedCaptureDigests = channel.captureReceipts(for: deletedNames)
             let changes = channel.ledger.applyFetched(saved: incoming, deleted: deletedNames, now: nowMillis())
             guard persist() else { return }
             reportRecordCount()
             if !changes.isEmpty {
-                await apply(changes, to: channel)
+                await apply(changes, to: channel, deletedCaptureDigests: deletedCaptureDigests)
                 PlozzLog.sync.info("CloudSync[\(channel.schema.zoneName)]: applied \(changes.count) change(s) from \(incoming.count) fetched, \(deletedNames.count) deleted")
             }
         }

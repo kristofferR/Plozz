@@ -3,9 +3,9 @@ import CoreModels
 import Foundation
 import Sentry
 
-/// Scrubs outgoing Sentry events and breadcrumbs so nothing that could identify
-/// a user or reveal what they were watching leaves the device. Runs in Sentry's
-/// `beforeSend`/`beforeBreadcrumb` hooks — the last gate before upload.
+/// Scrubs automatically collected identity and content from outgoing events and
+/// breadcrumbs. Explicitly submitted diagnostic notes are retained. Runs in
+/// Sentry's `beforeSend`/`beforeBreadcrumb` hooks — the last gate before upload.
 enum CrashRedaction {
     /// Drop PII-bearing containers from an event and scrub its breadcrumbs.
     static func scrub(_ event: Event) -> Event? {
@@ -37,6 +37,23 @@ enum CrashRedaction {
         if let raw = event.context?[CrashPerformanceContext.key],
            let safe = CrashPerformanceContext.scrub(raw) {
             context[CrashPerformanceContext.key] = safe
+        }
+        if event.tags?["report.kind"] == "user-feedback" || event.type == "feedback" {
+            guard let raw = event.context?["feedback"],
+                  raw["source"] as? String == "custom",
+                  let message = raw["message"] as? String,
+                  !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let association = raw["associated_event_id"] as? String else { return nil }
+            let eventID = SentryId(uuidString: association)
+            guard eventID != .empty else { return nil }
+            context["feedback"] = [
+                "message": message,
+                "source": "custom",
+                "associated_event_id": eventID.sentryIdString
+            ]
+            event.type = "feedback"
+            event.threads = nil
+            event.debugMeta = nil
         }
         if event.tags?["report.kind"] == "playlist-import-limit",
            let limit = event.tags?["import.limit"],

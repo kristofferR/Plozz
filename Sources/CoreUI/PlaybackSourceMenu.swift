@@ -90,7 +90,7 @@ public struct PlaybackSourceMenuButton<Label: View>: View {
             } action: { frame in
                 triggerFrame = frame
             }
-            .fullScreenCover(isPresented: $isPresented, onDismiss: onDismiss) {
+            .plozzFullScreenCover(isPresented: $isPresented, onDismiss: onDismiss) {
                 #if os(tvOS)
                 tvOSPresentation
                 #else
@@ -269,7 +269,7 @@ public struct PlaybackSourceMenuButton<Label: View>: View {
     }
 }
 
-private struct PlaybackSourceMenuPanel: View {
+struct PlaybackSourceMenuPanel: View {
     @Binding var page: PlaybackSourceMenuButtonPage
     /// Ceiling imposed by the room available on the trigger's chosen side.
     /// Past this the rows scroll rather than the panel running off screen.
@@ -285,6 +285,7 @@ private struct PlaybackSourceMenuPanel: View {
     let onPerformAction: (String) -> Void
 
     @Namespace private var panelFocusScope
+    @Environment(\.locale) private var locale
     #if os(tvOS)
     @Environment(\.resetFocus) private var resetFocus
     #endif
@@ -590,41 +591,37 @@ private struct PlaybackSourceMenuPanel: View {
             #if !os(tvOS)
             if index > 0 { rowSeparator }
             #endif
-            // `displayLabel` is `nil` only when no fact/name is known — used
-            // here just to de-dupe `menuFacts` against whatever the title
-            // already shows; the actual rendered title below branches on the
-            // Optional so the "Version" fallback stays a translatable resource
-            // rather than a `Text(String)` that would always render verbatim.
-            let titleForDedupe = version.displayLabel ?? ""
-            let titleFacts = Set(titleForDedupe.components(separatedBy: " · "))
-            let supplementalFacts = version.menuFacts.filter { !titleFacts.contains($0) }
+            let presentation = MediaVersion.PickerPresentation(version, locale: locale)
             menuRowButton(id: "version.\(version.id)") {
                 onSelectVersion(version.id)
             } label: {
                 HStack(alignment: .top, spacing: 14) {
                     VStack(alignment: .leading, spacing: 5) {
-                        versionTitleText(version.displayLabel)
+                        versionTitleText(presentation.title)
                             .font(rowTitleFont)
-                        if !supplementalFacts.isEmpty {
-                            Text(supplementalFacts.joined(separator: " · "))
+                            .fixedSize(horizontal: false, vertical: true)
+                        if !presentation.supplementalFacts.isEmpty {
+                            Text(verbatim: presentation.supplementalFacts.joined(separator: " · "))
                                 .font(rowDetailFont)
                                 .settingsRowSecondary()
                                 .fixedSize(horizontal: false, vertical: true)
                         }
-                        if let fileName = version.fileName {
-                            Text(fileName)
+                        if let fileName = presentation.releaseName {
+                            Text(verbatim: fileName)
                                 .font(fileNameFont)
                                 .settingsRowSecondary()
                                 .lineLimit(2)
                                 .truncationMode(.middle)
                         }
                     }
+                    .multilineTextAlignment(.leading)
                     Spacer(minLength: 12)
                     if version.id == selectedVersionID {
                         Image(systemName: "checkmark")
                             .font(.headline.weight(.bold))
                     }
                 }
+                .accessibilityAddTraits(version.id == selectedVersionID ? .isSelected : [])
             }
         }
     }
@@ -852,7 +849,7 @@ private struct PlaybackSourceMenuRowHeight: ViewModifier {
 }
 
 // The generic button's nested type cannot be named in a non-generic panel.
-private enum PlaybackSourceMenuButtonPage: Hashable {
+enum PlaybackSourceMenuButtonPage: Hashable {
     case root
     case servers
     case versions

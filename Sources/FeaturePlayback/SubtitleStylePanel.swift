@@ -32,6 +32,7 @@ struct SubtitleStylePanel: View {
     /// Whether the player can show a second subtitle line; where it can't (a
     /// live channel) the Dual Subtitles entry is left out.
     var offersDualSubtitles = true
+    var separatesSettingsRows = false
 
     @State private var systemStyleConfirmation = SystemCaptionStyleConfirmation()
     @Environment(\.locale) private var locale
@@ -103,6 +104,33 @@ struct SubtitleStylePanel: View {
     }
 
     private func styleRows(_ rows: [StyleRowSpec], dividerBefore: Int?) -> some View {
+        Group {
+            if separatesSettingsRows {
+                SettingsControlRows {
+                    ForEach(rows) { row in
+                        VStack(alignment: .leading, spacing: 2) {
+                            styleRow(row)
+                            if row.id == rows.last?.id { styleFooter }
+                        }
+                    }
+                }
+            } else {
+                legacyStyleRows(rows, dividerBefore: dividerBefore)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    private func styleRow(_ row: StyleRowSpec) -> some View {
+        PlayerOptionsRow(
+            row: row, palette: palette, focus: $focus,
+            titleLineLimit: screen == .style && row.slot == 0 ? 2 : 1
+        )
+    }
+
+    private func legacyStyleRows(_ rows: [StyleRowSpec], dividerBefore: Int?) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(rows) { row in
                 if let d = dividerBefore, row.slot == d {
@@ -110,27 +138,25 @@ struct SubtitleStylePanel: View {
                         .padding(.horizontal, 16)
                         .padding(.vertical, 6)
                 }
-                PlayerOptionsRow(
-                    row: row, palette: palette, focus: $focus,
-                    titleLineLimit: screen == .style && row.slot == 0 ? 2 : 1
-                )
+                styleRow(row)
                 if screen == .style, row.slot == 0 {
                     PlozzDivider()
                         .padding(.horizontal, 16)
                         .padding(.vertical, 6)
                 }
             }
-            if screen == .styleBackground {
-                Text("Window padding is set by Plozz. Apple does not expose subtitle padding or line spacing.")
-                    .font(.footnote).playerMenuRowSecondary().padding(16)
-            } else if screen == .styleOutline {
-                Text("Apple supplies the text edge style, including Uniform Outline, but not its color or thickness. Those are Plozz rendering values.")
-                    .font(.footnote).playerMenuRowSecondary().padding(16)
-            }
+            styleFooter
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 6)
-        .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    @ViewBuilder private var styleFooter: some View {
+        if screen == .styleBackground {
+            Text("Window padding is set by Plozz. Apple does not expose subtitle padding or line spacing.")
+                .font(.footnote).playerMenuRowSecondary().padding(16)
+        } else if screen == .styleOutline {
+            Text("Apple supplies the text edge style, including Uniform Outline, but not its color or thickness. Those are Plozz rendering values.")
+                .font(.footnote).playerMenuRowSecondary().padding(16)
+        }
     }
 
     // MARK: Per-screen row builders
@@ -229,13 +255,15 @@ struct SubtitleStylePanel: View {
     @ViewBuilder
     private var styleFontScreen: some View {
         let current = effectiveStyle.fontFamily
-        VStack(alignment: .leading, spacing: 2) {
+        fontRows {
             ForEach(Array(SubtitleFontFamily.allCases.enumerated()), id: \.offset) { idx, family in
                 fontChoiceRow(family, index: idx, isSelected: effectiveStyle.fontDescriptor == nil && effectiveStyle.systemFont == nil && family == current)
             }
-            PlozzDivider()
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
+            if !separatesSettingsRows {
+                PlozzDivider()
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 6)
+            }
             PlayerOptionsRow(row: systemFontRow, palette: palette, focus: $focus)
                 .font(.body)
         }
@@ -281,9 +309,9 @@ struct SubtitleStylePanel: View {
     }
 
     private var systemFontScreen: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        fontRows {
             ForEach(Array(SubtitleSystemFonts.all.enumerated()), id: \.element.id) { index, entry in
-                if index == SubtitleSystemFonts.captionFonts.count {
+                if !separatesSettingsRows, index == SubtitleSystemFonts.captionFonts.count {
                     PlozzDivider()
                         .padding(.horizontal, 16)
                         .padding(.vertical, 6)
@@ -311,6 +339,14 @@ struct SubtitleStylePanel: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    @ViewBuilder private func fontRows<Rows: View>(@ViewBuilder content: () -> Rows) -> some View {
+        if separatesSettingsRows {
+            SettingsControlRows(content: content)
+        } else {
+            VStack(alignment: .leading, spacing: 2, content: content)
+        }
     }
 
     /// A SwiftUI `Font` that renders a family's name in that family's own Regular

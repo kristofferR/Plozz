@@ -52,7 +52,7 @@ public struct LiveTVPortablePendingSources: View {
                         }
                         ForEach(visiblePending.keys.sorted(), id: \.self) { sourceID in
                             if let source = visiblePending[sourceID] {
-                                NavigationLink {
+                                SettingsPageLink {
                                     LiveTVPortablePlaylistSetup(
                                         sourceID: sourceID, descriptor: source, profiles: profiles,
                                         sourceStore: sourceStore, directory: directory
@@ -147,7 +147,7 @@ private struct LiveTVPortablePlaylistSetup: View {
     let directory: URL
     let onChange: () -> Void
     @State private var access: LiveTVSourceManagementAccess
-    @Environment(\.dismiss) private var dismiss
+    @SettingsPageDismiss private var dismiss
     private let profileID: String
 
     init(

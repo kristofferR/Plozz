@@ -7,6 +7,34 @@ import XCTest
 
 @MainActor
 final class IPTVAuthViewModelTests: XCTestCase {
+    func testFailedImportRetainsLocalDetailsAndEnteredFieldsWithoutTelemetry() async throws {
+        let model = IPTVAuthViewModel(
+            deviceID: "fixture", address: "https://private.invalid/list?token=private-secret",
+            setupDiagnostics: IPTVSetupDiagnostics(),
+            signIn: { _, _, _, _ in
+                let attempt = try XCTUnwrap(IPTVSetupDiagnostics.current)
+                attempt.advance(to: .playlist)
+                attempt.willRequest()
+                attempt.received(status: 200, response: .html)
+                throw IPTVError.malformed
+            },
+            onAuthenticated: { _ in XCTFail("A failed import must keep the form open.") }
+        )
+        defer { model.cancel() }
+        model.connect()
+        let deadline = ContinuousClock.now + .seconds(3)
+        while model.issue == nil, ContinuousClock.now < deadline { await Task.yield() }
+        let report = try XCTUnwrap(model.failureReport)
+        XCTAssertTrue(report.supportText.contains("stage=playlist"))
+        XCTAssertTrue(report.supportText.contains("response=html"))
+        XCTAssertFalse(report.supportText.contains("private"))
+        XCTAssertTrue(String(localized: try XCTUnwrap(model.issue)).contains("HTML"))
+        XCTAssertTrue(model.canConnect)
+        XCTAssertEqual(model.address, "https://private.invalid/list?token=private-secret")
+        model.connect()
+        XCTAssertNil(model.failureReport, "A new attempt cannot show the preceding attempt's evidence.")
+    }
+
     func testProviderResponsesDoNotBlameCustomHeaders() async throws {
         let cases: [(any Error, LocalizedStringResource)] = [
             (IPTVError.httpStatus(451), "Your IPTV provider has blocked access to this playlist. Check that your trial or subscription is still active, or contact your provider."),
@@ -220,20 +248,24 @@ final class IPTVAuthViewModelTests: XCTestCase {
         XCTAssertFalse(model.isConnecting)
     }
 
-    func testDisabledDiagnosticsDoNotChangeSuccessfulSetup() async {
+    func testLocalDiagnosticsDoNotChangeSuccessfulSetupOrLeakIntoAccountActivation() async {
         let finished = expectation(description: "Account saved without reporting")
         let diagnostics = IPTVSetupDiagnostics()
         let model = IPTVAuthViewModel(
             deviceID: "device", address: "https://provider.example/list", setupDiagnostics: diagnostics,
             signIn: { credential, _, _, _ in
-                XCTAssertNil(IPTVSetupDiagnostics.current)
+                XCTAssertNotNil(IPTVSetupDiagnostics.current)
                 return IPTVSignInGate.session(credential)
             },
-            onAuthenticated: { _ in finished.fulfill() }
+            onAuthenticated: { _ in
+                XCTAssertNil(IPTVSetupDiagnostics.current)
+                finished.fulfill()
+            }
         )
         model.connect()
         await fulfillment(of: [finished], timeout: 3)
         XCTAssertNil(model.issue)
+        XCTAssertNil(model.failureReport)
         XCTAssertFalse(model.isConnecting)
     }
 

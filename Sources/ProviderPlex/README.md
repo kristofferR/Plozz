@@ -24,6 +24,16 @@ first-class backends; co-equal with `ProviderJellyfin`.
 
 ## Invariants
 
+- Manually verified alternate addresses supplement, rather than replace, Plex's
+  advertised local/remote/relay candidates. Discovery refresh retains the manual
+  set, and removed aliases cannot be resurrected by a last-reachable seed.
+  Public `/identity` validation carries no token; subsequent server probes and
+  API calls restrict redirects to the approved origin. Playback resolution asks
+  the existing Plex resolver for the current route. Address edits preserve
+  discovered candidates separately from manual aliases and retire superseded
+  probe sweeps before they can authenticate to a removed alias.
+  Playback locators strip the matching source base's encoded proxy prefix and
+  resolve relative to the newly selected base, preserving encoded media-path bytes.
 - **No UI imports.** Pure logic + DTOs.
 - **Tokens never logged.** `X-Plex-Token` flows through `CoreNetworking`
   redaction; PIN values are never persisted (see `PlexPinFlow`).
@@ -33,6 +43,19 @@ first-class backends; co-equal with `ProviderJellyfin`.
 - Home-user identity changes happen **in-memory only** — Plozz never
   rewrites the stored admin account's token; per-user tokens live in a
   short-lived override map.
+
+## Episode identity and order
+
+Full item metadata requests include GUIDs and preferences. The series'
+`Preferences.Setting` entry named `episodeOrdering` supplies the explicit
+TVDB aired/DVD/absolute or TMDB aired numbering system. Unrecognized values
+stay unknown, and an absent/inherited order is not guessed from the library
+agent or title. Episode `Guid` TVDB IDs remain episode IDs, separate from
+the parent's TVDB identity; community markers can pin that exact episode.
+Preference retrieval follows
+[PlexAPI's advanced-settings contract](https://github.com/pushingkarmaorg/python-plexapi/blob/master/plexapi/mixins/advanced_settings.py);
+Plex's [metadata-provider schema](https://developer.plex.tv/pms/) documents
+the `SeasonType` identifiers.
 
 ## Home recommendations
 
@@ -144,8 +167,9 @@ validates the same profile through `/decision` before opening `start.m3u8` and
 rejects an incompatible returned container or video codec.
 
 WebVTT is a separate subtitle rendition, not a subtitle muxed into ordinary
-MP4. Text tracks use automatic delivery instead of forced burn-in; bitmap
-tracks still require burn-in for a server transcode, and Off remains explicit.
+MP4: the profile declares an explicit HLS `subtitleProfile` target alongside
+the video target. Text tracks use automatic delivery instead of forced burn-in;
+bitmap tracks still require burn-in for a server transcode, and Off remains explicit.
 Existing fetchable text sidecars retain their original format and authenticated
 delivery source for Plozz's styled overlay. Embedded HLS text is extracted from
 the native player's legible rendition into that same overlay. Selecting a different
@@ -158,7 +182,83 @@ options translate selected audio/subtitle indexes to Plex's database stream
 IDs, using the selected media version's stream inventory. Decision and playback
 requests must carry identical selections and limits.
 
+Bounded video encoding reserves the quality policy's audio budget. Plex receives
+the documented `audioChannelCount` parameter and a `videoAudioCodec` /
+`audio.bitrate` profile limitation, rather than relying on `audioChannels` or
+an audio-bitrate query alone. Bitmap burn-in disables audio copy for bounded
+renditions: copying a 640 kbps soundtrack beside video encoded against a 128 kbps
+audio reservation would exceed the selected total. Original quality can retain
+compatible audio, and an already-under-limit remux is not forced to downmix.
+
+Stopping a streaming rendition runs outside its caller's cancellation state and
+is awaited, so canceling negotiation or replacement does not cancel the cleanup
+request too. Decision, materialized start, and stop retain the owned session ID;
+credential-free locators still omit the session query fields restored at playback.
+`StreamingSessionMaintaining` sends an authenticated, cancellation-aware
+`/video/:/transcode/universal/ping` for that exact streaming session. Direct files
+are not pinged. Every server rendition carries its owned session ID, including
+ordinary compatibility conversion and forced fallback without quality options.
+The playback owner controls the maintenance lifetime and drains
+it before releasing the session; the provider creates no timer. This follows
+[Plex's own paused-transcoder maintenance](https://github.com/plexinc/plex-home-theater-public/blob/f2f1d63f2d48ad0d2935f7002ee1168ebcd5bb3d/plex/Client/PlexTimelineManager.cpp#L232-L259)
+and [session-scoped ping endpoint](https://github.com/plexinc/plex-home-theater-public/blob/f2f1d63f2d48ad0d2935f7002ee1168ebcd5bb3d/plex/Client/PlexMediaServerClient.cpp#L267-L272);
+neither establishes a universal server-expiry timeout.
+VOD retains the full-title HLS timeline and in-band seeking; no offset prewarming
+or speculative buffering constants are added.
+
+Protocol references: [Plex's official API and profile augmentations](https://developer.plex.tv/pms/),
+the [revision-pinned profile grammar](https://github.com/LukasParke/plex-api-spec/blob/0a34b2513263f433756d98b5c6d12f984c7efa33/description.md#profile-augmentations),
+and [Plezy's independent HLS targets](https://github.com/edde746/plezy/blob/8ef7c2cd9a35fd208403d0577d063d4143375fd9/lib/services/plex_client.dart#L95-L165).
+Its [offset-prewarming regression](https://github.com/edde746/plezy/commit/3a704a2b9b37a177959cdd06027c326502a30541)
+is a reason to test player-specific seek behavior, not assume that extra requests
+improve startup. [Apple's HLS specification](https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices)
+requires fMP4 for HEVC and separate WebVTT text files.
+
 Tests: `PlexStreamingQualityTests` and `StreamingPlaybackTests`.
+
+## Original-file playback versus downloads
+
+Native playback, Plozzigen's local-remux source, and scrub-frame extraction use
+the original `/library/parts/...` URL without `download=1`. Only the explicit
+offline-download source includes that flag. Reusing the download URL for player
+buffering can make Plex's activity dashboard show transient download tasks.
+Both variants retain the same selected media part, credential-free locator,
+original bytes, and current-account authentication. This does not change engine
+selection, quality limits, or server-transcode negotiation.
+
+Tests: `ProviderPlexTests` covers MKV local remux, native MP4 playback, scrubbing,
+selected media versions, and the separately preserved offline-download URL.
+
+## Playback session reporting
+
+Each VOD playback request owns a unique `playSessionID`, even for repeated plays
+of the same library item. For server renditions, it is the same identity used by
+the universal decision, materialized stream, ping, and stop. Every timeline event,
+including the outgoing rendition's stopped report during replacement, forwards
+that request's identity as `X-Plex-Session-Identifier`. `ratingKey` and `key`
+continue to identify the library item for watch state, not the playback session.
+There is no provider-wide "current session" lookup.
+
+Timeline reports include the known playback duration in milliseconds; unknown,
+non-finite, nonpositive, or unrepresentable durations are omitted, not replaced
+with zero. End reporting retains the final position and duration captured before
+engine teardown. Plozz's optimistic watched flag and queued `/:/scrobble` write
+are separate from Plex's playback history: neither a local checkmark nor a
+successful timeline response proves that a history entry was recorded.
+
+Direct files also own a reporting identity but do not acquire a transcoder
+session or receive transcoder ping/stop calls. Callers without a playback identity,
+including the current music reporter, still omit the optional header rather than
+inventing or borrowing one. Live TV retains its separate lease-owned reporting.
+
+The [PMS timeline specification](https://github.com/LukasParke/plex-api-spec/blob/0a34b2513263f433756d98b5c6d12f984c7efa33/plex-api-spec.yaml#L1204-L1208)
+defines the header as unique per client playback session.
+[Plezy's progress implementation](https://github.com/edde746/plezy/blob/8ef7c2cd9a35fd208403d0577d063d4143375fd9/lib/services/plex_client.dart#L2152-L2180)
+also forwards the stream's session identifier to associate dashboard reports with
+the actual stream decision. This correlation does not prove delivered resolution
+or explain a player stall; those require separate stream and playback evidence.
+
+Tests: `PlexStreamingQualityTests` and `PlexProviderMappingTests`.
 
 ## Where to look first
 

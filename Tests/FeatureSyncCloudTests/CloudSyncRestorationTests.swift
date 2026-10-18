@@ -80,4 +80,16 @@ final class CloudSyncRestorationTests: XCTestCase {
         XCTAssertFalse(restored)
         XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
     }
+
+    func testInventoryRepairWithoutAnActiveEngineDoesNotTouchCloudOrStorage() async {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        var config = configuration(folder.appendingPathComponent("primary.json"))
+        config.isEnabled = { true }
+        let service = CloudConfigSyncService(config)
+        let result = await service.reconcileServerInventory()
+        XCTAssertFalse(result)
+        let restored = await service.hasRestoredLocalState
+        XCTAssertFalse(restored)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+    }
 }

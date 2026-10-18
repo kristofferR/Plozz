@@ -83,7 +83,9 @@ class EvidenceTests(unittest.TestCase):
                     performance.stack_sample_summary(path, 42)
 
     def test_selection_is_explicit_and_narrow_by_default(self):
-        self.assertEqual(len(performance.select(None, None)), 3)
+        self.assertEqual(len(performance.select(None, None)), 4)
+        self.assertEqual(performance.select(None, ["watchlist-artwork-rehydration"]),
+                         ["watchlist-artwork-rehydration"])
         self.assertEqual(performance.select("matrix", None), ["runtime-matrix"])
         self.assertEqual(performance.select("diagnostics", None),
                          ["diagnostics-disabled", "diagnostics-enabled", "diagnostics-snapshot"])

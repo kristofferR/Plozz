@@ -9,7 +9,7 @@ struct LiveTVServerSetupView: View {
     let connectServer: (() -> Void)?
     @State private var probe: LiveTVServerProbeModel
     @State private var saveFailed = false
-    @Environment(\.dismiss) private var dismiss
+    @SettingsPageDismiss private var dismiss
 
     init(
         sources: LiveTVSourceManagementModel,

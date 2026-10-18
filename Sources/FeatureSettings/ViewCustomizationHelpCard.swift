@@ -26,8 +26,7 @@ struct ViewCustomizationHelpCard: View {
             illustration
                 .accessibilityHidden(true)
             Text(help.detail)
-                .font(.callout)
-                .foregroundStyle(palette.secondaryText)
+                .settingsHelperText()
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }

@@ -33,13 +33,13 @@ struct PlozziOSOnboardingView: View {
                 }
             }
         }
-        .fullScreenCover(item: $addProvider) { wrapped in
+        .plozzFullScreenCover(item: $addProvider) { wrapped in
             AddServerView(appModel: appModel, initialProvider: wrapped.kind)
         }
-        .fullScreenCover(isPresented: $showReceive) {
+        .plozzFullScreenCover(isPresented: $showReceive) {
             PlozziOSSyncSetupReceiveView(appModel: appModel) { showReceive = false }
         }
-        .fullScreenCover(isPresented: $showAddShare) {
+        .plozzFullScreenCover(isPresented: $showAddShare) {
             PlozziOSUnifiedAddShareView(appModel: appModel)
         }
     }

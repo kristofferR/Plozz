@@ -10,18 +10,25 @@ actor IPTVTestHTTPServer {
         var cutoff: Int?
         var headerDelay: Duration = .zero
         var delay: Duration = .zero
+        var range: Range<Int>?
     }
 
     private let listener: NWListener
     private let respond: @Sendable (String) -> Response
+    private let beforeBodyChunk: (@Sendable () async throws -> Void)?
     private var connections: [UUID: (NWConnection, Task<Void, Never>)] = [:]
     private var stopped = false
     private(set) var requestCount = 0
     private(set) var activeRequestCount = 0
     private(set) var peakActiveRequestCount = 0
+    private(set) var bodyBytesSent = 0
 
-    init(respond: @escaping @Sendable (String) -> Response) throws {
+    init(
+        beforeBodyChunk: (@Sendable () async throws -> Void)? = nil,
+        respond: @escaping @Sendable (String) -> Response
+    ) throws {
         self.respond = respond
+        self.beforeBodyChunk = beforeBodyChunk
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
         listener = try NWListener(using: parameters)
@@ -54,6 +61,7 @@ actor IPTVTestHTTPServer {
     }
 
     func stop() {
+        guard !stopped else { return }
         stopped = true
         listener.newConnectionHandler = nil
         listener.cancel()
@@ -84,7 +92,7 @@ actor IPTVTestHTTPServer {
     private func serve(_ connection: NWConnection, id: UUID) async {
         do {
             var request = Data()
-            while request.range(of: Data("\r\n\r\n".utf8)) == nil {
+            while true {
                 let part: Data = try await withCheckedThrowingContinuation { continuation in
                     connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { data, _, _, error in
                         if let error { continuation.resume(throwing: error) }
@@ -93,6 +101,26 @@ actor IPTVTestHTTPServer {
                 }
                 guard !part.isEmpty, request.count < 32_768 else { throw URLError(.badServerResponse) }
                 request.append(part)
+                guard let separator = request.range(of: Data("\r\n\r\n".utf8)) else { continue }
+                let head = String(decoding: request[..<separator.lowerBound], as: UTF8.self)
+                let lengthField = head.components(separatedBy: "\r\n").first {
+                    $0.lowercased().hasPrefix("content-length:")
+                }
+                let bodyLength: Int
+                if let lengthField {
+                    guard let length = Int(lengthField.dropFirst("content-length:".count)
+                        .trimmingCharacters(in: .whitespaces)), length >= 0 else {
+                        throw URLError(.badServerResponse)
+                    }
+                    bodyLength = length
+                } else {
+                    bodyLength = 0
+                }
+                guard bodyLength <= 32_768 - separator.upperBound else {
+                    throw URLError(.badServerResponse)
+                }
+                // PROPFIND's XML can arrive after its headers; it is not a disconnect.
+                if request.count >= separator.upperBound + bodyLength { break }
             }
             requestCount += 1
             activeRequestCount += 1
@@ -113,17 +141,21 @@ actor IPTVTestHTTPServer {
             if let url = response.file {
                 count = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             } else { count = response.data.count }
+            let range = response.range ?? 0..<count
+            guard range.lowerBound >= 0, range.upperBound <= count else { throw URLError(.badServerResponse) }
             var fields = response.headers
-            fields["Content-Length"] = String(count)
+            fields["Content-Length"] = String(range.count)
             fields["Connection"] = "close"
             let head = "HTTP/1.1 \(response.status) Fixture\r\n"
                 + fields.map { "\($0): \($1)\r\n" }.joined() + "\r\n"
             try await send(Data(head.utf8), on: connection)
             if text.hasPrefix("HEAD ") { return }
-            let limit = min(count, response.cutoff ?? count)
-            var offset = 0
+            if let file { try file.seek(toOffset: UInt64(range.lowerBound)) }
+            let limit = min(range.upperBound, range.lowerBound + (response.cutoff ?? range.count))
+            var offset = range.lowerBound
             while offset < limit {
                 try Task.checkCancellation()
+                try await beforeBodyChunk?()
                 if response.delay != .zero { try await Task.sleep(for: response.delay) }
                 let end = min(limit, offset + 65_536)
                 let chunk: Data
@@ -132,6 +164,7 @@ actor IPTVTestHTTPServer {
                 guard !chunk.isEmpty else { throw URLError(.cannotDecodeContentData) }
                 try await send(chunk, on: connection)
                 offset += chunk.count
+                bodyBytesSent += chunk.count
             }
         } catch {
             // URLSession deliberately closes authentication probes and cancelled test requests.

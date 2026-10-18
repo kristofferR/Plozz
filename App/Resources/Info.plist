@@ -75,6 +75,8 @@
 	</array>
 	<key>OMDBAPIKey</key>
 	<string>$(OMDB_API_KEY)</string>
+	<key>PlozzDevelopmentFeature</key>
+	<string>$(PLOZZ_DEV_FEATURE)</string>
 	<key>PlozzReleaseChannel</key>
 	<string>$(PLOZZ_RELEASE_CHANNEL)</string>
 	<key>PlozzReleaseID</key>
@@ -124,5 +126,7 @@
 		<string>audio</string>
 		<string>remote-notification</string>
 	</array>
+	<key>WetrakrClientID</key>
+	<string>$(WETRAKR_CLIENT_ID)</string>
 </dict>
 </plist>

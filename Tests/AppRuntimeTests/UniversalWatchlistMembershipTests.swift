@@ -8,6 +8,7 @@ import Foundation
 import ProviderJellyfin
 @testable import ProviderPlex
 import XCTest
+@testable import TestSupportPerformance
 
 /// The read and the write have to agree about which alias a title is watchlisted
 /// as, including for a subject that carries no ids of its own.
@@ -23,6 +24,53 @@ import XCTest
 /// button still offering to add it.
 @MainActor
 final class UniversalWatchlistMembershipTests: XCTestCase {
+    func testPerformanceWatchlistArtworkRehydration() async throws {
+        try PerformanceProbe.requireEnabled()
+        let hosts = try await [
+            UniversalWatchlistHostDouble(providerKind: .plex),
+            UniversalWatchlistHostDouble(providerKind: .jellyfin)
+        ]
+        let fixtures = try hosts.map { host in
+            let provider = try XCTUnwrap(host.accountsProviders.provider(
+                forAccountID: UniversalWatchlistHostDouble.accountID
+            ))
+            func savedImage(_ id: String) throws -> URL {
+                SyncURLSanitizer.sanitize(try XCTUnwrap(
+                    provider.imageURL(itemID: id, kind: .primary, maxWidth: 500)
+                ))
+            }
+            let people = try (0..<768).map { index in
+                MediaPerson(id: "person-\(index)", name: "Person \(index)",
+                            imageURL: try savedImage("person-\(index)"))
+            }
+            return try (0..<180).map { index in
+                MediaItem(
+                    id: "title-\(index)", title: "Title \(index)", kind: .movie,
+                    people: (0..<64).map { people[(index * 17 + $0) % people.count] },
+                    posterURL: try savedImage("title-\(index)"),
+                    locallyValidatedPlayableSource: true
+                ).taggingSource(UniversalWatchlistHostDouble.accountID)
+            }
+        }
+        try await PerformanceProbe.measure(self, scenario: "watchlist-artwork-rehydration") {
+            var items = 0
+            var credits = 0
+            for (host, fixture) in zip(hosts, fixtures) {
+                let result = host.rehydratedPersistedArtwork(fixture)
+                XCTAssertEqual(result.count, 180)
+                for item in result {
+                    XCTAssertEqual(item.people.count, 64)
+                    XCTAssertTrue(item.posterURL?.absoluteString.contains("CURRENT-TOKEN") == true)
+                    XCTAssertTrue(item.people.allSatisfy {
+                        $0.imageURL?.absoluteString.contains("CURRENT-TOKEN") == true
+                    })
+                    items += 1
+                    credits += item.people.count
+                }
+            }
+            return ["items": items, "credits": credits, "providers": hosts.count]
+        }
+    }
 
     /// The promoted subject exactly as `MediaItem.watchlistSubject` mints it.
     private var promotedSeries: MediaItem {
@@ -815,6 +863,156 @@ final class UniversalWatchlistMembershipTests: XCTestCase {
     }
 }
 
+@MainActor
+final class UniversalWatchlistConnectionTests: XCTestCase {
+    func testConnectionChangeDefersReadsAndMutationsAcrossScopeAndAdmissionGates() async throws {
+        for condition in [
+            "hydrating", "scoping", "profile", "identity", "accounts",
+            "locked", "setup", "identity-choice"
+        ] {
+            let (host, destination, store) = try await makeReadyHost()
+            let originalProfile = host.profiles.activeProfile
+            defer { host.profiles.update(originalProfile) }
+            let cached = host.universalWatchlistNativeView
+            let ledger = host.mediaAliasLedger.activeSnapshot
+            switch condition {
+            case "hydrating":
+                host.universalWatchlistNativeViewLoaded = false
+            case "scoping":
+                host.trackersAreScopedToActiveProfile = false
+            case "profile":
+                host.universalWatchlistProfileID = UniversalWatchlistScope.live(
+                    profileID: "previous-profile", identityGeneration: 0, accountsKey: "acct"
+                )
+            case "identity":
+                host.plexWatchlistIdentityGeneration += 1
+            case "accounts":
+                host.universalWatchlistProfileID = UniversalWatchlistScope.live(
+                    profileID: host.profiles.activeProfileID,
+                    identityGeneration: 0, accountsKey: "acct,removed-account"
+                )
+            case "locked":
+                host.activeProfileAwaitsUnlock = true
+            case "setup":
+                var profile = originalProfile
+                profile.needsSetup = true
+                host.profiles.update(profile)
+            case "identity-choice":
+                var profile = originalProfile
+                profile.accountsAwaitingIdentity = [UniversalWatchlistHostDouble.accountID]
+                host.profiles.update(profile)
+            default:
+                XCTFail("Unknown condition")
+            }
+
+            await host.trackerWatchlistConnectionChanged(destination: destination)
+
+            let reads = await destination.fetchCount()
+            let writes = await destination.appliedStates()
+            let mutations = await store.allMutations()
+            XCTAssertEqual(reads, 0, condition)
+            XCTAssertTrue(writes.isEmpty, condition)
+            XCTAssertEqual(mutations.first?.phase, .waitingForAuthentication, condition)
+            XCTAssertEqual(host.universalWatchlistNativeView, cached, condition)
+            XCTAssertEqual(host.mediaAliasLedger.activeSnapshot, ledger, condition)
+            XCTAssertTrue(host.universalWatchlistShouldResumeAuthentication, condition)
+        }
+    }
+
+    func testReadyConnectionChangeResumesMutationsAndRefreshesNativeCache() async throws {
+        let (host, destination, store) = try await makeReadyHost()
+
+        await host.trackerWatchlistConnectionChanged(destination: destination)
+
+        let reads = await destination.fetchCount()
+        let writes = await destination.appliedStates()
+        let mutations = await store.allMutations()
+        XCTAssertEqual(reads, 1)
+        XCTAssertEqual(writes, [.absent])
+        XCTAssertTrue(mutations.isEmpty)
+        XCTAssertEqual(host.universalWatchlistNativeView.bucket(for: destination.id)?.entries, [])
+        XCTAssertFalse(host.universalWatchlistShouldResumeAuthentication)
+    }
+
+    func testLockedDisconnectRetractsOldIdentityWithoutReadingDestinations() async throws {
+        let (host, destination, store) = try await makeReadyHost()
+        host.activeProfileAwaitsUnlock = true
+        host.universalWatchlistNativeView.applySuccess(
+            destinationID: destination.id,
+            entries: [NativeWatchlistEntry(aliasID: MediaAliasID(), kind: .movie, index: 0)!],
+            identityScope: "disconnected-account"
+        )
+
+        await host.trackerWatchlistConnectionChanged(destination: destination)
+
+        let reads = await destination.fetchCount()
+        let writes = await destination.appliedStates()
+        let mutations = await store.allMutations()
+        XCTAssertNil(host.universalWatchlistNativeView.bucket(for: destination.id))
+        XCTAssertEqual(reads, 0)
+        XCTAssertTrue(writes.isEmpty)
+        XCTAssertEqual(mutations.first?.phase, .waitingForAuthentication)
+    }
+
+    func testAuthenticationResumeWaitsForUnlock() async throws {
+        let (host, destination, store) = try await makeReadyHost()
+        host.activeProfileAwaitsUnlock = true
+        await host.resumeUniversalWatchlistAuthentication()
+        let blockedMutations = await store.allMutations()
+        XCTAssertEqual(blockedMutations.first?.phase, .waitingForAuthentication)
+        XCTAssertTrue(host.universalWatchlistShouldResumeAuthentication)
+
+        host.activeProfileAwaitsUnlock = false
+        await host.resumeUniversalWatchlistAuthentication()
+        let writes = await destination.appliedStates()
+        let mutations = await store.allMutations()
+        XCTAssertEqual(writes, [.absent])
+        XCTAssertTrue(mutations.isEmpty)
+        XCTAssertFalse(host.universalWatchlistShouldResumeAuthentication)
+    }
+
+    private func makeReadyHost() async throws -> (
+        UniversalWatchlistHostDouble, RuntimeWatchlistDestination, DurableWatchlistMutationStore
+    ) {
+        let host = try await UniversalWatchlistHostDouble()
+        let destination = RuntimeWatchlistDestination(rawID: "connection", entries: [])
+        let store = try DurableWatchlistMutationStore(store: InMemoryWatchlistMutationStateStore())
+        let reconciler = WatchlistReconciler(
+            registry: WatchlistDestinationRegistry([destination]), mutationStore: store
+        )
+        let target = WatchlistMutationTarget(
+            aliasID: MediaAliasID(), kind: .movie,
+            externalIDs: [WatchlistExternalID(namespace: .imdb, value: "tt-connection")!]
+        )!
+        try await reconciler.enqueue(
+            profileID: host.profiles.activeProfileID, desiredState: .absent,
+            target: target, destinationID: destination.id
+        )
+        try await store.markFailed(
+            WatchlistMutationKey(
+                profileID: host.profiles.activeProfileID,
+                aliasID: target.aliasID, destinationID: destination.id
+            ),
+            classification: .authentication, retryAt: nil
+        )
+        host.universalWatchlistReconciler = reconciler
+        host.universalWatchlistMutationStore = store
+        host.universalWatchlistDestinationIDs = [destination.id]
+        host.universalWatchlistNativeViewLoaded = true
+        host.universalWatchlistProfileID = UniversalWatchlistScope.live(
+            profileID: host.profiles.activeProfileID,
+            identityGeneration: host.plexWatchlistIdentityGeneration,
+            accountsKey: host.nativeWatchlistAccounts.map(\.account.id).sorted().joined(separator: ",")
+        )
+        host.universalWatchlistNativeView.applySuccess(
+            destinationID: destination.id,
+            entries: [NativeWatchlistEntry(aliasID: MediaAliasID(), kind: .movie, index: 0)!],
+            identityScope: destination.cacheIdentityScope
+        )
+        return (host, destination, store)
+    }
+}
+
 /// The smallest object that can answer `UniversalWatchlistHost`.
 ///
 /// Only the local halves are real — the watchlist, the alias ledger, the identity
@@ -850,7 +1048,8 @@ final class UniversalWatchlistHostDouble: UniversalWatchlistHost {
     var universalWatchlistShouldResumeAuthentication = false
     var universalWatchlistIdentityUpdateTask: Task<Void, Never>?
     let plexDiscoverTokens = PlexDiscoverTokenBox()
-    let activeProfileAwaitsUnlock = false
+    var activeProfileAwaitsUnlock = false
+    var trackersAreScopedToActiveProfile = true
 
     private(set) var cloudPublishCount = 0
 
@@ -924,6 +1123,7 @@ private actor RuntimeWatchlistDestination: WatchlistDestination {
     )
     private var entries: [WatchlistDestinationEntry]
     private var applied: [WatchlistDesiredState] = []
+    private var reads = 0
 
     init(
         rawID: String,
@@ -936,8 +1136,11 @@ private actor RuntimeWatchlistDestination: WatchlistDestination {
     }
 
     func fetchEntries() async throws -> [WatchlistDestinationEntry] {
-        entries
+        reads += 1
+        return entries
     }
+
+    func fetchCount() -> Int { reads }
 
     func setEntries(_ entries: [WatchlistDestinationEntry]) {
         self.entries = entries

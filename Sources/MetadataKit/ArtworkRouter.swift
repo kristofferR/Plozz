@@ -194,6 +194,22 @@ public actor ArtworkRouter {
         await sourcedArtworkURL(kind, for: item)?.value
     }
 
+    public func portraitHeroArtworkURL(
+        for item: MediaItem, placement: ArtworkPlacement = .homeHero
+    ) async -> URL? {
+        guard item.supportsExternalArtworkLookup else { return nil }
+        let policy = settingsStore.load().artworkPolicyIdentity
+        let subject = Self.seriesArtworkItem(for: item)
+        let artwork = await sourcedArtworkURL(
+            .hero, for: MetadataQuery(subject),
+            catalogCandidates: subject.metadataArtworkURLs(for: placement),
+            prefersPortraitHero: true
+        )
+        guard !Task.isCancelled, settingsStore.load().artworkPolicyIdentity == policy else { return nil }
+        if let artwork { return artwork.value }
+        return await artworkURL(for: item, placements: [.poster])
+    }
+
     public func sourcedArtworkURL(
         _ kind: ArtworkKind,
         for item: MediaItem
@@ -222,7 +238,8 @@ public actor ArtworkRouter {
     private func sourcedArtworkURL(
         _ kind: ArtworkKind,
         for query: MetadataQuery,
-        catalogCandidates: [SourcedValue<URL>]
+        catalogCandidates: [SourcedValue<URL>],
+        prefersPortraitHero: Bool = false
     ) async -> SourcedValue<URL>? {
         let providers = configuredProviders(for: query, kind: kind)
         guard !providers.isEmpty else { return nil }
@@ -238,7 +255,8 @@ public actor ArtworkRouter {
                     let key = Self.providerCacheKey(
                         query: query,
                         kind: kind,
-                        source: entry.source
+                        source: entry.source,
+                        prefersPortraitHero: prefersPortraitHero && (entry.source == .tmdb || entry.source == .tvdb)
                     )
                     if let hit = await cache.cached(key) {
                         return (
@@ -246,7 +264,9 @@ public actor ArtworkRouter {
                             hit.map { SourcedValue(value: $0, source: entry.source) } ?? saved
                         )
                     }
-                    let url = await entry.provider.artworkURL(kind, for: query)
+                    let url = prefersPortraitHero
+                        ? await entry.provider.portraitHeroURL(for: query)
+                        : await entry.provider.artworkURL(kind, for: query)
                     await cache.store(url, for: key)
                     return (
                         index,
@@ -441,9 +461,11 @@ public actor ArtworkRouter {
     static func providerCacheKey(
         query: MetadataQuery,
         kind: ArtworkKind,
-        source: MetadataSource
+        source: MetadataSource,
+        prefersPortraitHero: Bool = false
     ) -> String {
-        "\(query.cacheKey(for: kind))|provider:\(source.rawValue)"
+        let variant = prefersPortraitHero ? "|portrait-hero-v1" : ""
+        return "\(query.cacheKey(for: kind))\(variant)|provider:\(source.rawValue)"
     }
 
     private func provider(for source: MetadataSource) -> (any ArtworkProvider)? {

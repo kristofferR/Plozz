@@ -73,8 +73,10 @@ final class IPTVPlaybackDiagnosticsTests: XCTestCase {
             XCTAssertNil(PlaybackDeliveryFailure.state(for: url))
             if [401, 403, 429, 451].contains(status) {
                 XCTAssertNotNil(state.error, "The active player retains evidence through proxy cleanup.")
+                XCTAssertEqual(state.diagnostic?.httpStatus, status)
             } else {
                 XCTAssertNil(state.error, "Recoverable failures must not poison a successful native fallback.")
+                XCTAssertNil(state.diagnostic)
             }
         }
     }
@@ -127,6 +129,85 @@ final class IPTVPlaybackDiagnosticsTests: XCTestCase {
         XCTAssertEqual(failure.domain, .url)
         XCTAssertEqual(failure.code, -1001)
         XCTAssertNil(failure.httpStatus)
+        XCTAssertEqual(failure.evidence?.delivery?.firstFailure?.networkCode, -1001)
+        XCTAssertNil(failure.evidence?.delivery?.firstFailure?.status)
+    }
+
+    func testSuccessfulManifestAndFailedChildBothReachTheRetainedPlaybackEvidence() async throws {
+        let manifest = """
+        #EXTM3U
+        #EXT-X-TARGETDURATION:6
+        #EXT-X-MEDIA-SEQUENCE:123
+        #EXTINF:6.5,private channel title
+        private-segment.ts?token=secret
+        #EXT-X-ENDLIST
+        """
+        IPTVFixture.state.handler = { request in
+            if request.url?.pathExtension == "ts" {
+                return (404, ["Content-Type": "text/html"], Data("private provider error".utf8))
+            }
+            return (200, ["Content-Type": "application/octet-stream"], Data(manifest.utf8))
+        }
+        let proxy = try IPTVPlaybackProxy(
+            origin: XCTUnwrap(URL(string: "https://provider.test/private/live?token=secret")),
+            headers: [:], configuration: IPTVFixture.configuration()
+        )
+        addTeardownBlock { await proxy.stop() }
+        let url = try await proxy.start()
+        let state = try XCTUnwrap(PlaybackDeliveryFailure.state(for: url))
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let (body, response) = try await session.data(from: url)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let child = try XCTUnwrap(String(decoding: body, as: UTF8.self).split(separator: "\n")
+            .first { $0.hasPrefix("http://") }.flatMap { URL(string: String($0)) })
+        _ = try await session.data(from: child)
+        let evidence = state.evidence
+        XCTAssertEqual(evidence.root?.format, .hls, "Use sniffed response facts, not the opaque proxy URL.")
+        XCTAssertEqual(evidence.root?.playlist?.targetDurationMilliseconds, 6_000)
+        XCTAssertEqual(evidence.root?.playlist?.maximumSegmentMilliseconds, 6_500)
+        XCTAssertEqual(evidence.root?.playlist?.mediaSequence, 123)
+        XCTAssertEqual(evidence.root?.receivedBytes, manifest.utf8.count)
+        XCTAssertEqual(evidence.firstFailure?.resource, .child)
+        XCTAssertEqual(evidence.firstFailure?.status, 404)
+        XCTAssertEqual(evidence.firstFailure?.format, .html)
+        XCTAssertNil(state.error, "Do not alter the existing fallback policy.")
+        let text = String(decoding: try JSONEncoder().encode(evidence), as: UTF8.self)
+        for secret in ["private", "token", "secret", "127.0.0.1"] { XCTAssertFalse(text.contains(secret)) }
+        await proxy.stop()
+        XCTAssertEqual(state.evidence.firstFailure?.status, 404)
+    }
+
+    func testRangeAndPlaylistFactsDoNotRetainArbitraryHeaderOrManifestText() {
+        XCTAssertEqual(IPTVPlaybackProxy.rangeEvidence(nil), .absent)
+        XCTAssertEqual(IPTVPlaybackProxy.rangeEvidence("bytes 10-19/20"), .valid)
+        XCTAssertEqual(IPTVPlaybackProxy.rangeEvidence("bytes */20"), .valid)
+        for value in ["bytes 20-10/30", "bytes 10-20/15", "bytes secret", "https://private.test"] {
+            XCTAssertEqual(IPTVPlaybackProxy.rangeEvidence(value), .invalid)
+        }
+        let value = IPTVPlaybackProxy.playlistEvidence("""
+        #EXTM3U
+        #EXT-X-TARGETDURATION:secret
+        #EXT-X-MEDIA-SEQUENCE:99999999999999999999999999
+        #EXT-X-KEY:METHOD=AES-128,URI="https://private.test/key"
+        #EXT-X-MAP:URI="private-init"
+        #EXT-X-BYTERANGE:16
+        #EXTINF:nan,private
+        private.ts
+        """)
+        XCTAssertNil(value.targetDurationMilliseconds)
+        XCTAssertNil(value.maximumSegmentMilliseconds)
+        XCTAssertNil(value.mediaSequence)
+        XCTAssertTrue(value.hasEncryption)
+        XCTAssertTrue(value.hasMap)
+        XCTAssertTrue(value.hasByteRanges)
+        XCTAssertTrue(value.isValid)
+        XCTAssertTrue(IPTVPlaybackProxy.playlistEvidence(
+            "#EXT-X-KEY:URI=\"https://private.test/key,METHOD=NONE\",METHOD=AES-128"
+        ).hasEncryption)
+        XCTAssertFalse(IPTVPlaybackProxy.playlistEvidence(
+            "#EXT-X-KEY:METHOD=NONE,URI=\"https://private.test/key,METHOD=AES-128\""
+        ).hasEncryption)
     }
 }
 

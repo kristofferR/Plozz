@@ -8,7 +8,7 @@ import SwiftUI
 struct LiveTVPlaylistEditor: View {
     @State private var model: LiveTVPlaylistEditorModel
     @State private var checkRequest: UUID?
-    @Environment(\.dismiss) private var dismiss
+    @SettingsPageDismiss private var dismiss
     let isEditing: Bool
     let save: (LiveTVPlaylistEditorModel.ValidatedInput) throws -> Void
 

@@ -13,7 +13,7 @@ enum TraktDeviceAuthorizationError: Error {
 /// it's approved. Polling honours a deadline (the code's `expires_in`) and Swift
 /// task cancellation so the UI can offer Cancel cleanly — mirroring the existing
 /// Jellyfin Quick Connect service.
-public struct TraktAuthService: Sendable {
+public struct TraktAuthService: TrackerTokenRefreshing {
     private let client: TraktClient
     private let sleep: @Sendable (TimeInterval) async throws -> Void
 

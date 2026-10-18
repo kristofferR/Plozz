@@ -320,6 +320,34 @@ final class LiveTVServerGuideImportTests: XCTestCase {
         XCTAssertNil(imports.serverSources[0].guideFailure)
     }
 
+    func testUnsupportedGuideKeepsChannelsPlayableAndDoesNotLabelServerUnsupported() async throws {
+        let provider = WindowGuideProvider(channels: channels, programs: [program("current")])
+        let (imports, model) = makeImport(provider, kind: .iptv)
+        await imports.reload(into: model)
+        let id = try globalID("one", in: imports)
+        await provider.setGuideFailure(.unsupportedAPI)
+        await imports.reloadServerGuides(
+            channelIDs: [id], from: now, to: now.addingTimeInterval(21_600), into: model, force: true
+        )
+        let status = try XCTUnwrap(imports.serverSources.first)
+        XCTAssertNil(status.failure)
+        XCTAssertEqual(status.guideFailure, .guideUnavailable)
+        XCTAssertEqual(String(localized: LiveTVServerImportError.guideUnavailable.userDescription), "Guide unavailable")
+        XCTAssertTrue(status.supportsPlayback)
+        XCTAssertEqual(model.channels.count, channels.count)
+        XCTAssertEqual(model.currentProgram(for: id)?.title, "current")
+        XCTAssertEqual(imports.serverGuideState(channelID: id, from: now, to: now.addingTimeInterval(21_600)), .failed)
+    }
+
+    func testGuideErrorMappingIsSeparateFromCatalogAndPreservesAuthorization() {
+        XCTAssertEqual(LiveTVServerImportError.sanitizedGuide(AppError.notFound), .guideUnavailable)
+        XCTAssertEqual(LiveTVServerImportError.sanitizedGuide(AppError.serverUnreachable), .guideUnavailable)
+        XCTAssertEqual(LiveTVServerImportError.sanitizedGuide(AppError.invalidResponse), .invalidGuide)
+        XCTAssertEqual(LiveTVServerImportError.sanitizedGuide(AppError.unauthorized), .permissionDenied)
+        XCTAssertEqual(LiveTVServerImportError.sanitizedGuide(ServerLiveTVError.subscriptionRequired), .subscriptionRequired)
+        XCTAssertEqual(LiveTVServerImportError.sanitized(AppError.notFound, fallback: .serviceUnavailable), .unsupportedAPI)
+    }
+
     func testOversizedWindowPreservesLastGoodScheduleAndReportsSanitizedGuideFailure() async throws {
         let provider = WindowGuideProvider(
             channels: channels, programs: [program("current"), program("last-good", offset: 86_400)]

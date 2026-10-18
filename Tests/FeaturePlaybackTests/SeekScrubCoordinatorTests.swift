@@ -277,6 +277,75 @@ final class SeekScrubCoordinatorTests: XCTestCase {
 #if canImport(UIKit)
 @MainActor
 final class PlayerScrubInputTests: XCTestCase {
+    func testInstalledPanRoutesTapWithoutCompetingTouchRecognizers() throws {
+        let (controller, model, recorder) = makeInput()
+        defer { controller.viewDidDisappear(false) }
+        let recognizers = controller.view.gestureRecognizers ?? []
+        let pan = try XCTUnwrap(recognizers.compactMap { $0 as? PlayerSurfacePanGestureRecognizer }.first)
+        let tap = try XCTUnwrap(pan.onStationaryTap)
+        tap()
+        XCTAssertFalse(model.timelineClock.isEnabled)
+        XCTAssertTrue(model.controlsVisible)
+        tap()
+        XCTAssertTrue(model.timelineClock.isEnabled)
+        tap()
+        XCTAssertFalse(model.controlsVisible)
+        #if os(tvOS)
+        XCTAssertTrue(model.timelineClock.isEnabled, "The outgoing clock labels must survive the fade.")
+        #else
+        XCTAssertFalse(model.timelineClock.isEnabled)
+        #endif
+        XCTAssertTrue(recorder.targets.isEmpty)
+        XCTAssertTrue(recognizers.compactMap { $0 as? UITapGestureRecognizer }.allSatisfy {
+            $0.allowedTouchTypes.isEmpty
+        }, "Touch taps must not install a recognizer that can delay the existing pan.")
+    }
+
+    func testLightTapsCycleControlsThenClockThenHiddenWithoutPausingOrSeeking() {
+        let (controller, model, recorder) = makeInput()
+        defer { controller.viewDidDisappear(false) }
+        model.isPaused = false
+        controller.handleSurfaceTap()
+        XCTAssertTrue(model.controlsVisible)
+        XCTAssertFalse(model.timelineClock.isEnabled)
+        XCTAssertFalse(model.isPaused)
+        XCTAssertTrue(recorder.targets.isEmpty)
+        controller.handleSurfaceTap()
+        XCTAssertTrue(model.timelineClock.isEnabled)
+        XCTAssertTrue(model.controlsVisible)
+        controller.handleSurfaceTap()
+        #if os(tvOS)
+        XCTAssertTrue(model.timelineClock.isEnabled, "The third tap only fades the current labels.")
+        #else
+        XCTAssertFalse(model.timelineClock.isEnabled)
+        #endif
+        XCTAssertFalse(model.controlsVisible)
+        controller.handleSurfaceTap()
+        XCTAssertTrue(model.controlsVisible)
+        XCTAssertFalse(model.timelineClock.isEnabled)
+        XCTAssertFalse(model.isPaused)
+    }
+
+    func testClockModeDoesNotDelayFirstScrubSampleOrAllowTapDuringTraversal() {
+        let (controller, model, recorder) = makeInput()
+        defer { controller.viewDidDisappear(false) }
+        controller.handleSurfaceTap()
+        controller.handleSurfaceTap()
+        let gesture = ScrubInputPan()
+        gesture.phase = .began
+        gesture.travel = CGPoint(x: 100, y: 0)
+        controller.handlePan(gesture)
+        XCTAssertTrue(model.isScrubbing)
+        XCTAssertEqual(model.scrubSeconds, 100 + (100 - 18) * 0.18, accuracy: 0.001)
+        XCTAssertTrue(recorder.targets.isEmpty)
+        controller.handleSurfaceTap()
+        XCTAssertTrue(model.timelineClock.isEnabled, "A tap cannot change mode during a flick-bridged scrub.")
+        gesture.phase = .ended
+        controller.handlePan(gesture)
+        XCTAssertEqual(recorder.targets.count, 1)
+        XCTAssertFalse(model.isScrubbing)
+    }
+
     func testBeganSampleMovesPreviewWhileAnEarlierSeekIsPending() {
         let (controller, model, recorder) = makeInput()
         defer { controller.viewDidDisappear(false) }

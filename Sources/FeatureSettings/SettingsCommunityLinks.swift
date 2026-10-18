@@ -5,17 +5,34 @@ import CoreUI
 
 public struct SettingsCommunityLinks: View {
     private let repoURL: String
+    private let compact: Bool
 
-    public init(repoURL: String = AppLinks.repository.absoluteString) {
+    public init(repoURL: String = AppLinks.repository.absoluteString, compact: Bool = false) {
         self.repoURL = repoURL
+        self.compact = compact
     }
 
     public var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 24) {
+        #if os(tvOS)
+        if compact {
+            HStack(spacing: SettingsFormMetrics.illustratedGroupSpacing) {
                 codes
             }
-            VStack(spacing: 24) {
+            .fixedSize(horizontal: false, vertical: true)
+        } else {
+            adaptiveCards
+        }
+        #else
+        adaptiveCards
+        #endif
+    }
+
+    private var adaptiveCards: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: compact ? 12 : 24) {
+                codes
+            }
+            VStack(spacing: compact ? 12 : 24) {
                 codes
             }
         }
@@ -23,12 +40,13 @@ public struct SettingsCommunityLinks: View {
 
     @ViewBuilder
     private var codes: some View {
-        SettingsCommunityCard.discord()
+        SettingsCommunityCard.discord(compact: compact)
         SettingsCommunityCard(
             brand: .github,
             caption: "Source code and issues",
             url: repoURL,
-            accessibilityLabel: "Scan to view the Plozz GitHub repository"
+            accessibilityLabel: "Scan to view the Plozz GitHub repository",
+            compact: compact
         )
     }
 }
@@ -38,43 +56,63 @@ struct SettingsCommunityCard: View {
     let caption: LocalizedStringKey
     let url: String
     let accessibilityLabel: LocalizedStringKey
+    var compact = false
 
-    static func discord(caption: LocalizedStringKey = "Join the community") -> Self {
+    static func discord(caption: LocalizedStringKey = "Join the community", compact: Bool = false) -> Self {
         Self(
             brand: .discord,
             caption: caption,
             url: AppLinks.discord.absoluteString,
-            accessibilityLabel: "Scan to join the Plozz Discord community"
+            accessibilityLabel: "Scan to join the Plozz Discord community",
+            compact: compact
         )
     }
 
     var body: some View {
-        SettingsPanel {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 24) {
+        SettingsPanel(contentPadding: compact
+                      ? EdgeInsets(top: 16, leading: 16, bottom: 16, trailing: 16)
+                      : .settingsPanelDefault) {
+            #if os(tvOS)
+            if compact {
+                HStack(spacing: SettingsFormMetrics.illustratedGroupSpacing) {
                     identity(brand: brand, caption: caption)
                     qrCode(url)
                 }
-                VStack(alignment: .leading, spacing: 24) {
-                    identity(brand: brand, caption: caption)
-                    qrCode(url)
-                        .frame(maxWidth: .infinity)
-                }
+                .frame(maxHeight: .infinity)
+            } else {
+                adaptiveContent
             }
+            #else
+            adaptiveContent
+            #endif
         }
-        .frame(idealWidth: 560, maxWidth: .infinity)
+        .frame(idealWidth: compact ? 400 : 560, maxWidth: .infinity)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var adaptiveContent: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: compact ? 16 : 24) {
+                identity(brand: brand, caption: caption)
+                qrCode(url)
+            }
+            VStack(alignment: .leading, spacing: 24) {
+                identity(brand: brand, caption: caption)
+                qrCode(url)
+                    .frame(maxWidth: .infinity)
+            }
+        }
     }
 
     private func identity(
         brand: SettingsCommunityLogo.Brand,
         caption: LocalizedStringKey
     ) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            SettingsCommunityLogo(brand: brand, height: 40)
+        VStack(alignment: .leading, spacing: compact ? 8 : 12) {
+            SettingsCommunityLogo(brand: brand, height: compact ? 28 : 40)
             Text(caption)
-                .font(.caption)
+                .font(compact ? SettingsRowMetrics.helperFont : .caption)
                 .plozzForeground(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -83,7 +121,7 @@ struct SettingsCommunityCard: View {
 
     private func qrCode(_ url: String) -> some View {
         SettingsQRCode(string: url, centerMark: nil)
-            .frame(width: 180, height: 180)
+            .frame(width: compact ? 144 : 180, height: compact ? 144 : 180)
             .accessibilityHidden(true)
     }
 }

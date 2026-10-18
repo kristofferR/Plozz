@@ -2,9 +2,7 @@ import XCTest
 import CoreModels
 @testable import FeatureHomeCore
 
-/// A poster is the right shape for a portrait phone, but its whole job is to
-/// carry its own title treatment — and no provider marks which of its posters
-/// are textless. Leading with one under an overlaid logo drew the title twice.
+/// Unclassified library art must not change preference when a hero logo arrives.
 final class HeroArtworkPlacementTests: XCTestCase {
     private func makeItem(hasLogo: Bool) -> MediaItem {
         var item = MediaItem(id: "1", title: "Futurama", kind: .series)
@@ -25,11 +23,11 @@ final class HeroArtworkPlacementTests: XCTestCase {
         ).artworkReferences.first
     }
 
-    func testPortraitHeroUsesThePosterWhenNoLogoWillBeDrawn() {
+    func testPortraitHeroUsesTheBackdropBeforeTheLogoResolves() {
         XCTAssertEqual(
             firstReference(hasLogo: false, style: .compactPortrait),
-            .remote(URL(string: "https://example.test/poster.jpg")!),
-            "with no logo the poster's own title treatment is the point"
+            .remote(URL(string: "https://example.test/backdrop.jpg")!),
+            "a missing logo may still resolve asynchronously"
         )
     }
 
@@ -61,6 +59,13 @@ final class HeroArtworkPlacementTests: XCTestCase {
         XCTAssertTrue(
             references.contains(.remote(URL(string: "https://example.test/poster.jpg")!))
         )
+    }
+
+    func testPortraitHeroKeepsTheSeparateLogoAndDoesNotChangeOrdinaryPosters() {
+        let item = makeItem(hasLogo: true)
+        let presentation = HeroPresentation(item: item, artworkStyle: .compactPortrait, surface: .home)
+        XCTAssertEqual(presentation.logoReferences, [.remote(item.logoURL!)])
+        XCTAssertEqual(item.artworkReferences(for: .poster), [.remote(item.posterURL!)])
     }
 
     func testTouchHeroesHonorLibrarySelectionWithoutChangingRecommendedVariety() throws {

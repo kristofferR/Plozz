@@ -56,13 +56,20 @@ early (the decision tree in §4 routes you):
 Crash-reporting consent gates all uploads. Automatic UI/network breadcrumbs and
 performance tracing remain disabled. Reports retain a bounded history of fixed
 screen categories and typed Live TV sync stages; failures include only an
-allowlisted reason and, for known system errors, a numeric code. No source/profile
+allowlisted reason and, for known system errors, a numeric code. No raw source/profile
 identity, playlist URL, media title, error description or user-info dictionary is
 included. Repeated sync failures are reported once per profile/operation/stage
 until recovery. Expected schedule deferrals and cancellation are not failures.
 Numeric SDK memory measurements and its low-memory flag survive redaction;
 device names, installation IDs and arbitrary contexts do not.
 The `PLZLTVSYNC` local log uses the same non-secret vocabulary.
+
+Manual **Send to Developer** reports additionally attach the persistent,
+Release-capable [Live TV source journal](live-tv-prototype.md#diagnosing-disappearing-sources).
+This is separate from automatic Sentry events and the in-memory performance
+snapshot below. It captures pseudonymous source/account/profile transitions and
+a fresh source-storage snapshot so a disappearing source can be distinguished
+from failed enrollment, suppression, changed profile scope or stale presentation.
 
 Opted-in reports also carry a bounded, in-memory performance snapshot. It records
 coarse operation/provider categories, elapsed time, start-thread identity,
@@ -103,7 +110,7 @@ crash-reporting consent and limited to one warning per category per reporter
 lifecycle. These measurements diagnose an unavailable input; a screenshot of the
 generic import error alone cannot establish which limit was reached.
 
-IPTV setup diagnostics are enabled for **all TestFlight builds**, including
+Automatic IPTV setup reports are enabled for **all TestFlight builds**, including
 hotfixes, and local Debug verification, never App Store builds. There is no
 build-number allowlist or automatic build-based expiry; retire the investigation
 explicitly once the setup issues are resolved. This is not a remote configuration
@@ -124,6 +131,38 @@ reports. Success, cancellation and downstream client disconnects do not report
 proxy failures. Opting out invalidates retained attempts even if reporting is
 later re-enabled. These reports diagnose playback separately from catalogue
 imports; they do not establish that two users have the same underlying failure.
+
+Local **Details** are separate from automatic reporting. Failed IPTV sign-in/import
+forms and terminal Live TV playback errors retain a small in-memory support report
+even without crash-reporting consent, including in App Store builds. Where known,
+it shows the failed stage, HTTP status, response type, numeric network/engine/storage
+codes, aggregate import counts and timings, and app/OS versions. iPhone and iPad
+can share the report through the system share sheet; Apple TV displays it locally.
+The report excludes addresses, headers, credentials, account/channel names and
+arbitrary error descriptions. Unknown causes remain unknown rather than implying
+a subscription, regional restriction or unsupported codec.
+
+The live decoder wrapper forwards evidence only while it owns a source. The
+player captures that evidence before stopping on failure or end-of-stream and
+passes the typed report through the guide and multiview callbacks. An end without
+underlying evidence does not invent an engine cause. Prepared-stream identity still rejects
+late failures from replaced channels. Only terminal upstream refusals are retained
+as delivery failures; a recoverable 404 or 503 must not poison native fallback.
+Starting another setup attempt clears its preceding local report. Local capture
+does not enable uploads, bypass telemetry budgets or replay into later consent
+generations, and introduces no probes, rescans or background polling. Failed
+server enrollment stays visible on the empty setup screen with an explicit retry.
+
+For live HLS, the proxy retains the root playlist's successfully resolved delivery
+URL for subsequent refreshes and HEAD probes. Reopening a provider's original
+entrypoint can create a different session and change segment URLs at the same
+media sequence, even when the proxy's local URL encoding is deterministic.
+Redirected delivery URLs remain private, and account headers are scoped against
+the actual request origin on every refresh. A 401, 403, 404, or 410 from a retained
+redirect triggers one renewal through the original entrypoint; an actual refusal
+there remains terminal. Other failures do not trigger a renewal loop. This state
+is playback-session-local, does not alter raw transport streams or on-demand
+requests, and is discarded when the proxy stops.
 
 Only explicit URL, file, and Xtream account setup and legacy source check/save
 attempts establish the task-local context. Ordinary catalogue refresh, guide

@@ -224,6 +224,21 @@ final class LiveTVPortableSyncBridgeTests: XCTestCase {
         XCTAssertEqual(try fixture.sources.load().playlists.count, 1)
     }
 
+    func testDeferredProfileDeletionCannotRepublishPortableState() async throws {
+        let fixture = try makeFixture()
+        let profileID = fixture.profiles.activeProfileID
+        let preferences = fixture.preferences
+        fixture.consent(profileID).isEnabled = true
+        try preferences.save(.init(favoriteIDs: ["favorite"]))
+        let initial = await fixture.bridge.capture(fallback: [:])
+        XCTAssertFalse(initial.isEmpty)
+        fixture.profiles.applySyncedProfileDTOs([:], deletions: [profileID])
+
+        let after = await fixture.makeBridge().capture(fallback: initial)
+        XCTAssertTrue(after.isEmpty)
+        XCTAssertEqual(try preferences.load().favoriteIDs, ["favorite"])
+    }
+
     func testAccountResetRevokesEveryProfileConsentButKeepsLocalState() async throws {
         let fixture = try makeFixture()
         let child = fixture.profiles.add(name: "Other", isKidsProfile: true)

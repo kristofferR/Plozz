@@ -42,13 +42,26 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
     }
 
     public var separatesNextUp: Bool {
-        (rowCustomization?.defaults == .matchServer
+        guard !mergesNextUpRows else { return false }
+        return (rowCustomization?.defaults == .matchServer
             && rowCustomization?.resolvedDefaults?.mode != .combined
             && rowCustomization?.availableServerRows.first {
                 $0.section.kind == .continueWatching
             }?.section.includesNextUp != true)
             || rowCustomization?.defaults == .provider
             || rowCustomization?.shown.contains { $0.libraryKind == .nextUp } == true
+    }
+
+    /// On by default for every layout, independently of the saved row arrangement.
+    public var mergeNextUpIntoContinueWatching: Bool
+
+    public var mergesNextUpRows: Bool {
+        mergeNextUpIntoContinueWatching && isGlobalRowEnabled(.continueWatching)
+    }
+
+    public func isMergedHomeRow(_ choice: HomeRowChoice) -> Bool {
+        mergesNextUpRows
+            && (choice.id.libraryKind == .nextUp || choice.serverRow?.section.kind == .nextUp)
     }
 
     /// Whether Home merges every library's content into unified cross-server rows
@@ -97,7 +110,8 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
         enabledLibraryHomeRows: Set<String> = [],
         hasSeededLibraryRows: Bool = false,
         continueWatchingShowsSeriesArtwork: Bool = true,
-        rowCustomization: HomeRowCustomization? = nil
+        rowCustomization: HomeRowCustomization? = nil,
+        mergeNextUpIntoContinueWatching: Bool = true
     ) {
         self.mergeLibrariesOnHome = mergeLibrariesOnHome
         self.disabledKeys = disabledKeys
@@ -106,6 +120,7 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
         self.hasSeededLibraryRows = hasSeededLibraryRows
         self.continueWatchingShowsSeriesArtwork = continueWatchingShowsSeriesArtwork
         self.rowCustomization = rowCustomization
+        self.mergeNextUpIntoContinueWatching = mergeNextUpIntoContinueWatching
     }
 
     /// Fresh profiles match their server; existing blobs retain legacy behavior.
@@ -178,6 +193,7 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
     }
 
     public func isHomeRowVisible(_ choice: HomeRowChoice) -> Bool {
+        guard !isMergedHomeRow(choice) else { return false }
         if let rowCustomization {
             return rowCustomization.isVisible(
                 choice.id, providerDefault: rowCustomization.defaults == .legacy
@@ -201,6 +217,7 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
     public func requestedRowKinds(for library: AggregatedLibrary) -> [LibraryHomeRowKind] {
         guard usesIndividualHomeRows, isEnabled(library.key) else { return [] }
         return LibraryHomeRowKind.available(for: library).filter { kind in
+            if kind == .nextUp, mergesNextUpRows { return false }
             guard let rowCustomization else { return isLibraryRowEnabled(library.key, kind: kind) }
             if kind == .hubs {
                 let explicit = rowCustomization.shown.contains {
@@ -243,8 +260,23 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
     public mutating func applyRows(
         _ sections: OrderedVisibilityList.Sections<HomeRowID>, choices: [HomeRowChoice]
     ) {
+        var sections = sections
+        var unmerged = self
+        unmerged.mergeNextUpIntoContinueWatching = false
+        let previous = unmerged.rowSections(choices: choices)
+        let preserved = Set(choices.filter(isMergedHomeRow).map(\.id))
+        if !preserved.isEmpty {
+            // Merged rows are absent from the arranger, not explicitly hidden.
+            // Restore their saved slots before applying edits to the other rows.
+            func restoring(_ old: [HomeRowID], edits: [HomeRowID]) -> [HomeRowID] {
+                var iterator = edits.filter { !preserved.contains($0) }.makeIterator()
+                let result = old.compactMap { preserved.contains($0) ? $0 : iterator.next() }
+                return result + Array(iterator)
+            }
+            sections.enabled = restoring(previous.enabled, edits: sections.enabled)
+            sections.disabled = restoring(previous.disabled, edits: sections.disabled)
+        }
         if rowCustomization == nil {
-            let previous = rowSections(choices: choices)
             rowCustomization = HomeRowCustomization(
                 defaults: .legacy, order: previous.combined,
                 hidden: Set(previous.disabled), shown: Set(previous.enabled)
@@ -305,6 +337,7 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
         case hasSeededLibraryRows
         case continueWatchingShowsSeriesArtwork
         case rowCustomization
+        case mergeNextUpIntoContinueWatching
     }
 
     /// Decodes leniently so a pre-existing blob still loads: missing fields fall
@@ -335,6 +368,9 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
             forKey: .continueWatchingShowsSeriesArtwork
         ) ?? true
         self.rowCustomization = try container.decodeIfPresent(HomeRowCustomization.self, forKey: .rowCustomization)
+        self.mergeNextUpIntoContinueWatching = try container.decodeIfPresent(
+            Bool.self, forKey: .mergeNextUpIntoContinueWatching
+        ) ?? true
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -346,6 +382,7 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
         try container.encode(hasSeededLibraryRows, forKey: .hasSeededLibraryRows)
         try container.encode(continueWatchingShowsSeriesArtwork, forKey: .continueWatchingShowsSeriesArtwork)
         try container.encodeIfPresent(rowCustomization, forKey: .rowCustomization)
+        try container.encode(mergeNextUpIntoContinueWatching, forKey: .mergeNextUpIntoContinueWatching)
     }
 }
 

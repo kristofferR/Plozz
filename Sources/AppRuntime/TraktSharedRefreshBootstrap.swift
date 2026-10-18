@@ -28,7 +28,8 @@ public enum TraktSharedRefreshBootstrap {
 
     static func manages(_ account: SyncedTokenRegistry.Account) -> Bool {
         TraktSharedRefresh.shared.isConfigured
-            && (account.account == "trakt.oauth" || account.account.hasPrefix("trakt.oauth."))
+            && (account.account == "trakt.oauth" || account.account.hasPrefix("trakt.oauth.")
+                || account.account == "wetrakr.oauth" || account.account.hasPrefix("wetrakr.oauth."))
     }
 
     static func account(forRecordName name: String) -> SyncedTokenRegistry.Account? {

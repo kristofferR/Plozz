@@ -217,6 +217,7 @@ struct MarqueeText: View {
     var restingAlignment: Alignment = .leading
 
     @Environment(\.playerMenuRowIsFocused) private var rowFocused
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var textWidth: CGFloat = 0
     @State private var containerWidth: CGFloat = 0
     @State private var offset: CGFloat = 0
@@ -272,6 +273,7 @@ struct MarqueeText: View {
             // second one while the fade was still only part way to transparent.
             .mask { fadeMask }
             .onChange(of: focused) { _, _ in restart() }
+            .onChange(of: reduceMotion) { _, _ in restart() }
             .onChange(of: textWidth) { _, _ in restart() }
             .onChange(of: containerWidth) { _, _ in restart() }
     }
@@ -320,7 +322,7 @@ struct MarqueeText: View {
         }
 
         let overflow = max(0, textWidth - containerWidth)
-        guard focused, overflow > 1 else { return }
+        guard focused, !reduceMotion, overflow > 1 else { return }
         // Scroll left to reveal the end, then back — looping while focused. Speed
         // scales with the overflow so long and short names move at a similar pace.
         let duration = max(2.0, Double(overflow) / 55.0)

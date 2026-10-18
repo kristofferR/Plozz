@@ -14,12 +14,6 @@ struct ContinueWatchingArtworkPicker: View {
     @Binding var style: ContinueWatchingArtworkStyle
     @Environment(\.themePalette) private var palette
 
-    /// Between the Appearance pickers (150) and the navigation one (248). These
-    /// previews carry more detail than a card-style swatch — a wordmark, a scene,
-    /// a chip and the caption bars — and at the compact default of 124 the card
-    /// inside was too small to read any of it.
-    private let swatchHeight: CGFloat = 200
-
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
             ForEach(ContinueWatchingArtworkStyle.allCases, id: \.self) { option in
@@ -29,7 +23,10 @@ struct ContinueWatchingArtworkPicker: View {
                     isSelected: style == option,
                     accent: palette.accent,
                     compact: true,
-                    swatchHeight: swatchHeight,
+                    swatchHeight: 200,
+                    swatchAspectRatio: swatchAspectRatio,
+                    titleLineLimit: nil,
+                    titleSizeGroup: ContinueWatchingArtworkStyle.allCases.map(\.displayName),
                     action: { style = option }
                 ) {
                     ContinueWatchingArtworkSwatch(
@@ -37,9 +34,19 @@ struct ContinueWatchingArtworkPicker: View {
                         cornerRadius: PlozzTheme.Metrics.Radius.content
                     )
                 }
+                .accessibilityLabel(Text(option.displayName))
+                .accessibilityAddTraits(style == option ? .isSelected : [])
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var swatchAspectRatio: CGFloat? {
+        #if os(tvOS)
+        nil
+        #else
+        6.0 / 5.0
+        #endif
     }
 }
 #endif

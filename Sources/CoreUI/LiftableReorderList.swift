@@ -54,6 +54,7 @@ public struct LiftableReorderList<Element: Hashable>: View {
     private let disabledSectionTitle: LocalizedStringResource
     private let disabledPlaceholder: LocalizedStringResource
     private let requiredEnabled: Set<Element>
+    private let allowsHiding: Bool
     /// Mirrors "a row is currently lifted" outward so the host page can disable its
     /// other controls while a reorder is in progress.
     @Binding private var isLifting: Bool
@@ -74,6 +75,7 @@ public struct LiftableReorderList<Element: Hashable>: View {
         disabledPlaceholder: LocalizedStringResource,
         isLifting: Binding<Bool>,
         requiredEnabled: Set<Element> = [],
+        allowsHiding: Bool = true,
         row: @escaping (Element) -> Row,
         onChange: @escaping (OrderedVisibilityList.Sections<Element>) -> Void
     ) {
@@ -81,36 +83,39 @@ public struct LiftableReorderList<Element: Hashable>: View {
         self.disabledSectionTitle = disabledSectionTitle
         self.disabledPlaceholder = disabledPlaceholder
         self._isLifting = isLifting
-        self.requiredEnabled = requiredEnabled
+        self.requiredEnabled = allowsHiding ? requiredEnabled : requiredEnabled.union(sections.enabled)
+        self.allowsHiding = allowsHiding
         self.row = row
         self.onChange = onChange
     }
 
     #if os(tvOS)
     public var body: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: SettingsRowMetrics.formRowSpacing) {
             ForEach(Array(sections.enabled.enumerated()), id: \.element) { index, element in
                 rowView(element, isEnabled: true, rank: index + 1)
             }
 
-            ReorderDisabledDivider(
-                title: disabledSectionTitle,
-                isDropTarget: liftedElement != nil
-            )
-
-            if sections.disabled.isEmpty {
-                ReorderDisabledPlaceholder(
-                    message: disabledPlaceholder,
-                    isReordering: liftedElement != nil
+            if allowsHiding {
+                ReorderDisabledDivider(
+                    title: disabledSectionTitle,
+                    isDropTarget: liftedElement != nil
                 )
-                .disabled(pinnedFocusTarget != nil)
-                .focused($isDisabledPlaceholderFocused)
-                .onChange(of: isDisabledPlaceholderFocused) { _, isFocused in
-                    handleEmptyDisabledDropTargetFocus(isFocused)
-                }
-            } else {
-                ForEach(sections.disabled, id: \.self) { element in
-                    rowView(element, isEnabled: false, rank: nil)
+
+                if sections.disabled.isEmpty {
+                    ReorderDisabledPlaceholder(
+                        message: disabledPlaceholder,
+                        isReordering: liftedElement != nil
+                    )
+                    .disabled(pinnedFocusTarget != nil)
+                    .focused($isDisabledPlaceholderFocused)
+                    .onChange(of: isDisabledPlaceholderFocused) { _, isFocused in
+                        handleEmptyDisabledDropTargetFocus(isFocused)
+                    }
+                } else {
+                    ForEach(sections.disabled, id: \.self) { element in
+                        rowView(element, isEnabled: false, rank: nil)
+                    }
                 }
             }
         }
@@ -243,7 +248,9 @@ public struct LiftableReorderList<Element: Hashable>: View {
     }
 
     public var body: some View {
-        let items = OrderedVisibilityList.listItems(for: sections)
+        let items = allowsHiding
+            ? OrderedVisibilityList.listItems(for: sections)
+            : sections.enabled.map(OrderedVisibilityList.ListItem.element)
         return List {
             ForEach(items, id: \.self) { item in
                 listRow(item)
@@ -336,10 +343,10 @@ public struct LiftableReorderList<Element: Hashable>: View {
 
     @ViewBuilder
     private func rowMenu(_ element: Element) -> some View {
-        if sections.enabled.contains(element) {
+        if allowsHiding, sections.enabled.contains(element) {
             Button("Hide", systemImage: "eye.slash") { perform(.hide, on: element) }
                 .disabled(requiredEnabled.contains(element))
-        } else {
+        } else if allowsHiding {
             Button(
                 LocalizedStringResource("Show", comment: "Action verb: unhide a navigation item. Not the noun meaning a TV series."),
                 systemImage: "eye"
@@ -399,13 +406,13 @@ private struct LiftableRow: View {
 
     var body: some View {
         Button(action: onPrimary) {
-            HStack(spacing: 14) {
+            HStack(spacing: SettingsRowMetrics.spacing(.primary)) {
                 ReorderRank(rank: rank, maximumRank: maximumRank)
-                    .font(.callout.weight(.bold))
+                    .font(SettingsRowMetrics.titleFont)
                 if let providerKind {
                     ProviderBrandMark(
                         provider: providerKind,
-                        size: 32,
+                        size: 24,
                         showsBackground: false,
                         mediaShareTransport: mediaShareTransport
                     )
@@ -413,26 +420,26 @@ private struct LiftableRow: View {
                     .accessibilityHidden(true)
                 } else if let symbolName {
                     Image(systemName: symbolName)
-                        .font(.headline)
+                        .font(SettingsRowMetrics.descriptionFont)
                         .frame(width: 30)
                         .accessibilityHidden(true)
                 }
                 VStack(alignment: .leading, spacing: 4) {
-                    title.font(.headline.weight(.semibold))
+                    title.font(SettingsRowMetrics.titleFont)
                     if let subtitle {
-                        subtitle.font(.caption).opacity(0.7)
+                        subtitle.font(SettingsRowMetrics.descriptionFont).opacity(0.7)
                     }
                 }
                 .lineLimit(1)
                 if let detail {
                     detail
-                        .font(.caption)
+                        .font(SettingsRowMetrics.descriptionFont)
                         .opacity(0.7)
                 }
 
                 Spacer(minLength: 12)
                 Image(systemName: "line.3.horizontal")
-                    .font(.title3)
+                    .font(SettingsRowMetrics.descriptionFont)
                     .accessibilityHidden(true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -502,8 +509,7 @@ private struct LiftableRowButtonStyle: ButtonStyle {
         let fill: AnyShapeStyle = inverted ? AnyShapeStyle(invertedFill) : AnyShapeStyle(Color.clear)
 
         return configuration.label
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .settingsFormRowLayout()
             .foregroundStyle(foreground)
             // ProviderBrandMark and other settings-row descendants use these
             // values to choose focus-safe contrast. `inverted` includes a lifted
@@ -515,7 +521,7 @@ private struct LiftableRowButtonStyle: ButtonStyle {
                 if focused { onFocus() }
             }
             .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous).fill(fill)
+                RoundedRectangle(cornerRadius: SettingsRowMetrics.formRowCornerRadius, style: .continuous).fill(fill)
             )
     }
 }
@@ -550,10 +556,8 @@ private struct ReorderDisabledPlaceholder: View {
     var body: some View {
         Button(action: {}) {
             Text(message)
-                .font(.callout)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 14)
-                .padding(.horizontal, 16)
+                .font(SettingsRowMetrics.descriptionFont)
+                .settingsFormRowLayout()
         }
         .buttonStyle(
             ReorderPlaceholderButtonStyle(suppressFocusAppearance: isReordering)
@@ -573,11 +577,11 @@ private struct ReorderPlaceholderButtonStyle: ButtonStyle {
         return configuration.label
             .foregroundStyle(inverted ? AnyShapeStyle(invertedText) : AnyShapeStyle(.secondary))
             .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                RoundedRectangle(cornerRadius: SettingsRowMetrics.formRowCornerRadius, style: .continuous)
                     .fill(inverted ? AnyShapeStyle(invertedFill) : AnyShapeStyle(Color.clear))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                RoundedRectangle(cornerRadius: SettingsRowMetrics.formRowCornerRadius, style: .continuous)
                     .strokeBorder(
                         style: StrokeStyle(lineWidth: 1, dash: [6, 5])
                     )

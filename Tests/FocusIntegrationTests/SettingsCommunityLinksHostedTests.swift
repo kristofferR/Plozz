@@ -111,11 +111,28 @@ final class SettingsCommunityLinksHostedTests: XCTestCase {
         }
     }
 
+    func testCompactAboutCodesStaySideBySideInBothThemes() async throws {
+        for scheme in [ColorScheme.light, .dark] {
+            let codes = try await renderCodes(
+                SettingsAboutSection(
+                    version: "1.0", build: "1", repoURL: AppLinks.repository.absoluteString,
+                    showsReleaseNotes: true, onActivate: {}, compact: true
+                )
+                .frame(width: SettingsFormMetrics.pageWidth - 2 * SettingsFormMetrics.pageInset),
+                scheme: scheme, name: "settings-native-community-cards-\(scheme)",
+                minimumCodeWidth: 90
+            )
+            XCTAssertEqual(codes[0].bounds.midY, codes[1].bounds.midY, accuracy: 1)
+            XCTAssertGreaterThan(codes[1].bounds.midX - codes[0].bounds.midX, 144, "Discord comes first.")
+        }
+    }
+
     private func renderCodes(
         _ content: some View,
         scheme: ColorScheme,
         name: String,
         expectedURLs: Set<String> = [AppLinks.discord.absoluteString, AppLinks.repository.absoluteString],
+        minimumCodeWidth: CGFloat = 115,
         requiresDiscordFocus: Bool = false
     ) async throws -> [CIQRCodeFeature] {
         let deadline = Date().addingTimeInterval(5)
@@ -196,7 +213,7 @@ final class SettingsCommunityLinksHostedTests: XCTestCase {
         XCTAssertEqual(Set(codes.compactMap(\.messageString)), expectedURLs)
         let decoded = try XCTUnwrap(codes.count == expectedURLs.count ? codes : nil, "Every expected code must decode.")
         for code in codes {
-            XCTAssertGreaterThan(code.bounds.width, 115, "Keep the 180-point scan card.")
+            XCTAssertGreaterThan(code.bounds.width, minimumCodeWidth, "Keep the expected scan size.")
         }
         return decoded.sorted { ($0.messageString ?? "") < ($1.messageString ?? "") }
     }

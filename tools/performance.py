@@ -35,6 +35,13 @@ HOME_HOST_FITTING_COUNTERS = [
     "hostFittingMaxNanoseconds", "hostFittingReentrantCalls",
 ]
 SCENARIOS = {
+    "watchlist-artwork-rehydration": {
+        "suite": "core", "target": "AppRuntimeTests",
+        "test": "UniversalWatchlistMembershipTests/testPerformanceWatchlistArtworkRehydration",
+        "file": "Tests/AppRuntimeTests/UniversalWatchlistMembershipTests.swift",
+        "description": "Rehydrate 180 titles and 11,520 cast credits for each of Plex and Jellyfin through the live watchlist runtime.",
+        "counters": ["items", "credits", "providers"],
+    },
     "sync-unchanged": {
         "suite": "core", "target": "FeatureSyncCloudTests",
         "test": "CloudSyncPersistenceStateTests/testPerformanceUnchangedLedger",
@@ -63,6 +70,48 @@ SCENARIOS = {
         "description": "1,000-channel loopback import, then held expired-catalog refresh; cached reads must not await replacement.",
         "counters": ["channels", "cachedReads", "replacementChannels", "httpRequests", "refreshRequests",
                      "coldForegroundNanoseconds", "cachedForegroundNanoseconds"],
+    },
+    "network-file-read-ahead": {
+        "suite": "network", "target": "EnginePlozzigenTests",
+        "test": "TransportReadAheadPerformanceTests/testPerformanceRandomAndSequentialReads",
+        "file": "Tests/EnginePlozzigenTests/TransportReadAheadPerformanceTests.swift",
+        "description": "Four sparse disc-metadata probes then 64 MiB sequential playback through the production reader; 5-ms synthetic request latency.",
+        "counters": ["metadataReads", "consumedBytes", "transportReads", "transportBytes", "largestRequest"],
+    },
+    "disc-probe-cache": {
+        "suite": "network", "target": "EnginePlozzigenTests",
+        "test": "TransportReadAheadPerformanceTests/testPerformanceRepeatedDiscMetadataProbes",
+        "file": "Tests/EnginePlozzigenTests/TransportReadAheadPerformanceTests.swift",
+        "description": "Twenty-one scattered, overlapping disc metadata probes through the production reader; 5-ms synthetic request latency.",
+        "counters": ["metadataReads", "transportReads", "transportBytes", "largestRequest"],
+    },
+    "http-response-assembly": {
+        "suite": "network", "target": "MediaTransportHTTPTests",
+        "test": "TransportResponsePerformanceTests/testPerformanceChunkedResponseAssembly",
+        "file": "Tests/MediaTransportHTTPTests/TransportResponsePerformanceTests.swift",
+        "description": "Assemble and verify a 32 MiB HTTP body delivered in 16 KiB callbacks through the production session delegate.",
+        "counters": ["responseBytes", "callbacks"],
+    },
+    "webdav-playback-window": {
+        "suite": "network", "target": "MediaTransportWebDAVTests",
+        "test": "WebDAVMediaTransportTests/testPerformancePlaybackWindow",
+        "file": "Tests/MediaTransportWebDAVTests/WebDAVMediaTransportTests.swift",
+        "description": "Read and verify a 32 MiB production WebDAV window with synthetic per-connection delivery delay.",
+        "counters": ["consumedBytes", "transportReads"],
+    },
+    "webdav-paced-playback": {
+        "suite": "network", "target": "EnginePlozzigenTests",
+        "test": "TransportReadAheadPerformanceTests/testPerformancePacedWebDAVPlayback",
+        "file": "Tests/EnginePlozzigenTests/TransportReadAheadPerformanceTests.swift",
+        "description": "Consume 128 MiB through the production WebDAV reader at 32 MiB/s with synthetic 100-ms request latency and bounded transfer delay.",
+        "counters": ["consumedBytes", "requestedRangeBytes", "cachedProbes", "transportReads", "readerWaitNanoseconds"],
+    },
+    "webdav-cached-seeks": {
+        "suite": "network", "target": "EnginePlozzigenTests",
+        "test": "TransportReadAheadPerformanceTests/testPerformanceCachedWebDAVSeeks",
+        "file": "Tests/EnginePlozzigenTests/TransportReadAheadPerformanceTests.swift",
+        "description": "Paced 128 MiB WebDAV consumption with 31 cached back-and-forth probes; count cancelled/repeated range requests.",
+        "counters": ["consumedBytes", "requestedRangeBytes", "cachedProbes", "transportReads", "readerWaitNanoseconds"],
     },
     "diagnostics-disabled": {
         "suite": "diagnostics", "target": "CoreModelsTests",
@@ -166,6 +215,34 @@ SCENARIOS = {
         "file": "Tests/PerformancePresentationSupport/HomeMetadataPerformanceTests.swift",
         "description": "Production media-row updates reusing existing media values with complete metadata.",
         "counters": ["rootUpdates", "parentBodies", "cardInputBuilds", "rowItems", "metadataPeople"],
+    },
+    "mobile-home-card-routing": {
+        "suite": "ui", "platforms": ["iOS"],
+        "test": "HomeCardRoutingTests/testPerformanceHomeCardUpdates",
+        "file": "Tests/iOSPresentationTests/HomeCardRoutingTests.swift",
+        "description": "Update 24 production mobile Home cards against a four-source identity index without activating a card.",
+        "counters": ["rootUpdates", "cards", "sourceResolutions", "observedRevision"],
+    },
+    "source-menu-version-presentation": {
+        "suite": "ui",
+        "test": "PlaybackSourceMenuPerformanceTests/testPerformanceVersionPresentation",
+        "file": "Tests/PerformancePresentationSupport/PlaybackSourceMenuPerformanceTests.swift",
+        "description": "Build actual source-menu version presentations, preserving every displayed title and supplemental fact.",
+        "counters": ["versions", "menuUpdates", "presentedRows"],
+    },
+    "native-poster-composition": {
+        "suite": "ui", "platforms": ["tvOS"],
+        "test": "NativePosterCompositionTests/testPerformanceNativePosterComposition",
+        "file": "Tests/FocusIntegrationTests/NativePosterCompositionTests.swift",
+        "description": "Complete twelve native Home poster conversions, separating request latency from finished bitmap work.",
+        "counters": ["completedPosters", "compositions", "mainThreadCompositions", "requestMicroseconds"],
+    },
+    "native-poster-indicators": {
+        "suite": "ui", "platforms": ["tvOS"],
+        "test": "NativePosterCompositionTests/testPerformanceNativePosterIndicatorReuse",
+        "file": "Tests/FocusIntegrationTests/NativePosterCompositionTests.swift",
+        "description": "Render 72 native poster foregrounds with three visible badges and changing playback progress.",
+        "counters": ["completedOverlays", "distinctBitmaps"],
     },
     "runtime-matrix": {
         "suite": "matrix", "target": "AppRuntimeTests",
@@ -477,8 +554,8 @@ class Lane:
 
     def execute(self):
         try:
-            self.command("architecture", [sys.executable, "tools/arch-guard.py"])
-            self.command("test-hygiene", [sys.executable, "tools/test-hygiene.py"])
+            self.command("architecture", [sys.executable, "tools/arch-guard.py"], timeout=300)
+            self.command("test-hygiene", [sys.executable, "tools/test-hygiene.py"], timeout=300)
             _, devices = self.command("simulators", ["xcrun", "simctl", "list", "devices", "-j"])
             _, runtimes = self.command("runtimes", ["xcrun", "simctl", "list", "runtimes", "-j"])
             simulator, state = simulator_info(json.loads(devices), json.loads(runtimes), self.args.sim_id, self.args.platform)

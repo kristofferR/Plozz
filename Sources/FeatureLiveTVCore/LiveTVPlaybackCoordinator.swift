@@ -8,12 +8,25 @@ public struct LiveTVWatchFailure: Identifiable, Equatable, Sendable {
     public let error: LiveTVPlaybackPreparationError
     public let isGuideOnly: Bool
     public let currentToStop: UUID?
+    public let playbackFailure: LiveChannelFailureReport?
+
+    public init(
+        id: UUID, channelID: String, error: LiveTVPlaybackPreparationError,
+        isGuideOnly: Bool, currentToStop: UUID?, playbackFailure: LiveChannelFailureReport? = nil
+    ) {
+        self.id = id
+        self.channelID = channelID
+        self.error = error
+        self.isGuideOnly = isGuideOnly
+        self.currentToStop = currentToStop
+        self.playbackFailure = playbackFailure
+    }
 
     public var message: LocalizedStringResource {
         if isGuideOnly {
             return "This server provides channel listings, but its Live TV playback mode isn't supported yet. You can browse the guide or watch from another source."
         }
-        return error.userDescription
+        return playbackFailure?.message ?? error.userDescription
     }
 }
 
@@ -288,15 +301,15 @@ public final class LiveTVPlaybackCoordinator {
         return task
     }
 
-    public func playbackFailed(_ id: UUID) {
+    public func playbackFailed(_ id: UUID, report: LiveChannelFailureReport? = nil) {
         guard let current = preparation.current, current.id == id else { return }
         let notify = preview.isExpanded && watchID == nil && !preparation.isPreparing
-        preparation.failCurrent(id: id)
+        preparation.failCurrent(id: id, report: report)
         synchronizePlayerState()
         if notify {
             watchFailure = LiveTVWatchFailure(
                 id: UUID(), channelID: current.channel.id, error: .playbackFailed,
-                isGuideOnly: false, currentToStop: nil
+                isGuideOnly: false, currentToStop: nil, playbackFailure: report
             )
         }
     }

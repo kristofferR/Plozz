@@ -120,6 +120,10 @@ struct InfoPanelView: View {
         .modifier(PlayerCardHeight(metrics: metrics))
         .frame(maxWidth: .infinity, alignment: .leading)
         .modifier(PanelGlassBackground(cornerRadius: metrics.panelCornerRadius))
+        // Playback stays dark even when browsing is light; badges read the
+        // custom palette independently of SwiftUI's color scheme.
+        .environment(\.themePalette, .dark)
+        .environment(\.colorScheme, .dark)
     }
 
     /// The phone card: no thumbnail, and the three columns folded into rows.

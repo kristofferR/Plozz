@@ -13,6 +13,7 @@ public actor CloudTraktRefreshTransport: TraktSharedRefreshTransport {
     // A separate Keychain service/account prevents old Trakt clients decoding
     // the coordination envelope as an OAuth grant.
     public static let recordPrefix = "trackerToken:com.plozz.trakt.sharedGrant|"
+    public static let wetrakrRecordPrefix = "trackerToken:com.plozz.wetrakr.sharedGrant|"
     private let containerIdentifier: String
     private lazy var container = CKContainer(identifier: containerIdentifier)
     private let schema = CloudSyncSchemaDescriptor.trackerTokensV1
@@ -90,25 +91,30 @@ public actor CloudTraktRefreshTransport: TraktSharedRefreshTransport {
     }
 
     public static func recordName(scope: String) -> String {
-        recordPrefix + Data(scope.utf8).base64EncodedString()
+        let account = scope.split(separator: "\0", omittingEmptySubsequences: false).last ?? ""
+        let prefix = account == "wetrakr.oauth" || account.hasPrefix("wetrakr.oauth.")
+            ? wetrakrRecordPrefix : recordPrefix
+        return prefix + Data(scope.utf8).base64EncodedString()
     }
 
     public static func scope(recordName: String) -> String? {
-        guard recordName.hasPrefix(recordPrefix),
-              let data = Data(base64Encoded: String(recordName.dropFirst(recordPrefix.count))),
+        guard let prefix = [recordPrefix, wetrakrRecordPrefix].first(where: { recordName.hasPrefix($0) }),
+              let data = Data(base64Encoded: String(recordName.dropFirst(prefix.count))),
               let scope = String(data: data, encoding: .utf8),
-              scope.split(separator: "\0", omittingEmptySubsequences: false).count == 2 else { return nil }
+              scope.split(separator: "\0", omittingEmptySubsequences: false).count == 2,
+              Self.recordName(scope: scope) == recordName else { return nil }
         return scope
     }
 
     /// Freeze legacy Trakt records too: their old LWW transport is only a
     /// migration source, never an authority after the CAS record exists.
     public static func manages(recordName: String) -> Bool {
-        if recordName.hasPrefix(recordPrefix) { return true }
+        if recordName.hasPrefix(recordPrefix) || recordName.hasPrefix(wetrakrRecordPrefix) { return true }
         guard recordName.hasPrefix("trackerToken:"),
               let separator = recordName.firstIndex(of: "|") else { return false }
         let account = recordName[recordName.index(after: separator)...]
         return account == "trakt.oauth" || account.hasPrefix("trakt.oauth.")
+            || account == "wetrakr.oauth" || account.hasPrefix("wetrakr.oauth.")
     }
 
     public func accountID() async throws -> String {

@@ -73,7 +73,7 @@ public enum PlozzAttributions {
             title: "AetherEngine",
             detail:
                 "Plozzigen playback is powered by AetherEngine by Vincent Herbst. "
-                + "Source: https://github.com/brandomoore/AetherEngine/tree/4b7552a06c4cf646bb94eb7eb273946f8b916a70",
+                + "Source: https://github.com/brandomoore/AetherEngine/tree/299a3d9ea767e2382158c2a3d137c4b1d302ab4a",
             licenses: [.init("LGPL-3.0", family: .lgpl)]
         ),
         PlozzAttribution(
@@ -94,13 +94,23 @@ public enum PlozzAttributions {
             detail:
                 "AetherEngine includes the TrueHD/Atmos decoder by Quick104 and "
                 + "Vincent Herbst, using truehdd and oamd by Rainbaby and contributors. "
-                + "Source: https://github.com/superuser404notfound/LibTrueHD/tree/2.2.0. "
+                + "Source: https://github.com/superuser404notfound/LibTrueHD/tree/2.3.0. "
                 + "Complete notices and license texts are bundled in LibTrueHDNotices.txt, "
                 + "LibTrueHDLicense.txt and LibTrueHDApacheLicense.txt.",
             licenses: [
                 .init("MIT", family: .mit),
                 .init("Apache-2.0", family: .apache),
             ]
+        ),
+        PlozzAttribution(
+            title: "LibDTSX",
+            detail:
+                "AetherEngine includes LibDTSX by kristofferR and Vincent Herbst, "
+                + "using the dca decoder from harletty-bridge to render DTS:X heights and objects. "
+                + "Source: https://github.com/superuser404notfound/LibDTSX/tree/1.0.1. "
+                + "Complete notices and license text are bundled in LibDTSXNotices.txt "
+                + "and LibDTSXLicense.txt.",
+            licenses: [.init("Apache-2.0", family: .apache)]
         ),
         PlozzAttribution(
             title: "libass & Text Rendering",
@@ -150,14 +160,14 @@ public enum PlozzAttributions {
             title: "TMDB",
             detail:
                 "This product uses the TMDB API but is not endorsed or certified by "
-                + "TMDB. Artwork, metadata, and Featured discovery data are provided "
+                + "TMDB. Artwork, metadata, and Discovery data are provided "
                 + "by TMDB (https://www.themoviedb.org).",
             licenses: [.init("API", family: .api)]
         ),
         PlozzAttribution(
             title: "TheTVDB",
             detail:
-                "Metadata, artwork, and Featured discovery data are provided by TheTVDB. "
+                "Metadata, artwork, and Discovery data are provided by TheTVDB. "
                 + "Please consider adding missing information or subscribing at "
                 + "https://thetvdb.com. Plozz uses the "
                 + "TheTVDB API but is not endorsed or certified by TheTVDB.",
@@ -168,14 +178,14 @@ public enum PlozzAttributions {
             detail:
                 "Additional ratings are sourced from the OMDb API (omdbapi.com) and "
                 + "AniList (https://anilist.co). AniList also provides anime metadata "
-                + "and Featured discovery data. Neither endorses or is affiliated "
+                + "and Discovery data. Neither endorses or is affiliated "
                 + "with Plozz.",
             licenses: [.init("API", family: .api)]
         ),
         PlozzAttribution(
             title: "TVmaze",
             detail:
-                "TV schedules, show metadata, and Featured discovery data are provided "
+                "TV schedules, show metadata, and Discovery data are provided "
                 + "by TVmaze (https://www.tvmaze.com). TVmaze API data is licensed under "
                 + "Creative Commons Attribution-ShareAlike 4.0 International "
                 + "(CC BY-SA 4.0): https://creativecommons.org/licenses/by-sa/4.0/. "

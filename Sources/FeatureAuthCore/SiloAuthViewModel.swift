@@ -36,6 +36,7 @@ public final class SiloAuthViewModel {
     private let server: MediaServer
     private let deviceID: String
     private let service: SiloAuthentication
+    private let verificationOnly: Bool
     private let onAuthenticated: (UserSession) -> Void
     private var flow: Task<Void, Never>?
     private var generation = UUID()
@@ -46,12 +47,13 @@ public final class SiloAuthViewModel {
     private var stage: SiloSetupDiagnostic.Stage = .validation
 
     public init(server: MediaServer, deviceID: String, service: SiloAuthentication? = nil,
-                diagnostics: SiloSetupDiagnostics = .shared,
+                diagnostics: SiloSetupDiagnostics = .shared, verificationOnly: Bool = false,
                 onAuthenticated: @escaping (UserSession) -> Void) {
         self.server = server
         self.deviceID = deviceID
         self.service = service ?? SiloAuthentication(baseURL: server.baseURL)
         self.diagnostics = diagnostics
+        self.verificationOnly = verificationOnly
         self.onAuthenticated = onAuthenticated
     }
 
@@ -96,8 +98,10 @@ public final class SiloAuthViewModel {
                     try Task.checkCancellation()
                     guard Date() < deadline else { break }
                     let result = try await service.poll(challenge)
-                    try Task.checkCancellation()
-                    guard generation == current else { return }
+                    guard !Task.isCancelled, generation == current else {
+                        if let received = result.tokens { discardVerificationLogin(received) }
+                        return
+                    }
                     switch result.status {
                     case "pending":
                         interval = max(challenge.interval, result.poll_after)
@@ -270,6 +274,7 @@ public final class SiloAuthViewModel {
                 return
             }
             if error == .unauthorized {
+                if let tokens { discardVerificationLogin(tokens) }
                 tokens = nil
                 availableProfiles = []
             }
@@ -332,6 +337,7 @@ public final class SiloAuthViewModel {
         generation = UUID()
         flow?.cancel()
         flow = nil
+        if let tokens { discardVerificationLogin(tokens) }
         tokens = nil
         availableProfiles = []
         verificationURL = nil
@@ -339,6 +345,14 @@ public final class SiloAuthViewModel {
         pinError = nil
         reportFailure = nil
         phase = .idle
+    }
+
+    private func discardVerificationLogin(_ tokens: SiloTokenPair) {
+        guard verificationOnly else { return }
+        Task { [service] in
+            do { try await service.endVerificationLogin(accessToken: tokens.access_token) }
+            catch { PlozzLog.auth.error("Could not revoke unfinished Silo address verification login") }
+        }
     }
 
     static func sameOrigin(_ url: URL, _ base: URL) -> Bool {

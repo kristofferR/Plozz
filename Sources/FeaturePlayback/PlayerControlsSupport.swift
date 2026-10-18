@@ -177,9 +177,19 @@ struct PlayerTimelineTimes: View {
     let model: PlayerControlsModel
 
     var body: some View {
+        PlayerClockTimeline(
+            model: model, enabled: model.timelineClock.isEnabled && !model.isScrubbing,
+            paused: !model.controlsVisible
+        ) { clock in
+            labels(clock: clock)
+        }
+    }
+
+    private func labels(clock: PlayerClockTimes?) -> some View {
         let fadeGap: CGFloat = 16
-        let curLabel = PlayerControls.timeLabel(model.displaySeconds)
-        let remLabel = "-" + PlayerControls.timeLabel(max(0, model.duration - model.displaySeconds))
+        let curLabel = clock?.current ?? PlayerControls.timeLabel(model.displaySeconds)
+        let remLabel = clock.map { $0.endTime ?? "--:--" }
+            ?? ("-" + PlayerControls.timeLabel(max(0, model.duration - model.displaySeconds)))
         let curW = PlayerControls.measuredTimeWidth(curLabel)
         let remW = PlayerControls.measuredTimeWidth(remLabel)
         return GeometryReader { geo in
@@ -196,6 +206,9 @@ struct PlayerTimelineTimes: View {
             let remainingHidden = currentRightEdge + glyphReach + fadeGap >= remainingLeftEdge
 
             Text(curLabel)
+                .accessibilityIdentifier("player-timeline-current-time")
+                .accessibilityLabel(clock == nil ? Text("Elapsed time") : Text("Current time"))
+                .accessibilityValue(Text(verbatim: curLabel))
                 .monospacedDigit()
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(.white)
@@ -214,6 +227,9 @@ struct PlayerTimelineTimes: View {
                 .position(x: centerX, y: midY)
 
             Text(remLabel)
+                .accessibilityIdentifier("player-timeline-end-time")
+                .accessibilityLabel(clock == nil ? Text("Remaining time") : Text("Estimated end time"))
+                .accessibilityValue(Text(verbatim: remLabel))
                 .monospacedDigit()
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.7))
@@ -545,12 +561,7 @@ extension AnyTransition {
     }
 }
 
-enum PlozzMoveCommandDirection {
-    case up
-    case down
-    case left
-    case right
-}
+typealias PlozzMoveCommandDirection = SettingsMoveCommandDirection
 
 /// The floating panel's translucent backing. Native **Liquid Glass** on tvOS
 /// 26+, with the profile/accessibility choice and pre-26 fallback retained.

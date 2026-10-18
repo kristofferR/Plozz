@@ -194,6 +194,7 @@ public struct HomeHeroBackdrop: View {
     }
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.plozzPinnedSidebarActive) private var pinnedSidebarActive
     private var isLight: Bool { colorScheme == .light }
 
@@ -222,8 +223,8 @@ public struct HomeHeroBackdrop: View {
             .frame(maxWidth: .infinity, alignment: artworkAlignment)
             // Keep the translation inside the safe-area breakout.
             .modifier(HomeVerticalMotion(y: -recedeLift))
-            .animation(.smooth(duration: 0.96), value: recedeLift)
-            .animation(.smooth(duration: 0.96), value: receded)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.96), value: recedeLift)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.96), value: receded)
             .ignoresSafeArea(
                 edges: ignoresHorizontalSafeArea
                     ? [.top, .horizontal]
@@ -510,7 +511,9 @@ private struct WipeImageView: UIViewRepresentable {
             driftFraction: Self.driftFraction
         )
         context.coordinator.container = view
-        context.coordinator.configure(width: width, height: height)
+        context.coordinator.configure(
+            width: width, height: height, reduceMotion: context.environment.accessibilityReduceMotion
+        )
         context.coordinator.setArtworkReporter(artworkReporter)
         context.coordinator.update(
             references: references,
@@ -526,7 +529,9 @@ private struct WipeImageView: UIViewRepresentable {
 
     func updateUIView(_ uiView: HeroWipeContainerView, context: Context) {
         context.coordinator.container = uiView
-        context.coordinator.configure(width: width, height: height)
+        context.coordinator.configure(
+            width: width, height: height, reduceMotion: context.environment.accessibilityReduceMotion
+        )
         context.coordinator.setArtworkReporter(artworkReporter)
         context.coordinator.update(
             references: references,
@@ -553,6 +558,7 @@ private struct WipeImageView: UIViewRepresentable {
     final class Coordinator {
         weak var container: HeroWipeContainerView?
         private let duration: TimeInterval
+        private var reduceMotion = false
 
         /// Identity of the slide currently settled on screen.
         private var displayedID: String?
@@ -591,8 +597,23 @@ private struct WipeImageView: UIViewRepresentable {
             self.duration = duration
         }
 
-        func configure(width: CGFloat, height: CGFloat) {
+        func configure(width: CGFloat, height: CGFloat, reduceMotion: Bool) {
             container?.slideSize = CGSize(width: width, height: height)
+            let shouldFinish = reduceMotion && !self.reduceMotion
+            self.reduceMotion = reduceMotion
+            if shouldFinish { finishAnimations() }
+        }
+
+        private func finishAnimations() {
+            let animations = Array(activeAnimations.values)
+            activeAnimations.removeAll()
+            for pair in animations {
+                for animator in [pair.outgoing, pair.incoming].compactMap({ $0 })
+                    where animator.state == .active {
+                    animator.stopAnimation(false)
+                    animator.finishAnimation(at: .end)
+                }
+            }
         }
 
         func cancelPendingLoad() {
@@ -602,6 +623,7 @@ private struct WipeImageView: UIViewRepresentable {
             reportTask?.cancel()
             reportTask = nil
             artworkReporter = nil
+            finishAnimations()
         }
 
         func setArtworkReporter(_ reporter: HeroArtworkDisplayReporter?) {
@@ -819,7 +841,7 @@ private struct WipeImageView: UIViewRepresentable {
 
         private func startWipe(to image: UIImage, reference: ArtworkReference, id: String, forward: Bool) {
             guard let container else { return }
-            if transition == .crossfade {
+            if reduceMotion || transition == .crossfade {
                 startCrossfade(to: image, id: id, in: container)
                 return
             }

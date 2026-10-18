@@ -33,39 +33,6 @@ public struct DisabledTraktScrobbler: TraktScrobbling {
     public func scrobble(item: MediaItem, progress: Double, event: PlaybackEvent) async {}
 }
 
-final class TraktProfileGeneration: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storage: UInt64 = 0
-
-    func advance(
-        performing update: () -> Void = {}
-    ) -> UInt64 {
-        lock.lock()
-        storage &+= 1
-        update()
-        let value = storage
-        lock.unlock()
-        return value
-    }
-
-    func performIfCurrent(
-        _ generation: UInt64,
-        operation: () -> Void
-    ) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard generation == storage else { return false }
-        operation()
-        return true
-    }
-
-    var current: UInt64 {
-        lock.lock()
-        defer { lock.unlock() }
-        return storage
-    }
-}
-
 /// Live scrobbler. An `actor` so token refresh is serialized and the type is
 /// `Sendable` for use from the `@MainActor` player.
 public actor TraktScrobbler: TraktScrobbling {

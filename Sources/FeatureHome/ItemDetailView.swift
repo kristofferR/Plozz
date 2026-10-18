@@ -82,6 +82,7 @@ public struct ItemDetailView: View {
     @FocusState private var playFocused: Bool
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.seasonRequestContextID) private var seasonRequestContextID
     @FocusState private var emptyBackFocused: Bool
 
@@ -696,7 +697,7 @@ public struct ItemDetailView: View {
                             #if os(tvOS)
                             guard !DetailTransitionNavigation.isRestoringSourcePage else { return }
                             #endif
-                            withAnimation(.easeInOut(duration: 0.4)) {
+                            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.4)) {
                                 proxy.scrollTo(Self.topAnchorID, anchor: .top)
                             }
                         },
@@ -796,7 +797,7 @@ public struct ItemDetailView: View {
                 guard !DetailTransitionNavigation.isRestoringSourcePage else { return }
                 #endif
                 if focused {
-                    withAnimation(.easeInOut(duration: 0.4)) {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.4)) {
                         proxy.scrollTo(Self.topAnchorID, anchor: .top)
                     }
                 }

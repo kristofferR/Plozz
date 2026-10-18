@@ -6,19 +6,24 @@ import SwiftUI
 public struct CardAppearanceControls: View {
     @Bindable private var cards: CardStyleSettingsModel
     @Bindable private var watchIndicator: WatchStatusIndicatorSettingsModel
+    private let density: UIDensitySettingsModel?
 
-    public init(cards: CardStyleSettingsModel, watchIndicator: WatchStatusIndicatorSettingsModel) {
+    public init(
+        cards: CardStyleSettingsModel, watchIndicator: WatchStatusIndicatorSettingsModel,
+        density: UIDensitySettingsModel? = nil
+    ) {
         self.cards = cards
         self.watchIndicator = watchIndicator
+        self.density = density
     }
 
     public var body: some View {
         #if os(tvOS)
         VStack(alignment: .leading, spacing: SettingsMetrics.sectionSpacing) {
-            SettingsDetailGroup(title: "Labels") {
+            SettingsDetailGroup(title: "Labels", illustrated: true) {
                 CardLabelControls(settings: $cards.captions, style: cards.style)
             }
-            SettingsDetailGroup(title: "Watched Indicator") {
+            SettingsDetailGroup(title: "Watched Indicator", illustrated: true) {
                 CompactWatchIndicatorPicker(selection: $watchIndicator.indicator, swatchHeight: 150)
                 episodeCountToggle
             }
@@ -27,12 +32,19 @@ public struct CardAppearanceControls: View {
                     "settings.cards.focus",
                     defaultValue: "Focus",
                     comment: "Section header in tvOS Settings > Appearance > Cards, above the picker that chooses what a media card does when the remote's focus lands on it. Not camera focus and not a concentration/Focus mode — this is the on-screen selection highlight."
-                )
+                ),
+                illustrated: true
             ) {
                 CompactCardFocusStylePicker(selection: $cards.focusStyle, swatchHeight: 150)
             }
-            SettingsDetailGroup(title: "Style") {
+            SettingsDetailGroup(title: "Style", illustrated: true) {
                 CompactCardStylePicker(selection: $cards.style, swatchHeight: 150)
+            }
+            if let density {
+                @Bindable var density = density
+                SettingsDetailGroup(title: "Display Size", illustrated: true) {
+                    CompactDisplaySizePicker(selection: $density.density)
+                }
             }
         }
         #else
@@ -46,6 +58,21 @@ public struct CardAppearanceControls: View {
             }
             SettingsSectionGroup("Style") {
                 CompactCardStylePicker(selection: $cards.style, swatchHeight: 112)
+            }
+            if let density {
+                @Bindable var density = density
+                SettingsSectionGroup("Display Size") {
+                    Picker("Display Size", selection: $density.density) {
+                        ForEach(UIDensity.allCases) { density in
+                            Label(density.displayName, systemImage: density.symbolName)
+                                .tag(density)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .accessibilityIdentifier("appearance-display-size")
+                } footer: {
+                    Text("Scales card size, columns and spacing across the app.")
+                }
             }
         }
         .settingsPageSurface()
@@ -64,13 +91,21 @@ struct CardLabelControls: View {
     let style: CardStyle
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: spacing) {
             CardCaptionPicker(settings: $settings, style: style)
             ViewCustomizationLink(isCustomized: settings.selectedPreset == nil) {
                 CardCaptionCustomizationContent(settings: $settings, style: style)
             }
             .accessibilityIdentifier("card-label-customization")
         }
+    }
+
+    private var spacing: CGFloat {
+        #if os(tvOS)
+        SettingsFormMetrics.illustratedGroupSpacing
+        #else
+        20
+        #endif
     }
 }
 
@@ -157,8 +192,6 @@ struct CardCaptionCustomizationContent: View {
                 Text("Libraries")
                     #if os(tvOS)
                     .settingsSectionHeader()
-                    .padding(.top, 20)
-                    .padding(.bottom, 6)
                     #endif
             }
             Section {
@@ -169,19 +202,10 @@ struct CardCaptionCustomizationContent: View {
                 Text("Other views")
                     #if os(tvOS)
                     .settingsSectionHeader()
-                    .padding(.top, 20)
-                    .padding(.bottom, 6)
                     #endif
             } footer: {
-                #if !os(tvOS)
                 Text("Choices apply across all libraries. Titles inside collections and playlists use Browse.")
-                #endif
             }
-            #if os(tvOS)
-            Text("Choices apply across all libraries. Titles inside collections and playlists use Browse.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            #endif
         }
     }
 
@@ -197,8 +221,7 @@ struct CardCaptionViewChoices: View {
             id: "card-label-view-\(view.rawValue)",
             title: view.displayName,
             value: settings.customizationValue(in: view),
-            detail: settings.customizationDetail(in: view)
-                ?? "Labels are separate from any text already in the artwork.",
+            detail: settings.customizationDetail(in: view),
             selection: Binding(
                 get: { settings.customization(in: view) },
                 set: { settings.setOverride($0, for: view) }
@@ -221,12 +244,11 @@ struct CardCaptionViewChoices: View {
 
 extension CardCaptionSettings {
     func customizationHelp(in view: CardCaptionView, style: CardStyle) -> ViewCustomizationHelp {
-        let mixedDetail = customizationDetail(in: view)
         return ViewCustomizationHelp(
-            detail: mixedDetail ?? "Labels are separate from any text already in the artwork.",
+            detail: customizationDetail(in: view),
             illustration: .captions(
                 style: style, showsCaptions: showsLabels(in: view),
-                showsMixedCaptions: mixedDetail != nil
+                showsMixedCaptions: customization(in: view) == .mixed
             )
         )
     }
@@ -235,11 +257,11 @@ extension CardCaptionSettings {
         customization(in: view).displayName
     }
 
-    func customizationDetail(in view: CardCaptionView) -> LocalizedStringResource? {
+    func customizationDetail(in view: CardCaptionView) -> LocalizedStringResource {
         if customization(in: view) == .mixed {
-            return "Labels are hidden in Showcase and on series artwork."
+            return "Labels are visible except in Showcase and on series artwork."
         }
-        return nil
+        return showsLabels(in: view) ? "Labels are visible in this view." : "Labels are hidden in this view."
     }
 }
 

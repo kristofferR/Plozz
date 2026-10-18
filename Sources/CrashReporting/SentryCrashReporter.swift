@@ -248,6 +248,52 @@ public final class SentryCrashReporter: CrashReporter {
         ]
         if let value = diagnostic.code { data["code"] = value }
         if let value = diagnostic.httpStatus { data["httpStatus"] = value }
+        if let value = diagnostic.evidence { data["evidence"] = playbackEvidenceData(value) }
+        return data
+    }
+
+    nonisolated static func playbackEvidenceData(_ evidence: PlaybackFailureEvidence) -> [String: Any] {
+        func code(_ value: PlaybackFailureEvidence.ErrorCode) -> [String: Any] {
+            ["domain": value.domain.rawValue, "code": value.code]
+        }
+        func request(_ value: PlaybackDeliveryEvidence.Request) -> [String: Any] {
+            var data: [String: Any] = [
+                "sequence": value.sequence, "resource": value.resource.rawValue, "method": value.method.rawValue,
+                "startedMilliseconds": value.startedMilliseconds, "elapsedMilliseconds": value.elapsedMilliseconds,
+                "outcome": value.outcome.rawValue, "format": value.format.rawValue,
+                "rangeRequested": value.rangeRequested, "rangeResponse": value.rangeResponse.rawValue,
+                "receivedBytes": value.receivedBytes
+            ]
+            data["status"] = value.status
+            data["redirected"] = value.redirected
+            data["crossOrigin"] = value.crossOrigin
+            data["expectedBytes"] = value.expectedBytes
+            data["networkCode"] = value.networkCode
+            if let playlist = value.playlist {
+                var facts: [String: Any] = [
+                    "hasHeader": playlist.hasHeader, "isMaster": playlist.isMaster, "segments": playlist.segments,
+                    "hasEndList": playlist.hasEndList, "hasByteRanges": playlist.hasByteRanges,
+                    "hasMap": playlist.hasMap, "hasEncryption": playlist.hasEncryption
+                ]
+                facts["targetDurationMilliseconds"] = playlist.targetDurationMilliseconds
+                facts["maximumSegmentMilliseconds"] = playlist.maximumSegmentMilliseconds
+                facts["mediaSequence"] = playlist.mediaSequence
+                data["playlist"] = facts
+            }
+            return data
+        }
+        var data: [String: Any] = [
+            "nativeErrors": evidence.nativeErrors.map(code), "nativeLogErrors": evidence.nativeLogErrors.map(code)
+        ]
+        data["route"] = evidence.route?.rawValue
+        data["firstFrameReady"] = evidence.firstFrameReady
+        data["nativeCapture"] = evidence.nativeCapture?.rawValue
+        if let delivery = evidence.delivery {
+            var facts: [String: Any] = ["recent": delivery.recent.map(request)]
+            facts["root"] = delivery.root.map(request)
+            facts["firstFailure"] = delivery.firstFailure.map(request)
+            data["delivery"] = facts
+        }
         return data
     }
 
@@ -268,12 +314,20 @@ public final class SentryCrashReporter: CrashReporter {
     }
 
     nonisolated static func playbackFingerprint(_ diagnostic: PlaybackFailureDiagnostic) -> [String] {
-        [
+        var fields = [
             "playback_failure", diagnostic.layer.rawValue, diagnostic.content.rawValue,
             diagnostic.stage.rawValue, diagnostic.reason.rawValue, diagnostic.engineFailure.rawValue,
             diagnostic.domain.rawValue, diagnostic.code.map(String.init) ?? "none",
             diagnostic.httpStatus.map(String.init) ?? "none", diagnostic.format.rawValue
         ]
+        if let evidence = diagnostic.evidence {
+            fields.append(evidence.route?.rawValue ?? "none")
+            // Split distinct native causes, not each request's timing or changing sequence.
+            if let cause = evidence.nativeErrors.last ?? evidence.nativeLogErrors.last {
+                fields += [cause.domain.rawValue, String(cause.code)]
+            }
+        }
+        return fields
     }
 
     nonisolated static func playbackEvent(_ diagnostic: PlaybackFailureDiagnostic) -> Event? {

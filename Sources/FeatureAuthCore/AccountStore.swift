@@ -28,9 +28,13 @@ public protocol AccountPersisting: Sendable {
     func recoverCredentialMutations() throws
     @discardableResult
     func updateMediaShareLibrary(from descriptor: SyncedAccountDescriptor) throws -> Bool
+    func updateServerAddresses(expected: Account, alternatives: [URL]) throws
 }
 
 public extension AccountPersisting {
+    func updateServerAddresses(expected: Account, alternatives: [URL]) throws {
+        throw AccountStoreError.metadataUpdatesUnavailable
+    }
     @discardableResult
     func retryUnconfirmedCredentials() -> Bool { false }
     @discardableResult
@@ -351,6 +355,22 @@ public final class AccountStore: AccountPersisting, RotatingCredentialStoring, @
         } else {
             try addManagedAccountLocked(account, token: token)
         }
+    }
+
+    public func updateServerAddresses(expected: Account, alternatives: [URL]) throws {
+        guard [.jellyfin, .emby, .plex, .silo].contains(expected.server.provider) else {
+            throw AccountStoreError.metadataUpdatesUnavailable
+        }
+        Self.processMutationLock.lock()
+        defer { Self.processMutationLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        var accounts = try persistedAccountsLockedThrowing()
+        guard let index = accounts.firstIndex(where: { $0.id == expected.id }),
+              accounts[index] == expected else { throw AppError.conflict }
+        accounts[index].server.alternateConnectionURLs = alternatives.isEmpty ? nil : alternatives
+        try saveAccountsLocked(accounts)
+        invalidateCredentialCacheAfterMutationLocked()
     }
 
     public func credential(accountID: String, revision: CredentialRevision) throws -> String {

@@ -274,6 +274,7 @@ struct HomeTab: View {
                     accounts: accounts,
                     hideWatched: heroSettings.settings.hideWatched,
                     visibility: homeVisibility,
+                    heroSettings: heroSettings,
                     identitySources: identitySources
                 ),
                 heroRequestIdentity: { seer.hasRequestIdentity(for: $0) },

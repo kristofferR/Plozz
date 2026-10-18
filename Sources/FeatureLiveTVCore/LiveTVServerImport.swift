@@ -111,9 +111,12 @@ extension LiveTVPrototypeImportModel {
         _ = await reloadServersResult(into: model, forceRefresh: forceRefresh)
     }
 
-    func reloadServersResult(into model: LiveTVPrototypeModel, forceRefresh: Bool) async -> ReloadResult {
-        serverRevision &+= 1
-        cancelServerGuideRequests()
+    func reloadServersResult(
+        into model: LiveTVPrototypeModel, forceRefresh: Bool, sourceID: String? = nil
+    ) async -> ReloadResult {
+        if let sourceID { serverSourceRevisions[sourceID, default: 0] &+= 1 }
+        else { serverRevision &+= 1 }
+        cancelServerGuideRequests(sourceID: sourceID)
         let request = serverRevision
         do { try configuration.validate() }
         catch {
@@ -124,11 +127,13 @@ extension LiveTVPrototypeImportModel {
             }
             return .completed
         }
-        for index in serverSources.indices {
+        for index in serverSources.indices where sourceID == nil || serverSources[index].id == sourceID {
             if serverSources[index].phase == .loading { serverSources[index].phase = .idle }
             if serverSources[index].guidePhase == .loading { serverSources[index].guidePhase = .idle }
         }
-        let sources = serverSources.map(\.source).filter(\.isEnabled)
+        let sources = serverSources.map(\.source).filter {
+            $0.isEnabled && (sourceID == nil || $0.id == sourceID)
+        }
         var result = ReloadResult.completed
         for source in sources {
             guard request == serverRevision, !Task.isCancelled else { return .cancelled }

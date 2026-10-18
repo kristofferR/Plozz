@@ -20,6 +20,101 @@ final class IPTVPlaybackHostedTests: XCTestCase {
         try await play(hls: false, extensionless: true)
     }
 
+    func testUndeclaredTransportStreamPlaysWithAnExtensionlessUpstream() async throws {
+        try await play(hls: false, extensionless: true, declaresFormat: false)
+    }
+
+    func testUndeclaredFragmentedHLSPlaysWithAnExtensionlessUpstream() async throws {
+        try await play(hls: true, fragmented: true, extensionless: true, declaresFormat: false)
+    }
+
+    func testRedirectedUndeclaredTransportStreamWithGenericMIMEUsesOneOriginStreamAtATime() async throws {
+        let file = try XCTUnwrap(Bundle(for: Self.self).url(
+            forResource: "iptv", withExtension: "ts", subdirectory: "Fixtures"
+        ))
+        let delivery = try IPTVTestHTTPServer { request in
+            guard !request.lowercased().contains("x-fixture-account:") else { return .init(status: 403) }
+            return .init(file: file, headers: ["Content-Type": "application/octet-stream"], delay: .milliseconds(10))
+        }
+        addTeardownBlock { await delivery.stop() }
+        let destination = try await delivery.start().appendingPathComponent("opaque")
+        let entrypoint = try IPTVTestHTTPServer { request in
+            guard request.contains("X-Fixture-Account: private") else { return .init(status: 403) }
+            return .init(status: 302, headers: ["Location": destination.absoluteString])
+        }
+        addTeardownBlock { await entrypoint.stop() }
+        let origin = try await entrypoint.start().appendingPathComponent("channel")
+        let proxy = try IPTVPlaybackProxy(origin: origin, headers: ["X-Fixture-Account": "private"])
+        addTeardownBlock { await proxy.stop() }
+        try await render(url: proxy.start())
+        await proxy.stop()
+        try await waitUntil { await delivery.activeRequestCount == 0 }
+        let peak = await delivery.peakActiveRequestCount
+        XCTAssertEqual(peak, 1, "Classification and playback must not occupy two provider streams.")
+    }
+
+    func testDirectUndeclaredTransportStreamAlsoUsesContentInsteadOfItsAddress() async throws {
+        let file = try XCTUnwrap(Bundle(for: Self.self).url(
+            forResource: "iptv", withExtension: "ts", subdirectory: "Fixtures"
+        ))
+        let server = try IPTVTestHTTPServer { _ in
+            .init(file: file, headers: ["Content-Type": "application/octet-stream"], delay: .milliseconds(10))
+        }
+        addTeardownBlock { await server.stop() }
+        let origin = try await server.start().appendingPathComponent("channel.php")
+        try await render(url: origin)
+        try await waitUntil { await server.activeRequestCount == 0 }
+        let peak = await server.peakActiveRequestCount
+        XCTAssertEqual(peak, 1)
+    }
+
+    func testStoppingUndeclaredStreamCancelsInspectionBeforeHeadersOrBody() async throws {
+        for beforeHeaders in [true, false] {
+            let server = try IPTVTestHTTPServer { _ in
+                .init(
+                    data: Data(repeating: 0x47, count: 131_072),
+                    headerDelay: beforeHeaders ? .seconds(30) : .zero,
+                    delay: beforeHeaders ? .zero : .seconds(30)
+                )
+            }
+            addTeardownBlock { await server.stop() }
+            let base = try await server.start()
+            let proxy = try IPTVPlaybackProxy(origin: base.appendingPathComponent("channel"), headers: [:])
+            addTeardownBlock { await proxy.stop() }
+            let url = try await proxy.start()
+            let engine = try PlozzigenVideoEngine()
+            defer { engine.stop() }
+            var failure: AppError?
+            engine.onFailure = { failure = $0 }
+            let load = Task { await engine.loadLive(url: url, httpHeaders: [:]) }
+            try await waitUntil { await server.activeRequestCount == 1 }
+            XCTAssertEqual(engine.liveSnapshot.phase, .loading)
+            XCTAssertFalse(engine.liveSnapshot.firstFrameReady)
+            engine.stop()
+            await load.value
+            try await waitUntil { await server.activeRequestCount == 0 }
+            XCTAssertNil(failure)
+            XCTAssertEqual(engine.liveSnapshot.phase, .idle)
+            await proxy.stop()
+        }
+    }
+
+    func testUndeclaredStreamRefusalIsTypedAndDoesNotStartAnotherRequest() async throws {
+        let server = try IPTVTestHTTPServer { _ in .init(status: 451) }
+        addTeardownBlock { await server.stop() }
+        let base = try await server.start()
+        let engine = try PlozzigenVideoEngine()
+        defer { engine.stop() }
+        var failure: AppError?
+        engine.onFailure = { failure = $0 }
+        await engine.loadLive(url: base.appendingPathComponent("channel"), httpHeaders: [:])
+        try await waitUntil { failure != nil }
+        XCTAssertEqual(failure, .accessRestricted)
+        XCTAssertEqual(engine.liveSnapshot.phase, .failed)
+        let requests = await server.requestCount
+        XCTAssertEqual(requests, 1)
+    }
+
     func testDeclaredFragmentedHLSPlaysWithAnExtensionlessUpstream() async throws {
         try await play(hls: true, fragmented: true, extensionless: true)
     }
@@ -49,6 +144,55 @@ final class IPTVPlaybackHostedTests: XCTestCase {
         XCTAssertEqual(requests, 1, "Native engine retries must not repeatedly contact the rejecting provider.")
     }
 
+    func testNativeHLSFailureRetainsSuccessfulPlaylistAndFailedChildWithoutPrivateData() async throws {
+        let server = try IPTVTestHTTPServer { request in
+            if request.contains("/private-channel.m3u8") {
+                return .init(data: Data("""
+                #EXTM3U
+                #EXT-X-TARGETDURATION:6
+                #EXT-X-MEDIA-SEQUENCE:100
+                #EXTINF:6,
+                private-segment.ts?token=secret
+                #EXT-X-ENDLIST
+
+                """.utf8), headers: ["Content-Type": "application/vnd.apple.mpegurl"])
+            }
+            return .init(data: Data("private failure".utf8), status: 404, headers: ["Content-Type": "text/html"])
+        }
+        addTeardownBlock { await server.stop() }
+        let base = try await server.start()
+        let proxy = try IPTVPlaybackProxy(origin: base.appendingPathComponent("private-channel.m3u8"), headers: [:])
+        addTeardownBlock { await proxy.stop() }
+        let engine = try PlozzigenVideoEngine()
+        defer { engine.stop() }
+        var report: LiveChannelFailureReport?
+        engine.onFailure = { error in
+            report = .init(failure: .engine(error), diagnostic: engine.livePlaybackFailureDiagnostic)
+        }
+        defer { engine.onFailure = nil }
+        let url = try await proxy.start()
+        await engine.loadLive(url: url, httpHeaders: [:])
+        let deadline = ContinuousClock.now + .seconds(25)
+        while report == nil, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let failure = try XCTUnwrap(report)
+        let evidence = try XCTUnwrap(failure.diagnostic?.evidence)
+        XCTAssertEqual(evidence.firstFrameReady, false)
+        XCTAssertNotNil(evidence.route)
+        XCTAssertEqual(evidence.nativeCapture, .captured)
+        XCTAssertFalse(evidence.nativeErrors.isEmpty, "Retain the actual native failure, not only the relay status.")
+        XCTAssertEqual(evidence.delivery?.root?.format, .hls)
+        XCTAssertEqual(evidence.delivery?.root?.playlist?.mediaSequence, 100)
+        XCTAssertEqual(evidence.delivery?.firstFailure?.status, 404)
+        XCTAssertEqual(evidence.delivery?.firstFailure?.resource, .child)
+        let text = PlaybackDiagnosticReport.playback(failure).supportText
+        XCTAssertTrue(text.contains("upstream_first_failure.http_status=404"))
+        for secret in ["private", "token", "secret", base.absoluteString] {
+            XCTAssertFalse(text.contains(secret))
+        }
+    }
+
     func testOptInTrialChannelSustainsPlaybackThroughTheProductionEngine() async throws {
         let control = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
@@ -67,7 +211,9 @@ final class IPTVPlaybackHostedTests: XCTestCase {
         try await render(url: proxy.start(), sustainedSeconds: 20)
     }
 
-    private func play(hls: Bool, fragmented: Bool = false, extensionless: Bool = false) async throws {
+    private func play(
+        hls: Bool, fragmented: Bool = false, extensionless: Bool = false, declaresFormat: Bool = true
+    ) async throws {
         let file = try XCTUnwrap(Bundle(for: Self.self).url(
             forResource: "iptv", withExtension: "ts", subdirectory: "Fixtures"
         ))
@@ -105,7 +251,7 @@ final class IPTVPlaybackHostedTests: XCTestCase {
         let proxy = try IPTVPlaybackProxy(
             origin: base.appendingPathComponent(extensionless ? "channel" : hls ? "master.m3u8" : "channel.ts"),
             headers: ["Authorization": "Bearer fixture"],
-            formatHint: extensionless ? .init(container: hls ? "m3u8" : "ts") : .init()
+            formatHint: extensionless && declaresFormat ? .init(container: hls ? "m3u8" : "ts") : .init()
         )
         addTeardownBlock { await proxy.stop() }
         let url = try await proxy.start()
@@ -157,5 +303,14 @@ final class IPTVPlaybackHostedTests: XCTestCase {
             XCTAssertGreaterThan(advanced, sustainedSeconds * 0.75, "Playback must keep advancing after startup.")
             print("IPTV_LIVE_PROBE first_frame_seconds=\(firstFrameSeconds) observed_seconds=\(sustainedSeconds) advanced_seconds=\(advanced)")
         }
+    }
+
+    private func waitUntil(_ condition: @escaping () async -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !(await condition()), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let satisfied = await condition()
+        XCTAssertTrue(satisfied, "The owned playback request did not reach its expected lifecycle state.")
     }
 }

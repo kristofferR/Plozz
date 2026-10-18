@@ -45,7 +45,7 @@ public struct LiveTVChannelPreferencesView: View {
             } footer: {
                 Text("Blank fields use source metadata. These changes are personal labels, not program information.")
             }
-            if model.favoriteIDs.contains(channelID) {
+            if model.favoriteOrder.contains(channelID) {
                 SettingsSectionGroup("Favorite order") {
                     Button("Move earlier") { move(-1) }
                         .buttonStyle(SettingsFocusButtonStyle(size: .contained))

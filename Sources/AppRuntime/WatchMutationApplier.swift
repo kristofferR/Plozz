@@ -24,6 +24,8 @@ public struct AppShellWatchMutationApplier: WatchMutationAuthorizationEnforcing 
     private let resolveProvider: @Sendable (String) async -> (any MediaProvider)?
     private let applyTrakt: @Sendable (TraktScrobbleIntent) async throws -> Void
     private let applySimkl: @Sendable (TraktScrobbleIntent) async throws -> Void
+    private let currentWetrakrAccountIdentity: @Sendable () -> String?
+    private let applyWetrakr: @Sendable (TraktScrobbleIntent, Date, String, String) async throws -> Void
     private let applyAniList: @Sendable (TraktScrobbleIntent) async throws -> Void
     private let applyMAL: @Sendable (TraktScrobbleIntent) async throws -> Void
     /// The **active** `Account.id`s (the set the identity index warms and that
@@ -83,6 +85,10 @@ public struct AppShellWatchMutationApplier: WatchMutationAuthorizationEnforcing 
         applySimkl: @escaping @Sendable (TraktScrobbleIntent) async throws -> Void,
         applyAniList: @escaping @Sendable (TraktScrobbleIntent) async throws -> Void,
         applyMAL: @escaping @Sendable (TraktScrobbleIntent) async throws -> Void,
+        wetrakrAccountIdentity: @escaping @Sendable () -> String? = { nil },
+        applyWetrakr: @escaping @Sendable (TraktScrobbleIntent, Date, String, String) async throws -> Void = { _, _, _, _ in
+            throw AppError.invalidResponse
+        },
         allAccountIDs: @escaping @Sendable () async -> [String] = { [] },
         indexedSeriesSources: @escaping @Sendable (MediaItem) -> [IndexedSource] = { _ in [] },
         indexedSources: @escaping @Sendable ([MediaIdentity], MediaItemKind?, String?, Int?, Set<String>) -> [IndexedSource] = { _, _, _, _, _ in [] },
@@ -95,6 +101,8 @@ public struct AppShellWatchMutationApplier: WatchMutationAuthorizationEnforcing 
         self.resolveProvider = resolveProvider
         self.applyTrakt = applyTrakt
         self.applySimkl = applySimkl
+        self.currentWetrakrAccountIdentity = wetrakrAccountIdentity
+        self.applyWetrakr = applyWetrakr
         self.applyAniList = applyAniList
         self.applyMAL = applyMAL
         self.allAccountIDs = allAccountIDs
@@ -208,6 +216,17 @@ public struct AppShellWatchMutationApplier: WatchMutationAuthorizationEnforcing 
         guard await isActive() else { throw AppError.serverUnreachable }
         try await WatchMutationDeliveryAuthorization.check()
         try await applySimkl(intent)
+    }
+
+    public var wetrakrAccountIdentity: String? { currentWetrakrAccountIdentity() }
+
+    public func scrobbleWetrakr(
+        _ intent: TraktScrobbleIntent, capturedAt: Date,
+        idempotencyKey: String, expectedAccountIdentity: String
+    ) async throws {
+        guard await isActive() else { throw AppError.serverUnreachable }
+        try await WatchMutationDeliveryAuthorization.check()
+        try await applyWetrakr(intent, capturedAt, idempotencyKey, expectedAccountIdentity)
     }
 
     public func scrobbleAniList(_ intent: TraktScrobbleIntent) async throws {

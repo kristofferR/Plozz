@@ -10,6 +10,72 @@ import XCTest
 /// fetches every backdrop a title has in one response, ranks textless ones first,
 /// and all but the best were discarded a layer above.
 final class ArtworkCandidateTests: XCTestCase {
+    func testPortraitHeroCacheIsSeparateAndFollowsLiveProviderPolicy() async {
+        let settings = CatalogArtworkSettings(.init(orderMode: .custom, enabledOrder: ["tmdb", "tvdb"]))
+        let cache = MetadataDiskCache(directory: nil)
+        let router = catalogRouter(settings: settings, cache: cache)
+        let item = MediaItem(id: "hero", title: "Movie", kind: .movie, providerIDs: ["Tmdb": "42"])
+        for source in [MetadataSource.tmdb, .tvdb] {
+            await cache.store(url("portrait-\(source.rawValue)"), for: ArtworkRouter.providerCacheKey(
+                query: MetadataQuery(item), kind: .hero, source: source, prefersPortraitHero: true
+            ))
+            await cache.store(url("landscape-\(source.rawValue)"), for: ArtworkRouter.providerCacheKey(
+                query: MetadataQuery(item), kind: .hero, source: source
+            ))
+            await cache.store(url("poster-\(source.rawValue)"), for: ArtworkRouter.providerCacheKey(
+                query: MetadataQuery(item), kind: .poster, source: source
+            ))
+        }
+        for _ in 0..<3 {
+            let portrait = await router.portraitHeroArtworkURL(for: item)
+            let landscape = await router.artworkURL(for: item, placements: [.homeHero])
+            let poster = await router.artworkURL(.poster, for: item)
+            XCTAssertEqual(portrait, url("portrait-tmdb"), "Warm lookups must reuse the hero-specific URL.")
+            XCTAssertEqual(landscape, url("landscape-tmdb"))
+            XCTAssertEqual(poster, url("poster-tmdb"))
+        }
+        settings.save(.init(orderMode: .custom, enabledOrder: ["tvdb", "tmdb"]))
+        let reordered = await router.portraitHeroArtworkURL(for: item)
+        XCTAssertEqual(reordered, url("portrait-tvdb"))
+        settings.save(.init(orderMode: .custom, enabledOrder: ["tmdb"], disabledOrder: ["tvdb"]))
+        let disabled = await router.portraitHeroArtworkURL(for: item)
+        XCTAssertEqual(disabled, url("portrait-tmdb"))
+        settings.save(.init(orderMode: .custom, disabledOrder: ["tvdb", "tmdb"]))
+        let none = await router.portraitHeroArtworkURL(for: item)
+        XCTAssertNil(none)
+    }
+
+    func testPortraitHeroPreservesSurfaceCatalogFallbackAndSeriesIdentity() async {
+        let settings = CatalogArtworkSettings(.init(orderMode: .custom, enabledOrder: ["tmdb"]))
+        let cache = MetadataDiskCache(directory: nil)
+        let router = catalogRouter(settings: settings, cache: cache)
+        var item = MediaItem(
+            id: "hero", title: "Movie", kind: .movie,
+            artworkSelections: [
+                .init(placement: .homeHero, references: [.remote(url("home"))]),
+                .init(placement: .detailBackdrop, references: [.remote(url("detail"))])
+            ]
+        )
+        item.recordArtworkMetadataSource(.tmdb, for: url("home"))
+        item.recordArtworkMetadataSource(.tmdb, for: url("detail"))
+        let home = await router.portraitHeroArtworkURL(for: item, placement: .homeHero)
+        let detail = await router.portraitHeroArtworkURL(for: item, placement: .detailBackdrop)
+        XCTAssertEqual(home, url("home"))
+        XCTAssertEqual(detail, url("detail"))
+
+        let episode = MediaItem(
+            id: "episode", title: "Episode", kind: .episode, parentTitle: "Show",
+            providerIDs: ["Tmdb": "child", "SeriesTmdb": "parent"]
+        )
+        let parentQuery = MetadataQuery(ArtworkRouter.seriesArtworkItem(for: episode))
+        XCTAssertEqual(parentQuery.providerIDs.providerID(.tmdb), "parent")
+        await cache.store(url("series-portrait"), for: ArtworkRouter.providerCacheKey(
+            query: parentQuery, kind: .hero, source: .tmdb, prefersPortraitHero: true
+        ))
+        let series = await router.portraitHeroArtworkURL(for: episode)
+        XCTAssertEqual(series, url("series-portrait"))
+    }
+
 
     func testOrderedPlacementsRecoverPosterOnlyArtUnderLiveProviderPolicy() async {
         let settings = CatalogArtworkSettings(.init(orderMode: .custom, enabledOrder: ["tvdb", "tmdb"]))
@@ -310,6 +376,14 @@ final class ArtworkCandidateTests: XCTestCase {
         let calls = SingleImageProvider.Calls()
         let provider = SingleImageProvider(image: url("only"), calls: calls)
         _ = await provider.artworkURLs(.hero, for: query, limit: 4)
+        XCTAssertEqual(calls.count, 1)
+    }
+
+    func testPortraitHeroDefaultReusesExactlyOneExistingHeroLookup() async {
+        let calls = SingleImageProvider.Calls()
+        let provider = SingleImageProvider(image: url("only"), calls: calls)
+        let result = await provider.portraitHeroURL(for: query)
+        XCTAssertEqual(result, url("only"))
         XCTAssertEqual(calls.count, 1)
     }
 

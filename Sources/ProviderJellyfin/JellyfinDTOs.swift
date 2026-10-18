@@ -126,6 +126,7 @@ struct BaseItemDto: Decodable {
     let IndexNumber: Int?
     let IndexNumberEnd: Int?
     let ParentIndexNumber: Int?
+    let DisplayOrder: String?
     let ProductionYear: Int?
     /// Original release / first-air timestamp (ISO-8601, UTC). Jellyfin returns
     /// it by default — it is not one of the optional `Fields` — so every item
@@ -317,6 +318,8 @@ struct PlaybackInfoBody: Encodable {
     let EnableDirectStream: Bool?
     let EnableTranscoding: Bool
     let DeviceProfile: JellyfinCapabilityProfile
+    var AllowVideoStreamCopy: Bool? = nil
+    var AllowAudioStreamCopy: Bool? = nil
 }
 
 struct MediaStreamDto: Decodable {
@@ -331,6 +334,8 @@ struct MediaStreamDto: Decodable {
     let DisplayTitle: String?
     let IsDefault: Bool?
     let IsForced: Bool?
+    let IsHearingImpaired: Bool?
+    let Title: String? // l10n:content — container track title
     /// Whether this subtitle stream is text-based (SRT/ASS/embedded text) and so
     /// can be delivered/converted to WebVTT for the player. Image-based subs
     /// (PGS/VOBSUB) report `false` and need server burn-in instead.

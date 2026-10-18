@@ -8,6 +8,7 @@ final class NativeGradientCardSurface {
     struct Style: Equatable {
         let colors: [Color]
         let palette: ThemePalette
+        var informationSurfaceOpacity = DetailInformationSections.bandFillOpacity
     }
 
     private(set) weak var viewport: UIView?
@@ -50,7 +51,7 @@ final class NativeGradientCardSurface {
         if changed {
             let renderer = ImageRenderer(content:
                 AmbientGradientBackground.mesh(colors: style.colors)
-                    .overlay(style.palette.informationSurface.opacity(DetailInformationSections.bandFillOpacity))
+                    .overlay(style.palette.informationSurface.opacity(style.informationSurfaceOpacity))
                     .overlay(style.palette.gradientSurface.fill)
                     .frame(width: size.width, height: size.height)
                     .environment(\.colorScheme, style.palette.isLight ? .light : .dark)

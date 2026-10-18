@@ -5,6 +5,7 @@ import CoreNetworking
 import FeatureAuthCore
 import CryptoKit
 import FeatureLiveTVCore
+import CoreSecureStore
 
 /// The accounts + providers hub, extracted from `AppState`.
 ///
@@ -60,6 +61,7 @@ public final class AccountsProvidersModel {
     private let profilesModel: ProfilesModel
     @ObservationIgnored
     private var liveTVAuthorizationCache: [String: (fingerprint: String, digest: String)] = [:]
+    @ObservationIgnored private var sourceDiagnosticObserver: ObservationLease?
 
     /// The auth token to use for an account id, preferring an in-memory Plex
     /// Home-user override over the account's stored (admin) token. Injected so the
@@ -89,6 +91,12 @@ public final class AccountsProvidersModel {
         self.accountStore = accountStore
         self.registry = registry
         self.profilesModel = profilesModel
+        let token = NotificationCenter.default.addObserver(
+            forName: LiveTVSourceDiagnostics.snapshotRequested, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.captureLiveTVSourceDiagnostics() }
+        }
+        sourceDiagnosticObserver = ObservationLease(center: .default, token: token)
     }
 
     /// This device's stable client identifier.
@@ -96,6 +104,16 @@ public final class AccountsProvidersModel {
 
     private var accountSelectionIsUnavailable: Bool {
         profilesModel.unconfirmedAccountSelectionProfileIDs.contains(profilesModel.activeProfileID)
+    }
+
+    /// Sync may record a question before the account's provider is known.
+    /// Only locally present, active Plex accounts can require an identity choice.
+    public var activeProfileAwaitsIdentity: Bool {
+        profilesModel.activeProfile.awaitsIdentity(
+            amongAccounts: accounts.lazy.filter {
+                self.activeAccountIDs.contains($0.id) && $0.server.provider == .plex
+            }.map(\.id)
+        )
     }
 
     public var liveTVServerChoices: [LiveTVServerChoice] {
@@ -376,12 +394,26 @@ public final class AccountsProvidersModel {
     /// active profile. Invalidates the provider cache first, then fires
     /// `onActiveAccountsChanged` so the media-share runtime can update its
     /// preferred-account keys.
-    public func reloadAccounts() {
+    public func reloadAccounts(updatingServerAddressesFor addressAccountID: String? = nil) {
         profilesModel.retryUnconfirmedAccountSelections()
         liveTVAuthorizationCache = [:]
-        registry.invalidateCache()
+        let updated = accountStore.loadAccounts()
+        if let addressAccountID,
+           let account = updated.first(where: { $0.id == addressAccountID }),
+           accounts.map({ old in
+               var expected = old
+               if old.id == addressAccountID {
+                   expected.server.alternateConnectionURLs = account.server.alternateConnectionURLs
+               }
+               return expected
+           }) == updated {
+            registry.updateServerAddresses(accountID: addressAccountID,
+                                           alternatives: account.server.alternateConnectionURLs ?? [])
+        } else {
+            registry.invalidateCache()
+        }
         onAccountsInvalidated()
-        accounts = accountStore.loadAccounts()
+        accounts = updated
         let known = Set(accounts.map(\.id))
         // The household-global active set is the fallback for a profile that has
         // never chosen a subset (default profile / upgrade path).
@@ -411,7 +443,80 @@ public final class AccountsProvidersModel {
         watchesNothingByChoice = resolved.isEmpty
             && !accountSelectionIsUnavailable
             && (profilesModel.storedActiveAccountIDs(for: profilesModel.activeProfileID)?.isEmpty ?? false)
+        recordLiveTVAccountState(.accountsReloaded)
         onActiveAccountsChanged(resolved, accounts)
+    }
+
+    private func recordLiveTVAccountState(_ event: LiveTVSourceDiagnostics.Event) {
+        let profileID = profilesModel.activeProfileID
+        let namespace = profilesModel.activeNamespace
+        let selected = profilesModel.storedActiveAccountIDs(for: profileID)
+        var identities: [LiveTVSourceDiagnostics.Identity: String] = [
+            .profile: profileID, .namespace: namespace ?? "default"
+        ]
+        identities[.rootNamespaceOwner] = profilesModel.rootNamespaceOwnerID
+        LiveTVSourceDiagnostics.shared.record(
+            event, identities: identities,
+            counts: [
+                .accounts: accounts.count, .activeAccounts: activeAccountIDs.count,
+                .selectedAccounts: selected?.count ?? 0,
+                .iptvAccounts: accounts.filter { $0.server.provider == .iptv }.count
+            ],
+            flags: [
+                .selectionUnavailable: accountSelectionIsUnavailable,
+                .explicitSelection: selected != nil,
+                .identityPending: profilesModel.activeProfile.awaitsIdentity(amongAccounts: activeAccountIDs),
+                .actionableIdentityPending: activeProfileAwaitsIdentity,
+                .defaultNamespace: namespace == nil,
+                .storageNamespaceMatches: namespace == LiveTVLibraryStorage.preferencesNamespace(
+                    profileID: profileID, profiles: profilesModel
+                )
+            ]
+        )
+        for account in accounts {
+            LiveTVSourceDiagnostics.shared.record(
+                .accountSnapshot, identities: [.profile: profileID, .account: account.id],
+                flags: [
+                    .active: activeAccountIDs.contains(account.id), .iptv: account.server.provider == .iptv,
+                    .plex: account.server.provider == .plex, .jellyfin: account.server.provider == .jellyfin,
+                    .emby: account.server.provider == .emby
+                ]
+            )
+        }
+    }
+
+    private func captureLiveTVSourceDiagnostics() {
+        recordLiveTVAccountState(.reportSnapshot)
+        let profileID = profilesModel.activeProfileID
+        let namespace = profilesModel.activeNamespace
+        let expected = LiveTVLibraryStorage.preferencesNamespace(profileID: profileID, profiles: profilesModel)
+        var namespaces = [namespace]
+        if expected != namespace { namespaces.append(expected) }
+        for namespace in namespaces {
+            do {
+                let configuration = try LiveTVSourceStorage.store(namespace: namespace).load()
+                LiveTVSourceDiagnostics.shared.configuration(configuration, namespace: namespace, event: .reportSnapshot)
+                let suppression = try LiveTVServerEnrollmentSuppressionStore(
+                    profileID: profileID, namespace: namespace
+                ).records()
+                LiveTVSourceDiagnostics.shared.record(
+                    .reportSnapshot, identities: [.profile: profileID, .namespace: namespace ?? "default"],
+                    counts: [.suppressedAccounts: suppression.values.filter { $0 }.count]
+                )
+                for (account, suppressed) in suppression.sorted(by: { $0.key < $1.key }).prefix(64) {
+                    LiveTVSourceDiagnostics.shared.record(
+                        .suppressionChanged,
+                        identities: [.profile: profileID, .namespace: namespace ?? "default", .account: account],
+                        flags: [.suppressed: suppressed]
+                    )
+                }
+            } catch {
+                LiveTVSourceDiagnostics.shared.record(
+                    .reportSnapshot, identities: [.profile: profileID, .namespace: namespace ?? "default"],
+                    flags: [.failed: true], reason: .storage, error: error
+                )
+            }
+        }
     }
 
     public func applySyncedMediaShareLibraries(_ descriptors: [SyncedAccountDescriptor]) {

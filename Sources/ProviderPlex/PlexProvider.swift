@@ -7,7 +7,7 @@ import CoreNetworking
 /// Holds an authenticated `PlexClient` and maps Plex `Metadata`/`Directory`
 /// onto the provider-agnostic `CoreModels` types. Feature modules depend only on
 /// `MediaProvider`; this is the single place Plex specifics live.
-public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
+public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding, ServerAddressUpdating {
     public let kind: ProviderKind = .plex
     public let session: UserSession
     public let accountID: String
@@ -18,8 +18,37 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
     private let videoPlaylistCache = VideoPlaylistSnapshotCache()
     let themeArchiveResolver: @Sendable (String?) async -> URL?
     private let artworkOriginHistoryKey: String
+    private let makeConnectionResolver: @Sendable ([URL], [URL]) -> PlexConnectionResolver
 
     public var authenticatedHTTPOrigin: URL { client.baseURL }
+
+    public func updateServerAddresses(_ alternatives: [URL]) {
+        client.updateConnectionResolver { discovered in makeConnectionResolver(alternatives, discovered) }
+    }
+
+    public func resolveAuthenticatedHTTPOrigin() async throws -> URL {
+        let url = await client.resolvedBaseURL()
+        try Task.checkCancellation()
+        return url
+    }
+
+    public static func verifyAddress(
+        _ url: URL, serverID: String,
+        http: any HTTPClient = URLSessionHTTPClient(session: .plozzDiscovery)
+    ) async throws {
+        struct Identity: Decodable {
+            struct Container: Decodable { let machineIdentifier: String }
+            let MediaContainer: Container
+        }
+        let identity = try await http.decode(
+            Identity.self,
+            from: Endpoint(path: "/identity", headers: ["Accept": "application/json"], redirectPolicy: .sameOrigin),
+            baseURL: url
+        )
+        guard !serverID.isEmpty, identity.MediaContainer.machineIdentifier == serverID else {
+            throw AppError.conflict
+        }
+    }
 
     public init(
         session: UserSession,
@@ -42,7 +71,7 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
         // Probe the persisted connection list (or the single saved URL) and stay
         // on whichever is reachable. With only one candidate and no refresh this
         // is a no-op — behaviour matches a fixed URL.
-        let candidates = session.server.connectionURLs?.isEmpty == false
+        let advertised = session.server.connectionURLs?.isEmpty == false
             ? session.server.connectionURLs!
             : [session.server.baseURL]
         // Persist whichever connection last answered, keyed by server, so a warm
@@ -52,30 +81,36 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
         let artworkOriginHistoryKey =
             "plex.artwork-origins.\(session.server.id)"
         self.artworkOriginHistoryKey = artworkOriginHistoryKey
-        let reachableSeed = UserDefaults.standard.string(forKey: reachableKey).flatMap(URL.init(string:))
-        let resolver = PlexConnectionResolver(
-            candidates: candidates,
-            deviceProfile: deviceProfile,
-            token: session.accessToken,
-            probe: probe,
-            refresh: connectionRefresh,
-            reachableSeed: reachableSeed,
-            onReachable: { url in
-                UserDefaults.standard.set(url.absoluteString, forKey: reachableKey)
-                var origins = UserDefaults.standard.stringArray(
-                    forKey: artworkOriginHistoryKey
-                ) ?? []
-                if !origins.contains(url.absoluteString) {
-                    origins.append(url.absoluteString)
-                    UserDefaults.standard.set(
-                        origins,
+        let makeResolver: @Sendable ([URL], [URL]) -> PlexConnectionResolver = { manual, discovered in
+            let candidates = discovered + manual
+            let reachableSeed = UserDefaults.standard.string(forKey: reachableKey).flatMap(URL.init(string:))
+                .flatMap { candidates.contains($0) ? $0 : nil }
+            return PlexConnectionResolver(
+                candidates: discovered,
+                manualCandidates: manual,
+                deviceProfile: deviceProfile,
+                token: session.accessToken,
+                probe: probe,
+                refresh: connectionRefresh,
+                reachableSeed: reachableSeed,
+                onReachable: { url in
+                    UserDefaults.standard.set(url.absoluteString, forKey: reachableKey)
+                    var origins = UserDefaults.standard.stringArray(
                         forKey: artworkOriginHistoryKey
-                    )
+                    ) ?? []
+                    if !origins.contains(url.absoluteString) {
+                        origins.append(url.absoluteString)
+                        UserDefaults.standard.set(
+                            origins,
+                            forKey: artworkOriginHistoryKey
+                        )
+                    }
                 }
-            }
-        )
+            )
+        }
+        self.makeConnectionResolver = makeResolver
         self.client = PlexClient(
-            resolver: resolver,
+            resolver: makeResolver(session.server.alternateConnectionURLs ?? [], advertised),
             deviceProfile: deviceProfile,
             token: session.accessToken,
             http: http,
@@ -1044,10 +1079,9 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
         }
         let media = mediaList[mediaIndex]
         let partIndex = 0
-        // Plex identifies each active transcode by this value. Reusing an item-
-        // scoped identifier lets a retry or simultaneous playback tear down the
-        // rendition another request is still fetching.
-        let transcodeSessionID =
+        // Timeline reports and the stream must share a request-owned identity.
+        // An item-scoped value cannot distinguish retries or simultaneous plays.
+        let playbackSessionID =
             "plozz-\(session.deviceID)-\(itemID)-\(UUID().uuidString)"
         var streaming = streaming
         if let options = streaming {
@@ -1079,7 +1113,7 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
             ratingKey: itemID,
             media: media,
             part: part,
-            sessionID: transcodeSessionID,
+            sessionID: playbackSessionID,
             mediaIndex: mediaIndex,
             partIndex: partIndex,
             forceTranscode: forceTranscode,
@@ -1088,12 +1122,15 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
             throw AppError.notFound
         }
         var negotiatedCodec: DirectPlayVideoCodec?
+        var deliveryMode: PlaybackDiagnostics.PlaybackMode = resolved.isTranscoding ? .transcode : .directPlay
         if let streaming, resolved.isTranscoding {
             do {
-                negotiatedCodec = try await client.validateStreamingTranscode(url: resolved.url, options: streaming)
+                let decision = try await client.validateStreamingTranscode(url: resolved.url, options: streaming)
+                negotiatedCodec = decision.codec
+                deliveryMode = decision.delivery
                 try Task.checkCancellation()
             } catch {
-                do { try await client.stopStreamingTranscode(sessionID: transcodeSessionID) }
+                do { try await client.stopStreamingTranscode(sessionID: playbackSessionID) }
                 catch { PlozzLog.playback.error("Unable to release the rejected Plex streaming decision.") }
                 throw error
             }
@@ -1119,30 +1156,40 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
             itemID: itemID,
             mediaSourceID: selectedMediaSourceID,
             url: resolved.url,
-            deliveryMode: resolved.isTranscoding ? .serverTranscode : .directFile,
+            deliveryMode: deliveryMode == .remux ? .serverRemux
+                : resolved.isTranscoding ? .serverTranscode : .directFile,
             purpose: .mediaStream,
-            playSessionID: resolved.isTranscoding ? transcodeSessionID : nil,
+            playSessionID: resolved.isTranscoding ? playbackSessionID : nil,
             formatHint: media.container ?? part.container
         )
         let referenceURL = client.transcodeURL(
             ratingKey: itemID,
-            sessionID: transcodeSessionID,
+            sessionID: playbackSessionID,
             mediaIndex: mediaIndex,
             partIndex: partIndex
         ) ?? resolved.url
-        let originalFileSource = originalFileSource(
+        let originalFileSource = originalPartSource(
             itemID: itemID,
             mediaSourceID: selectedMediaSourceID,
             client: client,
             part: part,
-            container: media.container ?? part.container
+            container: media.container ?? part.container,
+            forDownload: true
+        )
+        let originalPlaybackSource = originalPartSource(
+            itemID: itemID,
+            mediaSourceID: selectedMediaSourceID,
+            client: client,
+            part: part,
+            container: media.container ?? part.container,
+            forDownload: false
         )
         let localRemuxSource = localRemuxSourceDescriptor(
             itemID: itemID,
             mediaSourceID: media.id.map(String.init),
-            originalSource: originalFileSource,
+            originalSource: originalPlaybackSource,
             referencePlaybackURL: referenceURL,
-            referencePlaySessionID: transcodeSessionID,
+            referencePlaySessionID: playbackSessionID,
             durationSeconds: mappedItem.runtime,
             container: media.container ?? part.container,
             streams: streams,
@@ -1153,14 +1200,12 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
         var request = PlaybackRequest(
             item: mappedItem,
             playbackSource: .authenticatedHTTP(playbackLocator),
-            // Plex correlates timeline reports by ratingKey; a per-play session
-            // id isn't required, so reuse the item id for traceability.
-            playSessionID: itemID,
+            playSessionID: playbackSessionID,
             audioTracks: audio,
             subtitleTracks: subs,
             startPosition: mappedItem.resumePosition ?? 0,
             isTranscoding: resolved.isTranscoding,
-            deliveryMode: resolved.isTranscoding ? .transcode : .directPlay,
+            deliveryMode: deliveryMode,
             sourceMetadata: Self.sourceMetadata(
                 container: media.container ?? part.container,
                 streams: streams,
@@ -1180,10 +1225,10 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
             sourceFileName: PlaybackRequest.sourceFileName(from: part.file)
                 ?? PlaybackRequest.sourceFileName(from: part.key)
         )
-        request.scrubStillSource = originalFileSource
+        request.scrubStillSource = originalPlaybackSource
+        request.streamingSessionID = resolved.isTranscoding ? playbackSessionID : nil
         if let streaming {
             request.streamingOptions = streaming
-            request.streamingSessionID = resolved.isTranscoding ? transcodeSessionID : nil
             request.negotiatedStreamingVideoCodec = negotiatedCodec
             if resolved.isTranscoding {
                 request.localRemuxSource = nil
@@ -1379,6 +1424,7 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
                 isInterlaced: Self.isInterlacedVideo(v),
                 width: v.width,
                 height: v.height,
+                bitDepth: v.bitDepth,
                 bitrate: bps(fromKbps: v.bitrate),
                 frameRate: v.frameRate,
                 videoRange: videoRangeToken(for: rangeType),
@@ -1399,7 +1445,7 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
                 channelLayout: a.audioChannelLayout,
                 sampleRate: a.samplingRate,
                 bitrate: bps(fromKbps: a.bitrate),
-                language: a.languageTag ?? a.language
+                language: a.languageTag ?? a.languageCode ?? a.language
             )
         }
         let subtitleStream = subtitle.map { s in
@@ -1416,7 +1462,9 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
             fileName: fileName,
             video: videoStream,
             audio: audioStream,
-            subtitle: subtitleStream
+            subtitle: subtitleStream,
+            audioLanguages: streams.filter { $0.streamType == 2 }
+                .compactMap { $0.languageTag ?? $0.languageCode ?? $0.language }
         )
         return metadata.isEmpty ? nil : metadata
     }
@@ -1466,21 +1514,23 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
         )
     }
 
-    private func originalFileSource(
+    private func originalPartSource(
         itemID: String,
         mediaSourceID: String?,
         client: PlexClient,
         part: PlexPart,
-        container: String?
+        container: String?,
+        forDownload: Bool
     ) -> PlaybackSource? {
         guard let key = part.key,
-              let originalURL = client.downloadURL(forPartKey: key),
+              let originalURL = forDownload
+                ? client.downloadURL(forPartKey: key) : client.streamURL(forPartKey: key),
               let locator = try? authenticatedPlaybackLocator(
                   itemID: itemID,
                   mediaSourceID: mediaSourceID,
                   url: originalURL,
                   deliveryMode: .directFile,
-                  purpose: .originalFile,
+                  purpose: forDownload ? .originalFile : .mediaStream,
                   playSessionID: nil,
                   formatHint: container
               ) else {
@@ -1498,12 +1548,15 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
         playSessionID: String?,
         formatHint: String?
     ) throws -> AuthenticatedHTTPPlaybackLocator {
-        guard let components = URLComponents(
+        guard var components = URLComponents(
             url: url,
             resolvingAgainstBaseURL: false
-        ), !components.percentEncodedPath.isEmpty else {
+        ), let base = MediaProviderURLIdentity.matchingBaseURL(
+            for: url, among: client.knownBaseURLs + [session.server.baseURL]),
+           let relative = MediaProviderURLIdentity.relativeEncodedResourcePath(of: url, under: base) else {
             throw AppError.invalidResponse
         }
+        components.percentEncodedPath = relative
         return try authenticatedPlaybackLocator(
             itemID: itemID,
             mediaSourceID: mediaSourceID,
@@ -1511,7 +1564,7 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
             purpose: purpose,
             playSessionID: playSessionID,
             formatHint: formatHint,
-            pathBase: .serverRoot,
+            pathBase: .configuredBaseURL,
             components: components
         )
     }
@@ -1604,24 +1657,26 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
         default: state = "playing"
         }
         let timeMS = PlexTime.milliseconds(fromSeconds: progress.positionSeconds)
+        let durationMS = progress.durationSeconds.flatMap { seconds -> Int? in
+            guard seconds.isFinite, seconds > 0,
+                  let milliseconds = Int(exactly: (seconds * 1_000).rounded()),
+                  milliseconds > 0 else { return nil }
+            return milliseconds
+        }
+        let detail = "state=\(state) time=\(timeMS)ms duration=\(durationMS.map(String.init) ?? "unknown")"
         do {
             try await client.reportTimeline(
                 ratingKey: progress.itemID,
+                playSessionID: progress.playSessionID,
                 state: state,
                 timeMs: timeMS,
-                // NOTE (diagnostics): Plex is told the position but never the
-                // runtime, so it cannot compute a completion percentage from this
-                // call alone and will not promote the title to "watched" on its
-                // own. Plozz relies on its own 90% threshold + `/:/scrobble`
-                // instead — which means a finish that never produces a scrobble
-                // leaves the title sitting in the resume feed forever.
-                durationMs: nil
+                durationMs: durationMS
             )
             ContinueWatchingDiagnostics.emit(ContinueWatchingDiagnostics.writeLine(
                 provider: "plex",
                 endpoint: "/:/timeline",
                 itemID: progress.itemID,
-                detail: "state=\(state) time=\(timeMS)ms duration=nil",
+                detail: detail,
                 ok: true
             ))
         } catch {
@@ -1629,7 +1684,7 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
                 provider: "plex",
                 endpoint: "/:/timeline",
                 itemID: progress.itemID,
-                detail: "state=\(state) time=\(timeMS)ms duration=nil",
+                detail: detail,
                 ok: false,
                 error: String(describing: error)
             ))
@@ -1849,6 +1904,17 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
 
     // MARK: - Mapping
 
+    static func episodeOrdering(_ value: String?) -> EpisodeOrdering? {
+        guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        switch value {
+        case "tvdbAiring": return .aired
+        case "tvdbDvd": return .dvd
+        case "tvdbAbsolute": return .absolute
+        case "tmdbAiring": return .tmdb
+        default: return .unknown
+        }
+    }
+
     func map(metadata dto: PlexMetadata) -> MediaItem {
         let kind = Self.kind(forItemType: dto.type)
         let isEpisode = kind == .episode
@@ -1915,6 +1981,9 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
             // server season ids differ) instead of collapsing to the first season.
             seasonNumber: isEpisode ? dto.parentIndex : (kind == .season ? dto.index : nil),
             episodeNumber: isEpisode ? dto.index : nil,
+            episodeOrdering: Self.episodeOrdering(
+                dto.Preferences?.Setting?.first(where: { $0.id == "episodeOrdering" })?.episodeOrdering
+            ),
             productionYear: dto.year,
             releaseDate: Self.releaseDate(from: dto.originallyAvailableAt),
             officialRating: dto.contentRating,
@@ -2158,7 +2227,8 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
     static func versions(from media: [PlexMedia]?, edition: String? = nil) -> [MediaVersion] {
         guard let media, media.count > 1 else { return [] }
         return media.enumerated().map { index, m in
-            MediaVersion(
+            let metadata = Self.sourceMetadata(from: m)
+            return MediaVersion(
                 id: m.id.map(String.init) ?? "\(index)",
                 name: Self.releaseName(from: m),
                 fileName: Self.fileName(from: m),
@@ -2170,11 +2240,12 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
                 duration: m.duration.map { TimeInterval($0) / 1_000 },
                 isDefault: index == 0,
                 videoCodec: m.videoCodec,
-                videoRange: nil,
+                videoRange: metadata?.video?.videoRangeType ?? metadata?.video?.videoRange,
                 audioCodec: m.audioCodec,
                 audioChannels: m.audioChannels,
-                audioProfile: nil,
-                container: m.container
+                audioProfile: metadata?.audio?.profile,
+                container: m.container,
+                sourceMetadata: metadata
             )
         }
     }
@@ -2208,10 +2279,7 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
     }
 
     static func fileName(from media: PlexMedia) -> String? {
-        guard let file = media.Part?.first?.file, !file.isEmpty else { return nil }
-        let base = (file as NSString).lastPathComponent
-        let trimmed = base.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        MediaSourceDisplayName.fileName(from: media.Part?.first?.file)
     }
 
     /// Maps Plex `Guid` values (`imdb://...`, `tmdb://...`, …) into the shared
@@ -2263,6 +2331,10 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
     /// badges. Returns `nil` for containers (shows/seasons) that have no part.
     static func sourceMetadata(from dto: PlexMetadata) -> MediaSourceMetadata? {
         guard let media = bestMedia(from: dto.Media) else { return nil }
+        return sourceMetadata(from: media)
+    }
+
+    static func sourceMetadata(from media: PlexMedia) -> MediaSourceMetadata? {
         let part = media.Part?.first
         let streams = part?.Stream ?? []
         if !streams.isEmpty {
@@ -2271,6 +2343,7 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
                 streams: streams,
                 mediaAudioProfile: media.audioProfile,
                 mediaVideoDisplayTitle: media.videoStreamDisplayTitle,
+                fileSizeBytes: fileSizeBytes(from: media),
                 fileName: Self.fileName(from: media)
             )
         }
@@ -2589,6 +2662,10 @@ public struct PlexProvider: MediaProvider, AuthenticatedHTTPOriginProviding {
             isDefault: dto.default ?? dto.selected ?? false,
             isForced: dto.forced ?? false,
             channels: isSubtitle ? nil : dto.channels,
+            isHearingImpaired: dto.hearingImpaired == true
+                || TrackLabeling.isHearingImpaired(dto.title)
+                || TrackLabeling.isHearingImpaired(dto.extendedDisplayTitle)
+                || TrackLabeling.isHearingImpaired(dto.displayTitle),
             deliverySource: deliverySource,
             isImageBasedSubtitle: isSubtitle && !isTextSubtitleCodec(dto.codec),
             isExternal: isSubtitle && dto.key != nil

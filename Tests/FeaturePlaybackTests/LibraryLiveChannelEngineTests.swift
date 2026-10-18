@@ -655,6 +655,34 @@ final class LibraryLiveChannelEngineTests: XCTestCase {
         await fixture.adapter.drainTransport()
     }
 
+    func testFailureDiagnosticFollowsTheOwnedSourceThroughTheProtocol() async throws {
+        let fixture = try UniversalLiveFixture()
+        let engine: any LiveChannelEngine = fixture.adapter
+        let attempt = try XCTUnwrap(PlaybackFailureDiagnostics().begin(
+            layer: .liveEngine, content: .live, captureForPresentation: true
+        ))
+        attempt.fail(stage: .load, reason: .authentication, engineFailure: .sourceRefused, httpStatus: 403)
+        fixture.decoder.livePlaybackFailureDiagnostic = attempt.diagnostic
+        XCTAssertNil(engine.livePlaybackFailureDiagnostic)
+        try await engine.loadChannel(streamA)
+        fixture.decoder.livePlaybackFailureDiagnostic = attempt.diagnostic
+        XCTAssertEqual(engine.livePlaybackFailureDiagnostic?.httpStatus, 403)
+        let draining = UniversalLiveGate()
+        fixture.decoder.drainHook = { await draining.wait() }
+        let replacement = Task { try await engine.loadChannel(streamB) }
+        await settle { draining.isWaiting }
+        fixture.decoder.livePlaybackFailureDiagnostic = attempt.diagnostic
+        XCTAssertNil(engine.livePlaybackFailureDiagnostic, "An outgoing decoder must not diagnose its queued replacement.")
+        draining.open()
+        try await replacement.value
+        XCTAssertNil(engine.livePlaybackFailureDiagnostic)
+        fixture.decoder.livePlaybackFailureDiagnostic = attempt.diagnostic
+        engine.stop()
+        await engine.drainTransport()
+        fixture.decoder.livePlaybackFailureDiagnostic = attempt.diagnostic
+        XCTAssertNil(engine.livePlaybackFailureDiagnostic, "Stopped wrappers must not expose stale decoder evidence.")
+    }
+
     func testLegacyLiveLoadPublishesFailureOnceWithOrWithoutDecoderCallback() async throws {
         for emitsCallback in [false, true] {
             let fixture = try UniversalLiveFixture()
@@ -945,6 +973,7 @@ private final class UniversalLiveDecoder: LiveChannelEngine {
     var audioTracks: [MediaTrack] = []
     var subtitleTracks: [MediaTrack] = []
     var liveSnapshot = LiveChannelEngineSnapshot()
+    var livePlaybackFailureDiagnostic: PlaybackFailureDiagnostic?
     var supportsConcurrentPlayback = false
     var onProgress: (@MainActor () -> Void)?
     var onFailure: (@MainActor (AppError) -> Void)?
@@ -978,6 +1007,7 @@ private final class UniversalLiveDecoder: LiveChannelEngine {
         await loadSource("vod:\(request.item.id)", position: startPosition)
     }
     private func loadSource(_ source: String, position: TimeInterval) async {
+        livePlaybackFailureDiagnostic = nil
         loadedSources.append(source)
         events.append("load:\(source)")
         status = .loading
@@ -1023,6 +1053,7 @@ private final class UniversalLiveDecoder: LiveChannelEngine {
         status = .idle
         isPaused = true
         liveSnapshot = .init()
+        livePlaybackFailureDiagnostic = nil
         events.append("stop")
     }
     func drainTransport() async {

@@ -179,7 +179,7 @@ private struct PlozziOSFirstProfileView: View {
                 .frame(maxWidth: .infinity, minHeight: proxy.size.height)
             }
         }
-        .sheet(isPresented: $editing) {
+        .plozzSheet(isPresented: $editing) {
             NavigationStack {
                 PlozziOSProfileEditorHost(
                     appModel: appModel,

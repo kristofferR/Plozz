@@ -1483,6 +1483,7 @@ struct CatalogReadQueries {
         MediaVersion(
             id: relPath,
             name: (basename as NSString).deletingPathExtension,
+            fileName: basename,
             height: resolutionHeight(fromName: basename),
             sizeBytes: size > 0 ? size : nil,
             videoRange: videoRange(fromName: basename),

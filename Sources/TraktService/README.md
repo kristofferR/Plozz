@@ -59,6 +59,10 @@ from before Trakt's authentication migration may no longer refresh.
 
 ## Shared profile authorization
 
+The provider-neutral implementation now lives in `CoreTrackerAuth`; Trakt's
+public names remain compatibility aliases. WeTrakr reuses that implementation
+with separate token accounts and cloud-record prefixes, never Trakt credentials.
+
 One sign-in per Plozz profile is shared across Apple TV, iPhone and iPad through
 the existing private encrypted CloudKit tracker channel. Access and refresh
 tokens remain in Keychain locally. A server-acknowledged conditional CloudKit

@@ -9,7 +9,9 @@ import CoreNetworking
 /// a token) for browsing/playback. It deals only in DTOs; mapping to
 /// `CoreModels` happens in `JellyfinProvider`.
 public struct JellyfinClient: Sendable {
-    public let baseURL: URL
+    private let savedBaseURL: URL
+    public var baseURL: URL { addressResolver?.current ?? savedBaseURL }
+    let addressResolver: ServerAddressResolver?
     public let deviceProfile: JellyfinDeviceProfile
     public let providerKind: ProviderKind
     private let token: String?
@@ -31,16 +33,31 @@ public struct JellyfinClient: Sendable {
         token: String? = nil,
         http: HTTPClient = URLSessionHTTPClient(),
         interactiveHTTP: HTTPClient? = nil,
-        capabilityProfile: JellyfinCapabilityProfile = .detected()
+        capabilityProfile: JellyfinCapabilityProfile = .detected(),
+        serverID: String? = nil,
+        alternateURLs: [URL] = [],
+        addressProbe: any HTTPClient = URLSessionHTTPClient(session: .plozzDiscovery)
     ) {
         let latch = ReachabilityLatch()
+        let resolver: ServerAddressResolver?
+        if let serverID {
+            resolver = ServerAddressResolver(baseURL: baseURL, alternatives: alternateURLs) { url in
+                try await Self.verifyAddress(url, serverID: serverID, http: addressProbe)
+            }
+        } else {
+            resolver = nil
+        }
+        addressResolver = resolver
+        let routedHTTP: any HTTPClient
+        if let resolver { routedHTTP = ServerAddressHTTPClient(wrapped: http, resolver: resolver) }
+        else { routedHTTP = http }
         // Wrap the transport(s) so the FIRST successful request against this
         // server latches reachability. `connectionLocality` reads that latch to
         // avoid reporting a saved-but-now-unreachable LAN server as `.local`
         // (which would wrongly win best-source selection over a reachable remote
         // twin). Mirrors Plex's resolver-confirmed reachability. (r7-jf-locality)
-        let observedHTTP = ReachabilityObservingHTTPClient(wrapped: http, latch: latch)
-        self.baseURL = baseURL
+        let observedHTTP = ReachabilityObservingHTTPClient(wrapped: routedHTTP, latch: latch)
+        self.savedBaseURL = baseURL
         self.deviceProfile = deviceProfile
         self.providerKind = providerKind
         self.token = token
@@ -52,8 +69,11 @@ public struct JellyfinClient: Sendable {
         // hitting a live session. The production foreground-pool isolation is
         // opted into explicitly by the provider (see AppState), which passes a
         // real `plozzInteractive` client.
-        self.interactiveHTTP = interactiveHTTP.map {
-            ReachabilityObservingHTTPClient(wrapped: $0, latch: latch)
+        self.interactiveHTTP = interactiveHTTP.map { transport in
+            let routed: any HTTPClient
+            if let resolver { routed = ServerAddressHTTPClient(wrapped: transport, resolver: resolver) }
+            else { routed = transport }
+            return ReachabilityObservingHTTPClient(wrapped: routed, latch: latch)
         } ?? observedHTTP
         self.capabilityProfile = capabilityProfile
     }
@@ -69,9 +89,11 @@ public struct JellyfinClient: Sendable {
         token: String?,
         http: HTTPClient,
         interactiveHTTP: HTTPClient,
-        capabilityProfile: JellyfinCapabilityProfile
+        capabilityProfile: JellyfinCapabilityProfile,
+        addressResolver: ServerAddressResolver?
     ) {
-        self.baseURL = baseURL
+        self.savedBaseURL = baseURL
+        self.addressResolver = addressResolver
         self.deviceProfile = deviceProfile
         self.providerKind = providerKind
         self.token = token
@@ -87,7 +109,22 @@ public struct JellyfinClient: Sendable {
     /// ``JellyfinProvider/connectionLocality`` reports `.unknown` rather than a
     /// misleading `.local`. Mirrors
     /// ``PlexConnectionResolver/hasConfirmedReachableConnection``.
-    public var hasConfirmedReachableConnection: Bool { reachability.isConfirmed }
+    public var hasConfirmedReachableConnection: Bool {
+        if let addressResolver { return addressResolver.confirmed != nil }
+        return reachability.isConfirmed
+    }
+
+    public static func verifyAddress(
+        _ url: URL, serverID: String,
+        http: any HTTPClient = URLSessionHTTPClient(session: .plozzDiscovery)
+    ) async throws {
+        let info = try await http.decode(
+            PublicSystemInfo.self,
+            from: Endpoint(path: "/System/Info/Public", redirectPolicy: .sameOrigin),
+            baseURL: url
+        )
+        guard !serverID.isEmpty, info.Id == serverID else { throw AppError.conflict }
+    }
 
     /// Returns a copy of this client carrying an auth token.
     public func authenticated(token: String) -> JellyfinClient {
@@ -95,13 +132,14 @@ public struct JellyfinClient: Sendable {
         // client keeps any reachability we've already confirmed.
         JellyfinClient(
             preserving: reachability,
-            baseURL: baseURL,
+            baseURL: savedBaseURL,
             deviceProfile: deviceProfile,
             providerKind: providerKind,
             token: token,
             http: http,
             interactiveHTTP: interactiveHTTP,
-            capabilityProfile: capabilityProfile
+            capabilityProfile: capabilityProfile,
+            addressResolver: addressResolver
         )
     }
 
@@ -1051,6 +1089,7 @@ public struct JellyfinClient: Sendable {
         }
         let enableDirectPlay: Bool?
         let enableDirectStream: Bool?
+        let allowStreamCopy: Bool?
         // Target a specific version when one was chosen; otherwise the server
         // returns every source and picks its default.
         if let mediaSourceID {
@@ -1061,6 +1100,7 @@ public struct JellyfinClient: Sendable {
             // Let the server pick: DirectPlay > DirectStream > transcode.
             enableDirectPlay = nil
             enableDirectStream = nil
+            allowStreamCopy = nil
         case .remux:
             // Disable direct play but keep direct stream: the server remuxes the
             // container to seekable fMP4 HLS while **copying** the video/audio
@@ -1070,13 +1110,19 @@ public struct JellyfinClient: Sendable {
             queryItems.append(URLQueryItem(name: "EnableDirectStream", value: "true"))
             enableDirectPlay = false
             enableDirectStream = true
+            allowStreamCopy = nil
         case .transcode:
             // Force a full transcode: neither direct play nor direct stream. Used
             // as the player's fallback when a direct stream fails to load.
             queryItems.append(URLQueryItem(name: "EnableDirectPlay", value: "false"))
             queryItems.append(URLQueryItem(name: "EnableDirectStream", value: "false"))
+            // HLS can still copy codecs with DirectStream disabled. A failed
+            // bitstream must not be reused by the full-transcode fallback.
+            queryItems.append(URLQueryItem(name: "AllowVideoStreamCopy", value: "false"))
+            queryItems.append(URLQueryItem(name: "AllowAudioStreamCopy", value: "false"))
             enableDirectPlay = false
             enableDirectStream = false
+            allowStreamCopy = false
             capabilityProfile = capabilityProfile.applyingTranscodingRange(for: providerKind)
         }
         var endpoint = Endpoint(
@@ -1093,7 +1139,9 @@ public struct JellyfinClient: Sendable {
             EnableDirectPlay: enableDirectPlay,
             EnableDirectStream: enableDirectStream,
             EnableTranscoding: true,
-            DeviceProfile: capabilityProfile
+            DeviceProfile: capabilityProfile,
+            AllowVideoStreamCopy: allowStreamCopy,
+            AllowAudioStreamCopy: allowStreamCopy
         ))
         guard streaming != nil else {
             return try await http.decode(PlaybackInfoResponse.self, from: endpoint, baseURL: baseURL)

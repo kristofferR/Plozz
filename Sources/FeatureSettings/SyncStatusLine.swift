@@ -1,5 +1,6 @@
 #if canImport(SwiftUI)
 import SwiftUI
+import CoreModels
 
 public struct SyncStatusPresentation {
     let summary: LocalizedStringResource
@@ -59,9 +60,16 @@ public struct SyncRecoveryWarning: View {
 /// Deferring the read to here confines the invalidation to this one line.
 public struct SyncStatusProvider {
     let make: () -> SyncStatusPresentation
+    let inventory: (() async throws -> SyncDataInventory)?
 
     /// - Parameter make: called from ``SyncStatusLine``'s body, never earlier.
-    public init(_ make: @escaping () -> SyncStatusPresentation) { self.make = make }
+    public init(
+        inventory: (() async throws -> SyncDataInventory)? = nil,
+        _ make: @escaping () -> SyncStatusPresentation
+    ) {
+        self.inventory = inventory
+        self.make = make
+    }
 }
 
 public struct SyncStatusLine: View {
@@ -124,6 +132,14 @@ public struct SyncStatusLine: View {
             return status.summary
         }
         return Self.longSyncMessages[longSyncMessageIndex]
+    }
+}
+
+struct SyncRecoveryDisabled: ViewModifier {
+    let provider: SyncStatusProvider?
+
+    func body(content: Content) -> some View {
+        content.disabled(provider?.make().isRecovering == true)
     }
 }
 #endif

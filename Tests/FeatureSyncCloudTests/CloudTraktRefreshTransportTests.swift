@@ -133,6 +133,24 @@ final class CloudTraktRefreshTransportTests: XCTestCase {
         XCTAssertNil(CloudTraktRefreshTransport.scope(recordName: "trackerToken:service|trakt.oauth"))
     }
 
+    func testWetrakrSharesCoordinationButNotTraktRecordIdentity() {
+        let scope = "service\0wetrakr.oauth.profile"
+        let name = CloudTraktRefreshTransport.recordName(scope: scope)
+        XCTAssertTrue(name.hasPrefix(CloudTraktRefreshTransport.wetrakrRecordPrefix))
+        XCTAssertEqual(CloudTraktRefreshTransport.scope(recordName: name), scope)
+        XCTAssertTrue(CloudTraktRefreshTransport.manages(recordName: name))
+        XCTAssertTrue(CloudTraktRefreshTransport.manages(recordName: "trackerToken:service|wetrakr.oauth"))
+        XCTAssertTrue(CloudTraktRefreshTransport.manages(recordName: "trackerToken:service|wetrakr.oauth.profile"))
+        XCTAssertFalse(CloudTraktRefreshTransport.manages(recordName: "trackerToken:service|wetrakr.oauthOther"))
+        XCTAssertNotEqual(name, CloudTraktRefreshTransport.recordName(scope: "service\0trakt.oauth.profile"))
+        XCTAssertTrue(CloudTraktRefreshTransport.recordName(scope: "service\0trakt.oauth.profile")
+            .hasPrefix(CloudTraktRefreshTransport.recordPrefix))
+        XCTAssertNil(CloudTraktRefreshTransport.scope(recordName: name.replacingOccurrences(
+            of: CloudTraktRefreshTransport.wetrakrRecordPrefix,
+            with: CloudTraktRefreshTransport.recordPrefix
+        )))
+    }
+
     func testExistingMappingNeverPlacesCredentialPayloadInPlaintextFields() {
         let schema = CloudSyncSchemaDescriptor.trackerTokensV1
         let name = CloudTraktRefreshTransport.recordName(scope: "service\0trakt.oauth")

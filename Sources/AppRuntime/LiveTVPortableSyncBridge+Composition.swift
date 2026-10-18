@@ -22,6 +22,9 @@ extension LiveTVPortableSyncBridge {
     }
 
     public static func makeRuntime(profiles: ProfilesModel, directory: URL) -> LiveTVPortableSyncBridge {
+        Task.detached(priority: .utility) {
+            LiveTVPortableLibraryExport.reclaimObsoleteTemporaryStorage()
+        }
         let absentCatalogRevision = UUID()
         let sources: @MainActor (String) -> any LiveTVSourcesStoring = { profileID in
             let namespace = profileID == profiles.rootNamespaceOwnerID ? nil : profileID
@@ -49,6 +52,7 @@ extension LiveTVPortableSyncBridge {
                 ).load()
                 let mappings = try await cache.mappingOverrides()
                 let channelIDs = preferences.favoriteIDs.union(preferences.hiddenChannelIDs)
+                    .union(preferences.organization.shownChannelIDs).union(preferences.organization.excludedFavoriteIDs)
                     .union(preferences.channelOverrides.keys).union(mappings.keys)
                 return try await cache.portableSyncIdentityHints(
                     configuration: configuration, channelIDs: channelIDs

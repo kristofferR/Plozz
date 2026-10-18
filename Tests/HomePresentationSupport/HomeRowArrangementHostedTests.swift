@@ -5,7 +5,7 @@ import CoreUI
 #elseif os(iOS)
 @testable import AppShelliOS
 #endif
-import FeatureSettings
+@testable import FeatureSettings
 import Observation
 import SwiftUI
 import UIKit
@@ -14,7 +14,254 @@ import XCTest
 
 @MainActor
 final class HomeRowArrangementHostedTests: XCTestCase {
+    func testPresetSelectionRefreshesRecoveredNativeSectionsBeforeSavingCustomRows() async throws {
+        let suite = "HomePresetRecovery.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let visibility = HomeLibraryVisibilityModel(store: HomeLibraryVisibilityStore(defaults: defaults))
+        visibility.useRowDefaults(.combined)
+        let provider = HomeSettingsLibraryProvider(
+            name: "Recovered server", homeError: .serverUnreachable, kind: .plex,
+            homeLayout: .init(sections: [.init(id: "native", kind: .recommendations)], source: .promotedHubs)
+        )
+        let account = ResolvedAccount(account: Account(from: provider.session), provider: provider)
+        let inventory = HomeSectionCatalogModel()
+        await inventory.load(libraries: [], accounts: [account], visibility: visibility)
+        XCTAssertEqual(inventory.serverFailures[account.account.id], .serverUnreachable)
+
+        try await withWindow {
+            HomeRowsSettingsView(libraries: [], accounts: [account], visibility: visibility, inventory: inventory)
+        } inspect: { window in
+            _ = try await self.capture(window, name: "Preset before server recovery")
+            await provider.setHomeError(nil)
+            visibility.useRowDefaults(.matchServer)
+            let native = HomeRowID.server(accountID: account.account.id, section: "native")
+            let recovered = XCTNSPredicateExpectation(
+                predicate: NSPredicate { _, _ in
+                    !inventory.isLoading && inventory.serverFailures.isEmpty
+                        && inventory.catalog.sections(in: visibility.visibility).enabled == [native]
+                }, object: nil
+            )
+            await self.fulfillment(of: [recovered], timeout: 5)
+            try visibility.setHomeSectionVisible(true, id: .libraries, catalog: inventory.catalog)
+            XCTAssertEqual(inventory.catalog.sections(in: visibility.visibility).enabled, [native, .libraries])
+            _ = try await self.capture(window, name: "Preset after server recovery")
+        }
+    }
+
     #if os(iOS)
+    func testMobileActionBarRemainsReadableAndPinnedWhileSectionsScroll() async throws {
+        let suite = "HomePinnedActions.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let visibility = HomeLibraryVisibilityModel(store: HomeLibraryVisibilityStore(defaults: defaults))
+        let provider = HomeSettingsLibraryProvider(name: "Library server", kind: .mediaShare)
+        let account = ResolvedAccount(account: Account(from: provider.session), provider: provider)
+        let libraries = (1...18).map {
+            AggregatedLibrary(
+                accountID: account.account.id, accountName: "Viewer", serverName: "Library server",
+                providerKind: .mediaShare,
+                library: MediaLibrary(id: "library-\($0)", title: "Library \($0)", kind: .movie)
+            )
+        }
+        let choices = HomeRowChoice.shared + libraries.flatMap(HomeRowChoice.baseRows)
+        visibility.applyRows(.init(enabled: choices.map(\.id), disabled: []), choices: choices)
+        for (width, size): (CGFloat, DynamicTypeSize) in [
+            (390, .large), (320, .accessibility5), (1024, .accessibility3)
+        ] {
+            let inventory = HomeSectionCatalogModel()
+            try await withWindow(size: CGSize(width: width, height: 900)) {
+                NavigationStack {
+                    HomeRowsSettingsView(
+                        libraries: libraries, accounts: [account], visibility: visibility, inventory: inventory
+                    )
+                }
+                .environment(\.dynamicTypeSize, size)
+            } inspect: { window in
+                let ready = XCTNSPredicateExpectation(
+                    predicate: NSPredicate { _, _ in
+                        !inventory.isLoading && inventory.catalog.choices.contains {
+                            $0.library?.library.id == "library-18"
+                        }
+                    }, object: nil
+                )
+                await self.fulfillment(of: [ready], timeout: 5)
+                let before = try await self.capture(window, name: "Home actions \(width) \(size)")
+                let text = before.map(\.0).joined(separator: " ")
+                for label in ["Preset", "Reorder", "Custom"] {
+                    XCTAssertTrue(text.contains(label), text)
+                }
+                func scrollViews(_ view: UIView) -> [UIScrollView] {
+                    (view as? UIScrollView).map { [$0] } ?? view.subviews.flatMap(scrollViews)
+                }
+                let scroll = try XCTUnwrap(scrollViews(window).first {
+                    $0.contentSize.height > $0.bounds.height + 300
+                })
+                let initialOffset = scroll.contentOffset.y
+                scroll.setContentOffset(CGPoint(x: 0, y: initialOffset + 300), animated: false)
+                let after = try await self.capture(window, name: "Home pinned actions \(width) \(size)")
+                XCTAssertGreaterThan(scroll.contentOffset.y, initialOffset + 250)
+                for label in ["Preset", "Reorder"] {
+                    XCTAssertEqual(try self.y(label, in: before), try self.y(label, in: after), accuracy: 0.003)
+                }
+            }
+        }
+    }
+
+    func testPushingAddSectionFinishesDiscoveryAfterTheRootDisappears() async throws {
+        let suite = "HomeAddDiscovery.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let visibility = HomeLibraryVisibilityModel(store: HomeLibraryVisibilityStore(defaults: defaults))
+        visibility.useRowDefaults(.combined)
+        let requested = expectation(description: "Root starts a held native-section request")
+        let provider = HomeSettingsLibraryProvider(
+            name: "Slow server", kind: .plex,
+            homeLayout: .init(
+                sections: [.init(id: "native", kind: .recommendations, title: "Native picks")], source: .promotedHubs
+            ),
+            holdsHome: true, onFirstHomeRequest: { requested.fulfill() }
+        )
+        let account = ResolvedAccount(account: Account(from: provider.session), provider: provider)
+        let inventory = HomeSectionCatalogModel()
+        let navigation = HomeCatalogNavigationFixture()
+        try await withWindow {
+            HomeCatalogNavigationHost(navigation: navigation, inventory: inventory, visibility: visibility, accounts: [account])
+        } inspect: { window in
+            await self.fulfillment(of: [requested], timeout: 5)
+            XCTAssertTrue(inventory.isLoading)
+            navigation.path = ["add"]
+            let pushed = XCTNSPredicateExpectation(
+                predicate: NSPredicate { _, _ in navigation.rootDisappeared && navigation.addAppeared }, object: nil
+            )
+            await self.fulfillment(of: [pushed], timeout: 5)
+            await provider.resumeHome()
+            let native = HomeRowID.server(accountID: account.account.id, section: "native")
+            let discovered = XCTNSPredicateExpectation(
+                predicate: NSPredicate { _, _ in
+                    !inventory.isLoading && inventory.catalog.sections(in: visibility.visibility).disabled.contains(native)
+                }, object: nil
+            )
+            await self.fulfillment(of: [discovered], timeout: 5)
+            let lines = try await self.capture(window, name: "Native section discovered on Add section")
+            XCTAssertTrue(lines.contains { $0.0.contains("Native picks") }, lines.map(\.0).joined(separator: " "))
+            try visibility.setHomeSectionVisible(true, id: native, catalog: inventory.catalog)
+            navigation.path = []
+            let returned = XCTNSPredicateExpectation(
+                predicate: NSPredicate { _, _ in !navigation.addAppeared }, object: nil
+            )
+            await self.fulfillment(of: [returned], timeout: 5)
+            XCTAssertTrue(inventory.catalog.sections(in: visibility.visibility).enabled.contains(native))
+        }
+        await provider.resumeHome()
+    }
+    #endif
+
+    func testMergeNextUpControlIsReadableAndReflectsHiddenContinueWatching() async throws {
+        let suite = "HomeNextUpControl.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let visibility = HomeLibraryVisibilityModel(
+            store: HomeLibraryVisibilityStore(defaults: defaults, namespace: "viewer")
+        )
+        for scheme: ColorScheme in [.light, .dark] {
+            for size: DynamicTypeSize in [.large, .accessibility3] {
+                visibility.setGlobalRowEnabled(true, for: .continueWatching)
+                try await withWindow {
+                    ScrollView {
+                        ContinueWatchingNextUpControl(visibility: visibility)
+                            .padding(32)
+                    }
+                    .environment(\.dynamicTypeSize, size)
+                    .environment(\.themePalette, scheme == .light ? ThemePalette.light : .dark)
+                    .environment(\.colorScheme, scheme)
+                    .background(scheme == .light ? Color.white : Color.black)
+                    #if os(tvOS)
+                    .frame(width: 900, height: 650)
+                    #endif
+                } inspect: { window in
+                    let lines = try await self.capture(window, name: "Merge Next Up \(scheme) \(size)")
+                    let text = lines.map(\.0).joined(separator: " ")
+                    XCTAssertTrue(text.contains("Merge Next Up rows"), text)
+                    XCTAssertTrue(text.contains("next episodes"), text)
+                    visibility.setGlobalRowEnabled(false, for: .continueWatching)
+                    let disabled = try await self.capture(window, name: "Merge Next Up with hidden Continue Watching")
+                    XCTAssertTrue(disabled.map(\.0).joined(separator: " ").contains("Add Continue Watching"), text)
+                }
+            }
+        }
+    }
+
+    #if os(iOS)
+    func testMobileCustomizeHomeListsSectionsWithoutDetachedArtworkOrMergeControls() async throws {
+        let suite = "MobileHomeNextUp.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = HomeLibraryVisibilityStore(defaults: defaults, namespace: "viewer")
+        let visibility = HomeLibraryVisibilityModel(store: store)
+        visibility.useRowDefaults(.combined)
+        visibility.setMergeNextUpIntoContinueWatching(true)
+        try await withWindow {
+            NavigationStack {
+                PlozziOSHomeSettingsView(
+                    hero: HeroSettingsModel(store: InMemoryHeroSettingsStore()),
+                    heroBackground: HeroBackgroundSettingsModel(store: InMemoryHeroBackgroundSettingsStore()),
+                    visibility: visibility, accounts: []
+                )
+            }
+        } inspect: { window in
+            let lines = try await self.capture(window, name: "Mobile Home artwork without duplicate merge toggle")
+            let text = lines.map(\.0).joined(separator: " ")
+            XCTAssertTrue(text.contains("Reorder"), text)
+            XCTAssertTrue(text.contains("Hero"), text)
+            XCTAssertTrue(text.contains("Continue Watching"), text)
+            XCTAssertFalse(text.contains("Artwork"), text)
+            XCTAssertFalse(text.contains("Merge Next Up rows"), text)
+            XCTAssertFalse(text.contains("No video libraries are available"), text)
+            XCTAssertTrue(store.load().mergeNextUpIntoContinueWatching)
+
+            visibility.setGlobalRowEnabled(false, for: .continueWatching)
+            let hidden = try await self.capture(window, name: "Mobile Home with Continue Watching hidden")
+            let hiddenText = hidden.map(\.0).joined(separator: " ")
+            XCTAssertFalse(hiddenText.contains("Artwork"), hiddenText)
+            XCTAssertFalse(hiddenText.contains("CONTINUE WATCHING"), "Do not leave an empty section for a hidden row.")
+            XCTAssertFalse(hiddenText.contains("Merge Next Up rows"), hiddenText)
+            XCTAssertTrue(store.load().mergeNextUpIntoContinueWatching)
+        }
+    }
+
+    func testMobileSectionMergeSwitchPersistsWithoutChangingPreset() async throws {
+        let suite = "MobileHomeRowsNextUp.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = HomeLibraryVisibilityStore(defaults: defaults, namespace: "viewer")
+        let visibility = HomeLibraryVisibilityModel(store: store)
+        visibility.useRowDefaults(.combined)
+        try await withWindow {
+            NavigationStack {
+                HomeSectionSettingsView(
+                    choice: HomeRowChoice.shared.first { $0.id == .global(.continueWatching) }!,
+                    inventory: HomeSectionCatalogModel(), visibility: visibility, libraries: [], accounts: []
+                )
+            }
+        } inspect: { window in
+            _ = try await self.capture(window, name: "Mobile Rows on Home merge setting")
+            func switches(_ view: UIView) -> [UISwitch] {
+                (view as? UISwitch).map { [$0] } ?? view.subviews.flatMap(switches)
+            }
+            let control = try XCTUnwrap(switches(window).first)
+            XCTAssertTrue(control.isOn)
+            control.setOn(false, animated: false)
+            control.sendActions(for: .valueChanged)
+            let lines = try await self.capture(window, name: "Mobile Rows on Home with Next Up separate")
+            XCTAssertFalse(store.load().mergeNextUpIntoContinueWatching)
+            XCTAssertEqual(visibility.visibility.rowCustomization?.defaults, .combined)
+            let text = lines.map(\.0).joined(separator: " ")
+            XCTAssertTrue(text.contains("Continue Watching"), text)
+            XCTAssertTrue(text.contains("Merge Next Up rows"), text)
+        }
+    }
+
     func testNativeReorderPreviewHasRoundedCorners() async throws {
         try await withWindow {
             LiftableReorderList(
@@ -87,8 +334,11 @@ final class HomeRowArrangementHostedTests: XCTestCase {
             XCTAssertEqual(offlineRequests, 1)
             let lines = try await self.capture(window, name: "Home customization with an offline server")
             let text = lines.map(\.0).joined(separator: " ")
-            XCTAssertTrue(text.contains("Available server"), text)
-            XCTAssertTrue(text.contains("Movies"), text)
+            XCTAssertTrue(text.contains("Reorder"), text)
+            XCTAssertTrue(text.contains("Hero"), text)
+            XCTAssertFalse(text.contains("Available server"), "Whole-library controls belong in Settings > Libraries.")
+            XCTAssertFalse(text.contains("Movies"), text)
+            XCTAssertFalse(text.contains("LIBRARIES"), text)
             XCTAssertFalse(text.contains("Some libraries are"), text)
             XCTAssertFalse(text.contains("Retry"), text)
             XCTAssertEqual(store.load(), saved)
@@ -118,7 +368,6 @@ final class HomeRowArrangementHostedTests: XCTestCase {
         try await withWindow {
             HomeSettingsViewerHost(source: source, visibility: visibility)
         } inspect: { window in
-            var previousTitle: String?
             for (resolved, provider, title) in updates {
                 source.accounts = [resolved]
                 let deadline = ContinuousClock.now + .seconds(3)
@@ -129,14 +378,14 @@ final class HomeRowArrangementHostedTests: XCTestCase {
                 XCTAssertEqual(requests, 1, title)
                 let lines = try await self.capture(window, name: "Home settings \(title)")
                 let text = lines.map(\.0).joined(separator: " ")
-                XCTAssertTrue(text.contains(title), text)
-                if let previousTitle { XCTAssertFalse(text.contains(previousTitle), text) }
-                previousTitle = title
+                XCTAssertTrue(text.contains("Reorder"), text)
+                XCTAssertTrue(text.contains("Hero"), text)
+                XCTAssertTrue(text.contains(title), "Expected the active viewer's \(title): \(text)")
             }
         }
     }
 
-    func testLateFailureCannotRestoreLibrariesFromASupersededAccountSelection() async throws {
+    func testLateLibraryFailureDoesNotRestoreRemovedLibraryManagementUI() async throws {
         let suite = "HomeSettingsLateFailure.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -169,10 +418,11 @@ final class HomeRowArrangementHostedTests: XCTestCase {
             let currentRequests = await current.libraryRequests
             XCTAssertEqual(currentRequests, 1)
             let before = try await self.capture(window, name: "Current account libraries")
-            XCTAssertTrue(before.map(\.0).joined(separator: " ").contains("Current movies"))
+            XCTAssertTrue(before.map(\.0).joined(separator: " ").contains("Reorder"))
             await delayed.resumeLibraries()
             let after = try await self.capture(window, name: "Current libraries after stale failure")
             let text = after.map(\.0).joined(separator: " ")
+            XCTAssertTrue(text.contains("Hero"), text)
             XCTAssertTrue(text.contains("Current movies"), text)
             XCTAssertFalse(text.contains("Original movies"), text)
         }
@@ -195,10 +445,12 @@ final class HomeRowArrangementHostedTests: XCTestCase {
         }
         await visibility.prepareServerDefaults(accounts: accounts)
         XCTAssertEqual(visibility.serverMatchFailures.count, 3)
+        let inventory = HomeSectionCatalogModel()
+        await inventory.load(libraries: [], accounts: accounts, visibility: visibility)
 
         try await withWindow {
             ScrollView {
-                HomeRowsSettingsView(libraries: [], accounts: accounts, visibility: visibility)
+                HomeCatalogStatus(inventory: inventory, accounts: accounts, libraries: [], retry: {})
                     .padding(24)
             }
             #if os(tvOS)
@@ -209,7 +461,7 @@ final class HomeRowArrangementHostedTests: XCTestCase {
             let text = lines.map(\.0).joined(separator: " ")
             XCTAssertTrue(text.contains("Basement is offline."), text)
             XCTAssertTrue(text.contains("Sign in to Cinema again."), text)
-            XCTAssertTrue(text.contains("load Home rows from Loft."), text)
+            XCTAssertTrue(text.contains("load sections from Loft."), text)
             XCTAssertFalse(text.contains("Cinema is offline"), text)
             XCTAssertFalse(text.contains("Loft is offline"), text)
             XCTAssertFalse(text.contains("Available server is offline"), text)
@@ -217,12 +469,12 @@ final class HomeRowArrangementHostedTests: XCTestCase {
             XCTAssertFalse(text.contains("Keeping known rows"), text)
 
             await offline.setHomeError(nil)
-            await visibility.prepareServerDefaults(accounts: accounts)
+            await inventory.load(libraries: [], accounts: accounts, visibility: visibility)
             let recovered = try await self.capture(window, name: "Recovered Home server")
             let recoveredText = recovered.map(\.0).joined(separator: " ")
             XCTAssertFalse(recoveredText.contains("Basement is offline"), recoveredText)
             XCTAssertTrue(recoveredText.contains("Sign in to Cinema again."), recoveredText)
-            XCTAssertTrue(recoveredText.contains("load Home rows from Loft."), recoveredText)
+            XCTAssertTrue(recoveredText.contains("load sections from Loft."), recoveredText)
         }
     }
 
@@ -232,11 +484,15 @@ final class HomeRowArrangementHostedTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = HomeLibraryVisibilityStore(defaults: defaults, namespace: "viewer")
         let visibility = HomeLibraryVisibilityModel(store: store)
-        let libraries = ["Alpha", "Beta"].map {
+        let accounts = ["Alpha", "Beta"].map { name in
+            let provider = HomeSettingsLibraryProvider(name: name, kind: .mediaShare)
+            return ResolvedAccount(account: Account(from: provider.session), provider: provider)
+        }
+        let libraries = accounts.map {
             AggregatedLibrary(
-                accountID: $0, accountName: "Viewer", serverName: "Server",
+                accountID: $0.account.id, accountName: "Viewer", serverName: "Server",
                 providerKind: .mediaShare,
-                library: MediaLibrary(id: $0, title: "\($0) Movies", kind: .movie)
+                library: MediaLibrary(id: $0.account.server.name, title: "\($0.account.server.name) Movies", kind: .movie)
             )
         }
 
@@ -249,15 +505,18 @@ final class HomeRowArrangementHostedTests: XCTestCase {
         visibility.applyRows(.init(enabled: ids, disabled: hidden), choices: choices)
 
         try await withWindow {
-            ScrollView {
-                HomeRowsSettingsView(libraries: libraries, accounts: [], visibility: visibility)
-                    .padding(24)
+            #if os(iOS)
+            NavigationStack {
+                HomeRowsSettingsView(libraries: libraries, accounts: accounts, visibility: visibility)
             }
-            #if os(tvOS)
+            #else
+            HomeRowsSettingsView(libraries: libraries, accounts: accounts, visibility: visibility)
             .frame(width: 1050)
             #endif
         } inspect: { window in
             let before = try await self.capture(window, name: "Home arranger original order")
+            XCTAssertFalse(before.contains { $0.0.contains("Merge Next Up rows") })
+            XCTAssertTrue(before.contains { $0.0.contains("Hero") })
             XCTAssertGreaterThan(try self.y("Alpha", in: before), try self.y("Beta", in: before))
             XCTAssertTrue(before.contains { $0.0.contains("All libraries") })
             visibility.applyRows(.init(enabled: Array(ids.reversed()), disabled: hidden), choices: choices)
@@ -293,37 +552,157 @@ final class HomeRowArrangementHostedTests: XCTestCase {
         }
     }
 
-    func testPresetActionsRemainSeparatedAtLargeTextSizes() async throws {
+    func testPresetSelectorReflectsSavedAndCustomLayoutsAtLargeTextSizes() async throws {
         let suite = "HomeRowPresets.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let visibility = HomeLibraryVisibilityModel(
             store: HomeLibraryVisibilityStore(defaults: defaults, namespace: "viewer")
         )
-        for size in [DynamicTypeSize.large, .accessibility3] {
-            try await withWindow {
-                ScrollView {
-                    HomeRowsSettingsView(libraries: [], accounts: [], visibility: visibility)
-                        .padding(24)
-                }
-                .environment(\.dynamicTypeSize, size)
-                #if os(tvOS)
-                .frame(width: 1050)
+        for size in [DynamicTypeSize.large, .accessibility3, .accessibility5] {
+            for (preset, title): (HomeRowCustomization.Defaults, String) in [
+                (.matchServer, "Match server"), (.combined, "Combined rows"), (.custom, "Custom")
+            ] {
+                visibility.useRowDefaults(preset)
+                #if os(iOS)
+                let windowSize: CGSize? = CGSize(width: 320, height: 900)
+                #else
+                let windowSize: CGSize? = nil
                 #endif
-            } inspect: { window in
-                let lines = try await self.capture(window, name: "Home presets text size \(size)")
-                let text = lines.map(\.0).joined(separator: " ").replacingOccurrences(of: "- ", with: "-")
-                XCTAssertTrue(text.contains("Match server"), text)
-                XCTAssertTrue(text.contains("Combined rows"), text)
-                XCTAssertGreaterThan(
-                    try self.y("Match server", in: lines),
-                    try self.y("Combined rows", in: lines)
-                )
-                XCTAssertGreaterThan(
-                    try self.y("Combined rows", in: lines),
-                    try self.y("ROWS", in: lines)
-                )
+                try await withWindow(size: windowSize) {
+                    HomeRowPresetPicker(visibility: visibility)
+                        .padding(24)
+                        .environment(\.dynamicTypeSize, size)
+                } inspect: { window in
+                    let lines = try await self.capture(window, name: "Home preset \(title) text size \(size)")
+                    let text = lines.map(\.0).joined(separator: " ")
+                    // Native wrapping can hyphenate words; OCR also sees the menu chevron as punctuation.
+                    let readable = text.replacingOccurrences(of: "- ", with: "")
+                        .filter { $0.isLetter || $0.isWhitespace }
+                        .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+                    XCTAssertTrue(text.contains("Preset"), text)
+                    XCTAssertTrue(readable.contains(title), text)
+                    XCTAssertEqual(visibility.visibility.rowCustomization?.defaults, preset)
+                }
             }
+        }
+    }
+
+    func testSourceFailuresAppearOnlyOnTheMainEditor() async throws {
+        let suite = "HomeRootFailures.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let visibility = HomeLibraryVisibilityModel(store: HomeLibraryVisibilityStore(defaults: defaults))
+        visibility.applyRows(
+            .init(enabled: [.global(.continueWatching)],
+                  disabled: HomeRowChoice.shared.map(\.id).filter { $0 != .global(.continueWatching) }),
+            choices: HomeRowChoice.shared
+        )
+        let provider = HomeSettingsLibraryProvider(name: "Basement", homeError: .serverUnreachable)
+        let accounts = [ResolvedAccount(account: Account(from: provider.session), provider: provider)]
+        let inventory = HomeSectionCatalogModel()
+        let choice = try XCTUnwrap(HomeRowChoice.shared.first { $0.id == .global(.continueWatching) })
+        await inventory.load(libraries: [], accounts: accounts, visibility: visibility)
+        XCTAssertEqual(inventory.serverFailures.count, 1)
+        for page in 0..<3 {
+            try await withWindow {
+                NavigationStack {
+                    if page == 0 {
+                        HomeRowsSettingsView(libraries: [], accounts: accounts, visibility: visibility, inventory: inventory)
+                    } else if page == 1 {
+                        HomeSectionSettingsView(
+                            choice: choice, inventory: inventory, visibility: visibility, libraries: [], accounts: accounts
+                        )
+                    } else {
+                        HomeAddSectionView(inventory: inventory, visibility: visibility, libraries: [], accounts: accounts)
+                    }
+                }
+            } inspect: { window in
+                let lines = try await self.capture(window, name: "Home source error placement \(page)")
+                let text = lines.map(\.0).joined(separator: " ")
+                XCTAssertEqual(text.contains("Basement is offline."), page == 0, text)
+                XCTAssertEqual(lines.filter { $0.0.contains("Retry") }.count, page == 0 ? 1 : 0, text)
+            }
+        }
+    }
+
+    func testSourceRowsRenderTheSharedProviderAndTransportMarks() async throws {
+        let sources: [(ProviderKind, MediaShareTransportKind?)] =
+            [ProviderKind.jellyfin, .plex, .emby, .silo, .iptv].map { ($0, nil) }
+            + MediaShareTransportKind.allCases.map { (.mediaShare, $0) }
+            + [(.plex, nil)]
+        let choices = sources.enumerated().map { index, source in
+            if index == sources.count - 1 {
+                return HomeRowChoice(serverRow: .init(
+                    accountID: "server", serverName: "Native server", providerKind: .plex,
+                    section: .init(id: "native", kind: .recommendations)
+                ))
+            }
+            let library = AggregatedLibrary(
+                accountID: "account", accountName: "Viewer", serverName: "Server",
+                providerKind: source.0, transportKind: source.1,
+                library: .init(id: "library-\(index)", title: "Movies", kind: .movie)
+            )
+            return HomeRowChoice(
+                id: .library(library.key, kind: .recentlyAdded), title: "Recently Added",
+                library: library, isProviderDefault: true
+            )
+        }
+        var screenshots: [CGImage] = []
+        for reference in [false, true] {
+            try await withWindow(size: CGSize(width: 600, height: 1040)) {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(choices.indices, id: \.self) { index in
+                        Group {
+                            if reference {
+                                HStack(spacing: 12) {
+                                    ProviderBrandMark(
+                                        provider: sources[index].0, size: 32, showsBackground: false,
+                                        mediaShareTransport: sources[index].1
+                                    )
+                                    .frame(width: 36)
+                                    HomeEditorRowLabel(
+                                        title: choices[index].homeEditorTitle,
+                                        subtitle: choices[index].homeEditorSource
+                                    )
+                                }
+                            } else {
+                                HomeSectionChoiceLabel(choice: choices[index])
+                            }
+                        }
+                        .frame(width: 380, height: 72)
+                    }
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .ignoresSafeArea()
+            } inspect: { window in
+                let image = try await self.snapshot(window, name: reference ? "Shared mark references" : "Home source marks")
+                screenshots.append(try XCTUnwrap(image.cgImage))
+            }
+        }
+        func pixels(_ image: CGImage) throws -> [UInt8] {
+            var bytes = [UInt8](repeating: 0, count: 32 * 32 * 4)
+            try bytes.withUnsafeMutableBytes { buffer in
+                let context = try XCTUnwrap(CGContext(
+                    data: buffer.baseAddress, width: 32, height: 32, bitsPerComponent: 8,
+                    bytesPerRow: 32 * 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                ))
+                context.draw(image, in: CGRect(x: 0, y: 0, width: 32, height: 32))
+            }
+            return bytes
+        }
+        for index in choices.indices {
+            let rect = CGRect(x: 26, y: 44 + index * 80, width: 32, height: 32)
+            let actual = try XCTUnwrap(screenshots[0].cropping(to: rect))
+            let reference = try XCTUnwrap(screenshots[1].cropping(to: rect))
+            let actualPixels = try pixels(actual)
+            let referencePixels = try pixels(reference)
+            XCTAssertTrue(stride(from: 0, to: referencePixels.count, by: 4).contains {
+                referencePixels[$0..<$0 + 3].contains { $0 > 30 }
+            }, "The shared reference must contain visible artwork.")
+            XCTAssertTrue(actualPixels == referencePixels, "Source \(sources[index]) must render the shared mark.")
         }
     }
 
@@ -349,6 +728,7 @@ final class HomeRowArrangementHostedTests: XCTestCase {
     #endif
 
     private func withWindow<Content: View>(
+        size: CGSize? = nil,
         @ViewBuilder content: () -> Content,
         inspect: (UIWindow) async throws -> Void
     ) async throws {
@@ -361,10 +741,12 @@ final class HomeRowArrangementHostedTests: XCTestCase {
             .first { $0.activationState == .foregroundActive })
         let previous = scene.windows.first(where: \.isKeyWindow)
         let window = UIWindow(windowScene: scene)
-        window.frame = scene.coordinateSpace.bounds
+        window.frame = size.map { CGRect(origin: .zero, size: $0) } ?? scene.coordinateSpace.bounds
         window.overrideUserInterfaceStyle = .dark
         window.rootViewController = UIHostingController(rootView:
             content()
+                .environment(HeroSettingsModel(store: InMemoryHeroSettingsStore()))
+                .environment(HeroBackgroundSettingsModel(store: InMemoryHeroBackgroundSettingsStore()))
                 .environment(\.themePalette, ThemePalette.dark)
                 .environment(\.colorScheme, .dark)
                 .environment(\.locale, Locale(identifier: "en_US"))
@@ -379,7 +761,7 @@ final class HomeRowArrangementHostedTests: XCTestCase {
         try await inspect(window)
     }
 
-    private func capture(_ window: UIWindow, name: String) async throws -> [(String, CGRect)] {
+    private func snapshot(_ window: UIWindow, name: String) async throws -> UIImage {
         try await Task.sleep(for: .milliseconds(400))
         window.layoutIfNeeded()
         let format = UIGraphicsImageRendererFormat()
@@ -391,6 +773,11 @@ final class HomeRowArrangementHostedTests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+        return image
+    }
+
+    private func capture(_ window: UIWindow, name: String) async throws -> [(String, CGRect)] {
+        let image = try await snapshot(window, name: name)
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["en-US"]
@@ -406,6 +793,33 @@ final class HomeRowArrangementHostedTests: XCTestCase {
 }
 
 #if os(iOS)
+@MainActor @Observable
+private final class HomeCatalogNavigationFixture {
+    var path: [String] = []
+    var rootDisappeared = false
+    var addAppeared = false
+}
+
+@MainActor
+private struct HomeCatalogNavigationHost: View {
+    @Bindable var navigation: HomeCatalogNavigationFixture
+    let inventory: HomeSectionCatalogModel
+    let visibility: HomeLibraryVisibilityModel
+    let accounts: [ResolvedAccount]
+
+    var body: some View {
+        NavigationStack(path: $navigation.path) {
+            HomeRowsSettingsView(libraries: [], accounts: accounts, visibility: visibility, inventory: inventory)
+                .onDisappear { navigation.rootDisappeared = true }
+                .navigationDestination(for: String.self) { _ in
+                    HomeAddSectionView(inventory: inventory, visibility: visibility, libraries: [], accounts: accounts)
+                        .onAppear { navigation.addAppeared = true }
+                        .onDisappear { navigation.addAppeared = false }
+                }
+        }
+    }
+}
+
 @MainActor @Observable
 private final class HomeSettingsAccountsFixture {
     var accounts: [ResolvedAccount]
@@ -439,17 +853,26 @@ private actor HomeSettingsLibraryProvider: MediaProvider {
     private let libraryTitle: String
     private var holdsLibraries: Bool
     private var libraryContinuation: CheckedContinuation<Void, Never>?
+    private let homeLayout: ServerHomeLayout?
+    private var holdsHome: Bool
+    private var homeContinuations: [CheckedContinuation<Void, Never>] = []
+    private let onFirstHomeRequest: (@Sendable () -> Void)?
+    private var requestedHome = false
 
     init(
         name: String, isOffline: Bool = false, homeError: AppError? = nil,
         libraryTitle: String = "Movies", kind: ProviderKind = .jellyfin,
-        holdsLibraries: Bool = false
+        holdsLibraries: Bool = false, homeLayout: ServerHomeLayout? = nil,
+        holdsHome: Bool = false, onFirstHomeRequest: (@Sendable () -> Void)? = nil
     ) {
         self.isOffline = isOffline
         self.homeError = homeError
         self.libraryTitle = libraryTitle
         self.kind = kind
         self.holdsLibraries = holdsLibraries
+        self.homeLayout = homeLayout
+        self.holdsHome = holdsHome
+        self.onFirstHomeRequest = onFirstHomeRequest
         session = UserSession(
             server: MediaServer(
                 id: name, name: name,
@@ -466,8 +889,20 @@ private actor HomeSettingsLibraryProvider: MediaProvider {
         libraryContinuation = nil
     }
     func serverHomeLayout() async throws -> ServerHomeLayout? {
+        if !requestedHome {
+            requestedHome = true
+            onFirstHomeRequest?()
+        }
+        if holdsHome { await withCheckedContinuation { homeContinuations.append($0) } }
         if let homeError { throw homeError }
-        return nil
+        return homeLayout
+    }
+
+    func resumeHome() {
+        holdsHome = false
+        let pending = homeContinuations
+        homeContinuations = []
+        for continuation in pending { continuation.resume() }
     }
 
     func libraries() async throws -> [MediaLibrary] {

@@ -98,6 +98,21 @@ final class PlayerRotationInteractionTests: XCTestCase {
         closePlayer()
     }
 
+    func testFailedPlayerBackClosesFromNestedNavigationAndReopens() {
+        launch("--failed-player-fixture", "--nested-player-presentation", "--portrait")
+        for _ in 0..<2 {
+            app.buttons["Open rotation player"].tap()
+            let back = app.buttons["player-failed-back"]
+            XCTAssertTrue(back.waitForExistence(timeout: 15), app.debugDescription)
+            if !back.isHittable { app.swipeUp() }
+            back.tap()
+            XCTAssertTrue(app.buttons["Open rotation player"].wait(
+                for: \.isHittable, toEqual: true, timeout: 10
+            ), app.debugDescription)
+            XCTAssertFalse(back.exists)
+        }
+    }
+
     func testPlayerXClosesWithEmbyStreamingQualityAndAutomaticRotation() {
         launch("--emby-streaming-fixture", "--auto")
         openPlayer()

@@ -3,22 +3,147 @@ import CoreNetworking
 import Foundation
 import XCTest
 @testable import TraktService
+@testable import CoreTrackerAuth
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
 
-private let sharedExpired = TraktTokens(
+private let sharedExpired = TrackerTokens(
     accessToken: "expired-access", refreshToken: "original-refresh",
     expiresAt: .distantPast, accountIdentity: "one-trakt-account"
 )
-private let sharedFresh = TraktTokens(
+private let sharedFresh = TrackerTokens(
     accessToken: "next-access", refreshToken: "next-refresh",
     expiresAt: .distantFuture, accountIdentity: "one-trakt-account"
 )
 private let profileA = "test.tokens\0trakt.oauth.A"
 private let profileB = "test.tokens\0trakt.oauth.B"
 
-final class TraktSharedRefreshTests: XCTestCase {
+final class TrackerSharedRefreshTests: XCTestCase {
+    func testCloudErasureAlsoDrainsAnAlreadySupersededOperation() async throws {
+        let cloud = FakeTraktCloud()
+        try await cloud.seed(sharedExpired, scope: profileA)
+        let gate = SharedCloudGate()
+        await cloud.pauseNextSuccessor(using: gate)
+        let device = SharedDevice(cloud: cloud)
+        let access = Task { try await device.access(SharedRefreshHTTP()) }
+        await gate.waitUntilStarted()
+        _ = try await device.coordinator.disconnect(store: device.store)
+        let before = try XCTUnwrap(device.journal.read(scope: profileA))
+
+        let entered = expectation(description: "Erasure entered the coordinator")
+        let erasure = Task {
+            try await device.coordinator.erasureAfterSignaling(
+                store: device.store, entered: { entered.fulfill() }
+            )
+        }
+        await fulfillment(of: [entered], timeout: 5)
+        let current = await device.coordinator.refreshes[profileA]
+        XCTAssertNil(current)
+        XCTAssertEqual(
+            try device.journal.read(scope: profileA), before,
+            "Retirement must wait even when a newer connection operation already removed the old owner slot."
+        )
+        await gate.release()
+        _ = await access.result
+        let owner = try await erasure.value
+        XCTAssertNotEqual(try device.journal.read(scope: profileA), before)
+        await device.coordinator.endCloudErasure(owner: owner)
+    }
+
+    func testCloudErasureDrainsCancelledSuccessorBeforeRetiringCredentials() async throws {
+        let cloud = FakeTraktCloud()
+        try await cloud.seed(sharedExpired, scope: profileA)
+        let gate = SharedCloudGate()
+        await cloud.pauseNextSuccessor(using: gate)
+        let device = SharedDevice(cloud: cloud)
+        let access = Task { try await device.access(SharedRefreshHTTP()) }
+        await gate.waitUntilStarted()
+
+        let entered = expectation(description: "Erasure entered the coordinator")
+        let erasure = Task {
+            try await device.coordinator.erasureAfterSignaling(
+                store: device.store, entered: { entered.fulfill() }
+            )
+        }
+        await fulfillment(of: [entered], timeout: 5)
+        let current = await device.coordinator.refreshes[profileA]
+        XCTAssertNil(current, "Erasure must invalidate the current owner before draining it.")
+        let pending = try JSONDecoder().decode(
+            TrackerSharedJournalState.self, from: XCTUnwrap(device.journal.read(scope: profileA))
+        )
+        XCTAssertEqual(pending.pending?.kind, .successor, "Do not retire a still-running exchange.")
+        await gate.release()
+        _ = await access.result
+        let owner = try await erasure.value
+        let retired = try JSONDecoder().decode(
+            TrackerSharedJournalState.self, from: XCTUnwrap(device.journal.read(scope: profileA))
+        )
+        XCTAssertNil(retired.pending)
+        XCTAssertNil(retired.accepted?.tokens)
+        XCTAssertNil(device.store.load())
+        await cloud.removeRecord(scope: profileA)
+        await device.coordinator.endCloudErasure(owner: owner)
+        do {
+            try await device.coordinator.synchronizeShared(store: device.store)
+            XCTFail("A drained successor must not be replayed after erasure.")
+        } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .missingRecord) }
+        let remaining = await cloud.recordCount
+        XCTAssertEqual(remaining, 0)
+    }
+
+    func testCloudErasureRetiresReplayStateAndBlocksConcurrentAuthorization() async throws {
+        let cloud = FakeTraktCloud()
+        try await cloud.seed(sharedFresh, scope: profileA)
+        let device = SharedDevice(cloud: cloud)
+        try await device.coordinator.synchronizeShared(store: device.store)
+        let readsBefore = await cloud.readCount
+        let owner = try await device.coordinator.beginCloudErasure(stores: [device.store])
+        XCTAssertNil(device.store.load())
+        let retired = try JSONDecoder().decode(
+            TrackerSharedJournalState.self, from: XCTUnwrap(device.journal.read(scope: profileA))
+        )
+        XCTAssertNil(retired.pending)
+        XCTAssertNil(retired.accepted?.tokens)
+        XCTAssertEqual(retired.accepted?.phase, .disconnected)
+        do {
+            try await device.coordinator.synchronizeShared(store: device.store)
+            XCTFail("A sync must not import or recreate grants during erasure.")
+        } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .superseded) }
+        do {
+            _ = try await device.coordinator.prepareConnection(store: device.store)
+            XCTFail("A connection must not race erasure.")
+        } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .superseded) }
+        let readsDuring = await cloud.readCount
+        XCTAssertEqual(readsBefore, readsDuring)
+        await cloud.removeRecord(scope: profileA)
+        await device.coordinator.endCloudErasure(owner: owner)
+        do {
+            try await device.coordinator.synchronizeShared(store: device.store)
+            XCTFail("The erased grant must not be bootstrapped from the local journal.")
+        } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .missingRecord) }
+        XCTAssertNil(device.store.load())
+        let records = await cloud.recordCount
+        XCTAssertEqual(records, 0)
+        _ = try await device.coordinator.prepareConnection(store: device.store)
+    }
+
+    func testCloudErasureCannotReleaseAnotherOwnersPause() async throws {
+        let device = SharedDevice(cloud: FakeTraktCloud())
+        let owner = try await device.coordinator.beginCloudErasure(stores: [device.store])
+        do {
+            _ = try await device.coordinator.beginCloudErasure(stores: [device.store])
+            XCTFail("Overlapping erasure must be rejected.")
+        } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .superseded) }
+        await device.coordinator.endCloudErasure(owner: UUID())
+        do {
+            _ = try await device.coordinator.prepareConnection(store: device.store)
+            XCTFail("A different owner must not release the pause.")
+        } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .superseded) }
+        await device.coordinator.endCloudErasure(owner: owner)
+        _ = try await device.coordinator.prepareConnection(store: device.store)
+    }
+
     func testSuspendedSyncOwnsScopeAndJoinedAccessRenewsExpiredResult() async throws {
         let cloud = FakeTraktCloud()
         try await cloud.seed(sharedExpired, scope: profileA)
@@ -55,7 +180,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         let count = await http.count
         XCTAssertEqual(count, 1)
         let journal = try JSONDecoder().decode(
-            TraktSharedJournalState.self, from: XCTUnwrap(device.journal.read(scope: profileA))
+            TrackerSharedJournalState.self, from: XCTUnwrap(device.journal.read(scope: profileA))
         )
         XCTAssertNil(journal.pending)
         XCTAssertEqual(journal.accepted?.tokens?.refreshToken, "next-refresh")
@@ -73,7 +198,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         await gate.waitUntilStarted()
         let owner = await device.coordinator.refreshes[profileA]
         let pending = try XCTUnwrap(device.journal.read(scope: profileA))
-        let pendingState = try JSONDecoder().decode(TraktSharedJournalState.self, from: pending)
+        let pendingState = try JSONDecoder().decode(TrackerSharedJournalState.self, from: pending)
         XCTAssertEqual(pendingState.pending?.kind, .successor)
         let readsBeforeSync = await cloud.readCount
 
@@ -91,9 +216,9 @@ final class TraktSharedRefreshTests: XCTestCase {
         XCTAssertEqual(try device.journal.read(scope: profileA), pending)
         await gate.release()
         do { _ = try await access.value; XCTFail("Publication failure must surface") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .unavailable) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .unavailable) }
         do { try await sync.value; XCTFail("Joined sync must observe the same publication failure") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .unavailable) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .unavailable) }
         XCTAssertEqual(try device.journal.read(scope: profileA), pending)
 
         let restarted = SharedDevice(cloud: cloud, store: device.store, journal: device.journal)
@@ -110,7 +235,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         let device = SharedDevice(cloud: cloud)
         let http = SharedRefreshHTTP()
         do { _ = try await device.access(http); XCTFail("Lost claim acknowledgement must surface") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .unavailable) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .unavailable) }
         let gate = SharedCloudGate()
         await cloud.pauseNextRead(using: gate)
         let sync = Task { try await device.coordinator.synchronizeShared(store: device.store) }
@@ -127,7 +252,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         XCTAssertEqual(joinedOwner?.id, owner?.id)
         await gate.release()
         do { try await sync.value; XCTFail("Passive sync cannot exchange an unspent claim") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .refreshInProgress) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .refreshInProgress) }
         let result = try await access.value
         XCTAssertEqual(result, "next-access")
         let count = await http.count
@@ -135,7 +260,7 @@ final class TraktSharedRefreshTests: XCTestCase {
     }
 
     func testConnectionChangesInvalidateSuspendedSyncAndItsJoinedAccessor() async throws {
-        for replacement in [nil, sharedFresh] as [TraktTokens?] {
+        for replacement in [nil, sharedFresh] as [TrackerTokens?] {
             let cloud = FakeTraktCloud()
             try await cloud.seed(sharedExpired, scope: profileA)
             let device = SharedDevice(cloud: cloud)
@@ -211,7 +336,7 @@ final class TraktSharedRefreshTests: XCTestCase {
             _ = try await second.access(http)
             XCTFail("A follower must wait for the claimed generation")
         } catch {
-            XCTAssertEqual(error as? TraktSharedRefreshError, .refreshInProgress)
+            XCTAssertEqual(error as? TrackerSharedRefreshError, .refreshInProgress)
         }
         await http.release()
         let firstAccess = try await owner.value
@@ -237,7 +362,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         await http.release()
         for operation in [a, b] {
             do { _ = try await operation.value }
-            catch { XCTAssertEqual(error as? TraktSharedRefreshError, .refreshInProgress) }
+            catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .refreshInProgress) }
         }
         let aAccess = try await first.access(http)
         let bAccess = try await second.access(http)
@@ -259,7 +384,7 @@ final class TraktSharedRefreshTests: XCTestCase {
             _ = try await device.access(http)
             XCTFail("Cloud publication failure must propagate")
         } catch {
-            XCTAssertEqual(error as? TraktSharedRefreshError, .unavailable)
+            XCTAssertEqual(error as? TrackerSharedRefreshError, .unavailable)
         }
         let restarted = SharedDevice(cloud: cloud, store: device.store, journal: device.journal)
         let recovered = try await restarted.access(http)
@@ -275,7 +400,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         let device = SharedDevice(cloud: cloud)
         let http = SharedRefreshHTTP()
         do { _ = try await device.access(http); XCTFail("Lost acknowledgement must surface") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .unavailable) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .unavailable) }
         let restarted = SharedDevice(cloud: cloud, store: device.store, journal: device.journal)
         let access = try await restarted.access(http)
         XCTAssertEqual(access, "next-access")
@@ -333,7 +458,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         do {
             _ = try await refresh.value
             XCTFail("An old refresh cannot restore a signed-out generation")
-        } catch { XCTAssertEqual(error as? TraktSharedRefreshError, .superseded) }
+        } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .superseded) }
         XCTAssertNil(owner.store.load())
         // Old raw-token delivery is only a hint. The CAS tombstone still wins.
         await cloud.setLegacy(sharedExpired, scope: profileA)
@@ -373,7 +498,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         let http = SharedRefreshHTTP(paused: true)
         let refresh = Task { try await owner.access(http) }
         await http.waitUntilStarted()
-        let replacement = TraktTokens(
+        let replacement = TrackerTokens(
             accessToken: "replacement", refreshToken: "replacement-refresh",
             expiresAt: .distantFuture, accountIdentity: "different-trakt-account"
         )
@@ -383,7 +508,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         do {
             _ = try await refresh.value
             XCTFail("Old epoch must not overwrite reconnect")
-        } catch { XCTAssertEqual(error as? TraktSharedRefreshError, .superseded) }
+        } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .superseded) }
         XCTAssertEqual(owner.store.load(), replacement)
     }
 
@@ -395,17 +520,17 @@ final class TraktSharedRefreshTests: XCTestCase {
         _ = try await device.access(http)
         let context = try await device.coordinator.prepareConnection(store: device.store)
         await cloud.failNextConnection()
-        let replacement = TraktTokens(
+        let replacement = TrackerTokens(
             accessToken: "replacement", refreshToken: "replacement-refresh", expiresAt: .distantFuture
         )
         do {
             try await device.coordinator.save(replacement, store: device.store, context: context)
             XCTFail("Failed connection publication must surface")
-        } catch { XCTAssertEqual(error as? TraktSharedRefreshError, .unavailable) }
+        } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .unavailable) }
         let peer = SharedDevice(cloud: cloud)
         _ = try await peer.coordinator.disconnect(store: peer.store)
         do { _ = try await device.access(http); XCTFail("Stale reconnect must not undo sign-out") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .superseded) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .superseded) }
         XCTAssertNil(device.store.load())
     }
 
@@ -437,7 +562,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         let device = SharedDevice(cloud: cloud)
         let http = SharedRefreshHTTP()
         do { _ = try await device.access(http); XCTFail("Lost acknowledgement must surface") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .unavailable) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .unavailable) }
         let initialCount = await http.count
         XCTAssertEqual(initialCount, 0)
         let restarted = SharedDevice(cloud: cloud, store: device.store, journal: device.journal)
@@ -453,13 +578,13 @@ final class TraktSharedRefreshTests: XCTestCase {
         let device = SharedDevice(cloud: cloud)
         let http = SharedRefreshHTTP(fail: true)
         do { _ = try await device.access(http); XCTFail("An uncertain exchange must not retry") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .outcomeUnknown) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .outcomeUnknown) }
         let restarted = SharedDevice(cloud: cloud, store: device.store, journal: device.journal)
         do { _ = try await restarted.access(http); XCTFail("Restart cannot reclaim") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .outcomeUnknown) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .outcomeUnknown) }
         let peer = SharedDevice(cloud: cloud)
         do { _ = try await peer.access(http); XCTFail("Peer cannot reclaim") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .refreshInProgress) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .refreshInProgress) }
         let count = await http.count
         XCTAssertEqual(count, 1)
     }
@@ -470,7 +595,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         let device = SharedDevice(cloud: cloud)
         let unsent = SharedRefreshHTTP(notSent: true)
         do { _ = try await device.access(unsent); XCTFail("Not-sent failure must surface") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .retryable(retryNotBefore: nil)) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .retryable(retryNotBefore: nil)) }
         let restarted = SharedDevice(cloud: cloud, store: device.store, journal: device.journal)
         let success = SharedRefreshHTTP()
         let access = try await restarted.access(success)
@@ -491,7 +616,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         let expiredStore = SharedTestTokenStore(scope: profileB, tokens: sharedExpired)
         let expiredDevice = SharedDevice(cloud: cloud, store: expiredStore)
         do { _ = try await expiredDevice.access(http); XCTFail("No unsynchronized fallback") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .unavailable) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .unavailable) }
         let count = await http.count
         XCTAssertEqual(count, 0)
     }
@@ -504,7 +629,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         _ = try await device.access(http)
         await cloud.switchAccount("different-icloud-account")
         do { _ = try await device.access(http); XCTFail("Must reject old account binding") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .accountChanged) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .accountChanged) }
         XCTAssertNil(device.store.load())
         let access = try await device.access(http)
         XCTAssertNil(access)
@@ -520,7 +645,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         _ = try await device.access(http)
         await cloud.removeRecord(scope: profileA)
         do { _ = try await device.access(http); XCTFail("No resurrection after authority deletion") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .missingRecord) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .missingRecord) }
         let count = await cloud.recordCount
         XCTAssertEqual(count, 0)
     }
@@ -536,9 +661,9 @@ final class TraktSharedRefreshTests: XCTestCase {
         do {
             try await device.coordinator.save(sharedFresh, store: device.store, context: context)
             XCTFail("The first publication read must fail")
-        } catch { XCTAssertEqual(error as? TraktSharedRefreshError, .unavailable) }
+        } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .unavailable) }
         let pending = try JSONDecoder().decode(
-            TraktSharedJournalState.self, from: XCTUnwrap(device.journal.read(scope: profileA))
+            TrackerSharedJournalState.self, from: XCTUnwrap(device.journal.read(scope: profileA))
         ).pending
         XCTAssertEqual(pending?.expectedEpoch, context.expectedEpoch)
         XCTAssertEqual(pending?.needsBaseline, false)
@@ -547,14 +672,14 @@ final class TraktSharedRefreshTests: XCTestCase {
         _ = try await peer.coordinator.disconnect(store: peer.store)
         let restarted = SharedDevice(cloud: cloud, store: device.store, journal: device.journal)
         do { _ = try await restarted.access(http); XCTFail("Retry must not adopt the new sign-out epoch") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .superseded) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .superseded) }
         XCTAssertNil(device.store.load())
         let count = await http.count
         XCTAssertEqual(count, 0)
     }
 
     func testFreshDeviceReconnectFreezesExistingOrAbsentBaselineBeforeOAuth() async throws {
-        for existing in [nil, sharedFresh] as [TraktTokens?] {
+        for existing in [nil, sharedFresh] as [TrackerTokens?] {
             let cloud = FakeTraktCloud()
             if let existing { try await cloud.seed(existing, scope: profileA) }
             let device = SharedDevice(cloud: cloud)
@@ -565,14 +690,14 @@ final class TraktSharedRefreshTests: XCTestCase {
             do {
                 try await device.coordinator.save(sharedFresh, store: device.store, context: context)
                 XCTFail("The first post-OAuth read must fail")
-            } catch { XCTAssertEqual(error as? TraktSharedRefreshError, .unavailable) }
+            } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .unavailable) }
             let peer = SharedDevice(cloud: cloud)
             _ = try await peer.coordinator.disconnect(store: peer.store)
             let restarted = SharedDevice(cloud: cloud, store: device.store, journal: device.journal)
             do {
                 _ = try await restarted.access(SharedRefreshHTTP())
                 XCTFail("A fresh device cannot turn unknown/absent into the later tombstone epoch")
-            } catch { XCTAssertEqual(error as? TraktSharedRefreshError, .superseded) }
+            } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .superseded) }
             XCTAssertNil(device.store.load())
         }
     }
@@ -584,11 +709,11 @@ final class TraktSharedRefreshTests: XCTestCase {
         do {
             _ = try await device.coordinator.prepareConnection(store: device.store)
             XCTFail("OAuth must not start without a known baseline")
-        } catch { XCTAssertEqual(error as? TraktSharedRefreshError, .unavailable) }
+        } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .unavailable) }
         do {
             try await device.coordinator.save(sharedFresh, store: device.store)
             XCTFail("Shared save must not silently prepare after OAuth")
-        } catch { XCTAssertEqual(error as? TraktSharedRefreshError, .superseded) }
+        } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .superseded) }
         XCTAssertNil(device.store.load())
         let records = await cloud.recordCount
         XCTAssertEqual(records, 0)
@@ -633,7 +758,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         do {
             try await device.coordinator.save(sharedFresh, store: device.store, context: context)
             XCTFail("A grant authorized against the previous epoch cannot undo sign-out")
-        } catch { XCTAssertEqual(error as? TraktSharedRefreshError, .superseded) }
+        } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .superseded) }
         XCTAssertNil(device.store.load())
     }
 
@@ -646,12 +771,12 @@ final class TraktSharedRefreshTests: XCTestCase {
         do {
             try await device.coordinator.save(sharedFresh, store: other, context: context)
             XCTFail("A prepared connection cannot cross profiles")
-        } catch { XCTAssertEqual(error as? TraktSharedRefreshError, .superseded) }
+        } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .superseded) }
         _ = try await device.coordinator.disconnect(store: device.store)
         do {
             try await device.coordinator.save(sharedFresh, store: device.store, context: context)
             XCTFail("Local disconnect invalidates an outstanding authorization context")
-        } catch { XCTAssertEqual(error as? TraktSharedRefreshError, .superseded) }
+        } catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .superseded) }
         XCTAssertNil(other.load())
         XCTAssertNil(device.store.load())
     }
@@ -666,9 +791,9 @@ final class TraktSharedRefreshTests: XCTestCase {
         for _ in 0..<2 {
             let device = SharedDevice(cloud: cloud, store: store, journal: journal)
             do { _ = try await device.access(http); XCTFail("Boundary persistence must succeed before HTTP") }
-            catch { XCTAssertEqual(error as? TraktSharedRefreshError, .retryable(retryNotBefore: nil)) }
+            catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .retryable(retryNotBefore: nil)) }
             let retained = try JSONDecoder().decode(
-                TraktSharedJournalState.self, from: XCTUnwrap(journal.read(scope: profileA))
+                TrackerSharedJournalState.self, from: XCTUnwrap(journal.read(scope: profileA))
             )
             XCTAssertEqual(retained.pending?.kind, .claimPrepared)
             let count = await http.count
@@ -689,9 +814,9 @@ final class TraktSharedRefreshTests: XCTestCase {
         let device = SharedDevice(cloud: cloud, journal: journal)
         let http = SharedRefreshHTTP()
         do { _ = try await device.access(http); XCTFail("A failed acknowledgement is not permission to send") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .retryable(retryNotBefore: nil)) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .retryable(retryNotBefore: nil)) }
         let state = try JSONDecoder().decode(
-            TraktSharedJournalState.self, from: XCTUnwrap(journal.read(scope: profileA))
+            TrackerSharedJournalState.self, from: XCTUnwrap(journal.read(scope: profileA))
         )
         XCTAssertEqual(state.pending?.kind, .claimPrepared)
         let before = await http.count
@@ -711,9 +836,9 @@ final class TraktSharedRefreshTests: XCTestCase {
         let http = SharedRefreshHTTP(rateLimited: true, retryAfter: 120)
         let deadline = clock.read().addingTimeInterval(120)
         do { _ = try await device.access(http); XCTFail("Rate limit must be a recoverable shared error") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .retryable(retryNotBefore: deadline)) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .retryable(retryNotBefore: deadline)) }
         let state = try JSONDecoder().decode(
-            TraktSharedJournalState.self, from: XCTUnwrap(device.journal.read(scope: profileA))
+            TrackerSharedJournalState.self, from: XCTUnwrap(device.journal.read(scope: profileA))
         )
         XCTAssertEqual(state.pending?.kind, .claimPrepared)
         XCTAssertEqual(state.pending?.retryNotBefore, deadline)
@@ -723,7 +848,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         for advance in [0.0, 119.0] {
             clock.advance(advance)
             do { _ = try await restarted.access(http); XCTFail("Retry cannot bypass Retry-After") }
-            catch { XCTAssertEqual(error as? TraktSharedRefreshError, .retryable(retryNotBefore: deadline)) }
+            catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .retryable(retryNotBefore: deadline)) }
             let count = await http.count
             XCTAssertEqual(count, 1)
         }
@@ -743,7 +868,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         let deadline = clock.read().addingTimeInterval(60)
         for _ in 0..<2 {
             do { _ = try await device.access(http); XCTFail("Missing Retry-After still needs backoff") }
-            catch { XCTAssertEqual(error as? TraktSharedRefreshError, .retryable(retryNotBefore: deadline)) }
+            catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .retryable(retryNotBefore: deadline)) }
         }
         let count = await http.count
         XCTAssertEqual(count, 1)
@@ -757,7 +882,7 @@ final class TraktSharedRefreshTests: XCTestCase {
         _ = try await device.access(http)
         await cloud.setOffline(true)
         do { _ = try await device.coordinator.disconnect(store: device.store); XCTFail("Cloud retry is required") }
-        catch { XCTAssertEqual(error as? TraktSharedRefreshError, .unavailable) }
+        catch { XCTAssertEqual(error as? TrackerSharedRefreshError, .unavailable) }
         XCTAssertNil(device.store.load())
         await cloud.setOffline(false)
         let restarted = SharedDevice(cloud: cloud, store: device.store, journal: device.journal)
@@ -915,7 +1040,7 @@ final class TraktSharedConnectionLifecycleTests: XCTestCase {
 
     @MainActor
     private func assertSyncError(
-        _ service: TraktService, _ error: TraktSharedRefreshError, canReconnect: Bool,
+        _ service: TraktService, _ error: TrackerSharedRefreshError, canReconnect: Bool,
         file: StaticString = #filePath, line: UInt = #line
     ) {
         XCTAssertEqual(
@@ -925,7 +1050,7 @@ final class TraktSharedConnectionLifecycleTests: XCTestCase {
     }
 
     @MainActor
-    private func assertPreparationFailure(flow: Flow, error: TraktSharedRefreshError = .unavailable) async {
+    private func assertPreparationFailure(flow: Flow, error: TrackerSharedRefreshError = .unavailable) async {
         let cloud = FakeTraktCloud()
         await cloud.failNextRead(error)
         let device = SharedDevice(cloud: cloud)
@@ -937,7 +1062,7 @@ final class TraktSharedConnectionLifecycleTests: XCTestCase {
         assertSyncError(service, error, canReconnect: false)
         XCTAssertEqual(browser.launches, 0)
         XCTAssertNil(device.store.load())
-        XCTAssertFalse(String(localized: TraktSharedRefreshError.unavailable.userMessage).contains("connection is saved"))
+        XCTAssertFalse(String(localized: TrackerSharedRefreshError.unavailable.userMessage).contains("connection is saved"))
         let beforeRetry = await http.requests
         XCTAssertTrue(beforeRetry.isEmpty)
 
@@ -990,7 +1115,7 @@ final class TraktSharedConnectionLifecycleTests: XCTestCase {
     }
 
     @MainActor
-    private func assertPublicationRetry(flow: Flow, error: TraktSharedRefreshError = .unavailable) async throws {
+    private func assertPublicationRetry(flow: Flow, error: TrackerSharedRefreshError = .unavailable) async throws {
         let cloud = FakeTraktCloud()
         await cloud.failNextConnection(error)
         let device = SharedDevice(cloud: cloud)
@@ -1005,7 +1130,7 @@ final class TraktSharedConnectionLifecycleTests: XCTestCase {
         XCTAssertNil(device.store.load())
         XCTAssertEqual(connectionNotifications, 0)
         let retained = try JSONDecoder().decode(
-            TraktSharedJournalState.self, from: XCTUnwrap(device.journal.read(scope: profileA))
+            TrackerSharedJournalState.self, from: XCTUnwrap(device.journal.read(scope: profileA))
         )
         XCTAssertEqual(retained.pending?.kind, .connect)
         XCTAssertEqual(retained.pending?.grant.tokens?.accessToken, "authorized-access")
@@ -1137,7 +1262,7 @@ private actor SharedLifecycleHTTP: HTTPClient {
 private struct SharedDevice {
     let store: SharedTestTokenStore
     let journal: FakeTraktJournal
-    let coordinator: TraktTokenCoordinator
+    let coordinator: TrackerTokenCoordinator
 
     init(
         cloud: FakeTraktCloud,
@@ -1147,7 +1272,7 @@ private struct SharedDevice {
     ) {
         self.store = store
         self.journal = journal
-        coordinator = TraktTokenCoordinator(
+        coordinator = TrackerTokenCoordinator(
             sharedConfiguration: .init(transport: cloud, journal: journal), now: now
         )
     }
@@ -1159,9 +1284,16 @@ private struct SharedDevice {
     }
 }
 
-private extension TraktTokenCoordinator {
+private extension TrackerTokenCoordinator {
+    func erasureAfterSignaling(
+        store: any TrackerTokenStoring, entered: @Sendable () -> Void
+    ) async throws -> UUID {
+        entered()
+        return try await beginCloudErasure(stores: [store])
+    }
+
     func accessAfterSignaling(
-        store: any TraktTokenStoring, http: SharedRefreshHTTP,
+        store: any TrackerTokenStoring, http: SharedRefreshHTTP,
         entered: @Sendable () -> Void
     ) async throws -> String? {
         entered()
@@ -1171,7 +1303,7 @@ private extension TraktTokenCoordinator {
     }
 
     func syncAfterSignaling(
-        store: any TraktTokenStoring, entered: @Sendable () -> Void
+        store: any TrackerTokenStoring, entered: @Sendable () -> Void
     ) async throws {
         entered()
         try await synchronizeShared(store: store)
@@ -1216,18 +1348,18 @@ private final class SharedTestClock: @unchecked Sendable {
 
 private enum SharedStorageFailure: Error { case write }
 
-private final class SharedTestTokenStore: TraktTokenStoring, @unchecked Sendable {
+private final class SharedTestTokenStore: TrackerTokenStoring, @unchecked Sendable {
     let coordinationID: String
     private let lock = NSLock()
-    private var tokens: TraktTokens?
+    private var tokens: TrackerTokens?
     var failSuccessorOnce = false
 
-    init(scope: String, tokens: TraktTokens? = nil) {
+    init(scope: String, tokens: TrackerTokens? = nil) {
         coordinationID = scope
         self.tokens = tokens
     }
-    func load() -> TraktTokens? { lock.lock(); defer { lock.unlock() }; return tokens }
-    func save(_ tokens: TraktTokens) throws {
+    func load() -> TrackerTokens? { lock.lock(); defer { lock.unlock() }; return tokens }
+    func save(_ tokens: TrackerTokens) throws {
         lock.lock(); defer { lock.unlock() }
         if failSuccessorOnce && tokens.refreshToken == "next-refresh" {
             failSuccessorOnce = false
@@ -1236,11 +1368,11 @@ private final class SharedTestTokenStore: TraktTokenStoring, @unchecked Sendable
         self.tokens = tokens
     }
     func clear() throws { lock.lock(); defer { lock.unlock() }; tokens = nil }
-    func snapshot() -> any TraktTokenStoring { self }
+    func snapshot() -> any TrackerTokenStoring { self }
     func setNamespace(_ namespace: String?) {}
 }
 
-private final class FakeTraktJournal: TraktSharedRefreshJournal, @unchecked Sendable {
+private final class FakeTraktJournal: TrackerSharedRefreshJournal, @unchecked Sendable {
     private let lock = NSLock()
     private var data: [String: Data] = [:]
     var failSuccessorOnce = false
@@ -1250,7 +1382,7 @@ private final class FakeTraktJournal: TraktSharedRefreshJournal, @unchecked Send
     func read(scope: String) throws -> Data? { lock.lock(); defer { lock.unlock() }; return data[scope] }
     func write(_ value: Data, scope: String) throws {
         lock.lock(); defer { lock.unlock() }
-        let state = try JSONDecoder().decode(TraktSharedJournalState.self, from: value)
+        let state = try JSONDecoder().decode(TrackerSharedJournalState.self, from: value)
         if state.pending?.kind == .exchangeStarted {
             if failExchangeStartedWrites > 0 {
                 failExchangeStartedWrites -= 1
@@ -1270,15 +1402,15 @@ private final class FakeTraktJournal: TraktSharedRefreshJournal, @unchecked Send
     }
 }
 
-private actor FakeTraktCloud: TraktSharedRefreshTransport {
+private actor FakeTraktCloud: TrackerSharedRefreshTransport {
     private var account = "icloud-account"
-    private var records: [String: TraktSharedRecord] = [:]
-    private var legacy: [String: TraktTokens] = [:]
+    private var records: [String: TrackerSharedRecord] = [:]
+    private var legacy: [String: TrackerTokens] = [:]
     private var sequence = 0
     private var offline = false
     private var failSuccessor = false
-    private var connectionError: TraktSharedRefreshError?
-    private var readError: TraktSharedRefreshError?
+    private var connectionError: TrackerSharedRefreshError?
+    private var readError: TrackerSharedRefreshError?
     private var loseClaimAcknowledgement = false
     private var loseSuccessorAcknowledgement = false
     private var pairClaims = false
@@ -1290,11 +1422,11 @@ private actor FakeTraktCloud: TraktSharedRefreshTransport {
     var recordCount: Int { records.count }
 
     func accountID() throws -> String {
-        if offline { throw TraktSharedRefreshError.unavailable }
+        if offline { throw TrackerSharedRefreshError.unavailable }
         return account
     }
-    func read(scope: String, accountID: String) async throws -> TraktSharedRecord? {
-        guard try self.accountID() == accountID else { throw TraktSharedRefreshError.accountChanged }
+    func read(scope: String, accountID: String) async throws -> TrackerSharedRecord? {
+        guard try self.accountID() == accountID else { throw TrackerSharedRefreshError.accountChanged }
         readCount += 1
         if let readError { self.readError = nil; throw readError }
         let snapshot = records[scope]
@@ -1304,14 +1436,14 @@ private actor FakeTraktCloud: TraktSharedRefreshTransport {
         }
         return snapshot
     }
-    func readLegacyTokens(scope: String, accountID: String) throws -> TraktTokens? {
-        guard try self.accountID() == accountID else { throw TraktSharedRefreshError.accountChanged }
+    func readLegacyTokens(scope: String, accountID: String) throws -> TrackerTokens? {
+        guard try self.accountID() == accountID else { throw TrackerSharedRefreshError.accountChanged }
         return legacy[scope]
     }
     func compareAndSwap(
-        scope: String, accountID: String, expected: TraktSharedRecord?, value: Data
-    ) async throws -> TraktSharedRecord {
-        let grant = try TraktSharedGrant.decode(value)
+        scope: String, accountID: String, expected: TrackerSharedRecord?, value: Data
+    ) async throws -> TrackerSharedRecord {
+        let grant = try TrackerSharedGrant.decode(value)
         if grant.phase == .ready, grant.generation > 0, let gate = nextSuccessorGate {
             nextSuccessorGate = nil
             await gate.suspend()
@@ -1326,40 +1458,40 @@ private actor FakeTraktCloud: TraktSharedRefreshTransport {
                 }
             }
         }
-        guard try self.accountID() == accountID else { throw TraktSharedRefreshError.accountChanged }
-        guard records[scope]?.version == expected?.version else { throw TraktSharedRefreshError.conflict }
+        guard try self.accountID() == accountID else { throw TrackerSharedRefreshError.accountChanged }
+        guard records[scope]?.version == expected?.version else { throw TrackerSharedRefreshError.conflict }
         if let connectionError, grant.phase == .ready, grant.generation == 0 {
             self.connectionError = nil
             throw connectionError
         }
         if failSuccessor, grant.phase == .ready, grant.generation > 0 {
             failSuccessor = false
-            throw TraktSharedRefreshError.unavailable
+            throw TrackerSharedRefreshError.unavailable
         }
         sequence += 1
-        let saved = TraktSharedRecord(value: value, version: Data(String(sequence).utf8))
+        let saved = TrackerSharedRecord(value: value, version: Data(String(sequence).utf8))
         records[scope] = saved
         if grant.phase == .refreshing { successfulClaims += 1 }
         if loseClaimAcknowledgement, grant.phase == .refreshing {
             loseClaimAcknowledgement = false
-            throw TraktSharedRefreshError.unavailable
+            throw TrackerSharedRefreshError.unavailable
         }
         if loseSuccessorAcknowledgement, grant.phase == .ready, grant.generation > 0 {
             loseSuccessorAcknowledgement = false
-            throw TraktSharedRefreshError.unavailable
+            throw TrackerSharedRefreshError.unavailable
         }
         return saved
     }
-    func seed(_ tokens: TraktTokens, scope: String) throws {
+    func seed(_ tokens: TrackerTokens, scope: String) throws {
         sequence += 1
         records[scope] = .init(
-            value: try TraktSharedGrant.ready(tokens).encoded(), version: Data(String(sequence).utf8)
+            value: try TrackerSharedGrant.ready(tokens).encoded(), version: Data(String(sequence).utf8)
         )
     }
-    func setLegacy(_ tokens: TraktTokens, scope: String) { legacy[scope] = tokens }
+    func setLegacy(_ tokens: TrackerTokens, scope: String) { legacy[scope] = tokens }
     func failNextSuccessor() { failSuccessor = true }
-    func failNextConnection(_ error: TraktSharedRefreshError = .unavailable) { connectionError = error }
-    func failNextRead(_ error: TraktSharedRefreshError = .unavailable) { readError = error }
+    func failNextConnection(_ error: TrackerSharedRefreshError = .unavailable) { connectionError = error }
+    func failNextRead(_ error: TrackerSharedRefreshError = .unavailable) { readError = error }
     func loseNextClaimAcknowledgement() { loseClaimAcknowledgement = true }
     func loseNextSuccessorAcknowledgement() { loseSuccessorAcknowledgement = true }
     func synchronizeNextTwoClaims() { pairClaims = true }

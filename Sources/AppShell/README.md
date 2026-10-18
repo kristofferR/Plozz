@@ -34,10 +34,37 @@ registry.
   `EnginePlozzigen` (and any future engine packages). Builds the
   `EngineFactory` closure injected into `FeaturePlayback`, keeping the
   heavy on-device decode binaries out of every other module's dependency graph.
+- `PlayerPresentation` handles Back only while preparing the initial playback
+  version. Once it creates the player model, it removes that handler so the
+  player's menus, controls, and video surface own their normal Back sequence.
 - `AppInfo` — version / build / display-name helpers read from
   `Info.plist`.
 
 ## Invariants
+
+- **One root presentation at a time.** `RootPresentationCoordinator` retains the
+  current native cover until its dismissal completes. Startup introductions,
+  release notes, identity gates, synced-server prompts, and device setup wait
+  rather than replacing one another. Automatic device offers wait for startup
+  preparation; once visible, setup keeps confirmation, progress, errors, and
+  success in that same cover until the user closes it. A profile authorization
+  change stops credential transfer and leaves the error visible.
+
+- **TV-to-phone setup QR.** The sender screen shows a three-minute
+  `SyncSetupSourceInvite`. Scanning it opens the phone's existing receive flow,
+  advertising the request UUID in Bonjour instead of broadcasting an iCloud
+  offer. The TV matches that live request, then requires matching-code
+  confirmation before sending credentials. This request has no
+  credentials or public-key trust shortcut and cannot decode as the original
+  receiver QR. Nearby-device labels inherit native button foregrounds so their
+  codes remain readable when focus inverts the surface. The QR, nearby devices,
+  and manual code entry stay on one page in distinct sections.
+
+- **Bounded setup summaries.** Both sending and receiving use CoreUI's shared
+  scrolling summary on TV and mobile. Group accounts by physical server, retain
+  per-server transfer scope and pending sign-in state, and wrap full server and
+  profile names. Headers scroll; Done/Continue remains reachable independently
+  of the number of servers or profiles.
 
 - **Composition root, not a feature.** This is the **only** module
   allowed to import all the others. Feature modules don't import
@@ -51,6 +78,10 @@ registry.
 - **Profile-namespacing on switch.** Every per-user model must be
   rebuilt on profile change (`rebuildSettingsModels`) so settings,
   Trakt, and watched-state stay isolated.
+  Tracker connection callbacks defer until every tracker is scoped and the
+  watchlist reconciler matches the complete profile/identity/account scope.
+  Authentication retries and native refreshes share the setup, PIN, and
+  server-identity admission gates; callbacks never restart tracker scoping.
 
 ## Appearance onboarding
 

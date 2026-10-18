@@ -1,6 +1,6 @@
 #if canImport(SwiftUI) && canImport(UIKit)
 import CoreGraphics
-import CoreUI
+@testable import CoreUI
 import SwiftUI
 import XCTest
 
@@ -80,24 +80,81 @@ final class DialogSurfaceTests: XCTestCase {
         }
     }
 
-    func testOrdinaryRaisedSurfacesAndDialogsStayOpaqueWithGradientsOn() throws {
+    func testOrdinaryRaisedSurfacesStayOpaqueWithGradientsOn() throws {
         for palette in [ThemePalette.dark, .pureBlack, .light] {
-            for level in [SurfaceLevel.raised, .overlay] {
-                let pixels = try render(
-                    Color.clear.frame(width: 120, height: 80)
-                        .plozzSurface(level, cornerRadius: 16)
-                        .padding(40).background(.red)
-                        .environment(\.themePalette, palette)
-                        .environment(\.gradientBackgroundsEnabled, true)
-                )
-                var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-                XCTAssertTrue(UIColor(palette.surface(level).fill).getRed(&r, green: &g, blue: &b, alpha: &a))
-                let actual = pixel(pixels, x: 100, y: 80)
-                for (channel, value) in [r, g, b].enumerated() {
-                    XCTAssertEqual(Double(actual[channel]), Double(value) * 255, accuracy: 2)
-                }
+            let pixels = try render(
+                Color.clear.frame(width: 120, height: 80)
+                    .plozzSurface(.raised, cornerRadius: 16)
+                    .padding(40).background(.red)
+                    .environment(\.themePalette, palette)
+                    .environment(\.gradientBackgroundsEnabled, true)
+            )
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            XCTAssertTrue(UIColor(palette.raised.fill).getRed(&r, green: &g, blue: &b, alpha: &a))
+            let actual = pixel(pixels, x: 100, y: 80)
+            for (channel, value) in [r, g, b].enumerated() {
+                XCTAssertEqual(Double(actual[channel]), Double(value) * 255, accuracy: 2)
             }
         }
+    }
+
+    func testDialogSurfaceUsesTheSharedBackgroundWithOrWithoutGradients() throws {
+        for palette in [ThemePalette.dark, .pureBlack, .light] {
+            for gradient in [false, true] {
+                let expected = try render(
+                    PlozzDialogBackground().frame(width: 200, height: 160)
+                        .environment(\.themePalette, palette)
+                        .environment(\.gradientBackgroundsEnabled, gradient)
+                )
+                let surface = try render(
+                    Color.clear.frame(width: 200, height: 160)
+                        .plozzSurface(.overlay, cornerRadius: 16)
+                        .background(Color(.sRGB, red: 1, green: 0, blue: 0))
+                        .environment(\.themePalette, palette)
+                        .environment(\.gradientBackgroundsEnabled, gradient)
+                        .environment(\.plozzReduceTransparency, true)
+                )
+                for y in [20, 80, 140] {
+                    XCTAssertEqual(pixel(surface, x: 100, y: y), pixel(expected, x: 100, y: y))
+                }
+                let corner = pixel(surface, x: 0, y: 0)
+                XCTAssertGreaterThan(corner[0], 200, "Only the existing shadow may darken the red backdrop.")
+                XCTAssertEqual(Array(corner[1...3]), [0, 0, 255], "The shared surface stays inside its rounded shape.")
+            }
+        }
+    }
+
+    func testOwnedDialogSuppressesPageBackgroundsWithoutLeakingOutsideItsScope() throws {
+        for owned in [false, true] {
+            let pixels = try render(
+                ZStack {
+                    Color(.sRGB, red: 0, green: 1, blue: 0)
+                    AppBackground(palette: .pureBlack)
+                    SettingsPageBackground()
+                }
+                .frame(width: 200, height: 160)
+                .environment(\.themePalette, .pureBlack)
+                .environment(\.plozzDialogBackgroundOwned, owned)
+                .environment(\.gradientBackgroundsEnabled, true)
+            )
+            if owned {
+                XCTAssertEqual(pixel(pixels, x: 100, y: 80), [0, 255, 0, 255])
+            } else {
+                XCTAssertNotEqual(pixel(pixels, x: 100, y: 80), [0, 255, 0, 255])
+            }
+        }
+    }
+
+    func testHostingBoundariesPreserveGradientPreferences() {
+        var source = EnvironmentValues()
+        source.themePalette = .pureBlack
+        source.gradientBackgroundsEnabled = true
+        source.artworkGradientTintSaturation = 0.4
+        var destination = EnvironmentValues()
+        destination.copyHostedPresentation(from: source)
+        XCTAssertEqual(destination.themePalette, .pureBlack)
+        XCTAssertTrue(destination.gradientBackgroundsEnabled)
+        XCTAssertEqual(destination.artworkGradientTintSaturation, 0.4)
     }
 
     func testDarkAndBlackBackdropDimsEightyFivePercentWhileLightStaysUnchanged() throws {

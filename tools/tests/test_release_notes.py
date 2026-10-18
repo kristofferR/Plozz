@@ -97,6 +97,14 @@ class ReleaseNotesToolTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("no platforms", result.stderr)
 
+    def test_validate_rejects_non_object_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            catalog = Path(temp) / "ReleaseNotes.json"
+            catalog.write_text("[]", encoding="utf-8")
+            result = self.run_tool(catalog, "validate")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("catalog must be an object", result.stderr)
+
     def test_validate_rejects_unknown_platform(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             catalog = self.fixture(

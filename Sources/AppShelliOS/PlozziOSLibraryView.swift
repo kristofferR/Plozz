@@ -79,7 +79,7 @@ struct PlozziOSLibrariesView: View {
                 Button("Add Server", systemImage: "plus", action: onAddServer)
             }
         }
-        .task(id: appModel.accounts.map(\.credentialRevision)) {
+        .task(id: appModel.accounts.map(\.connectionScopeKey)) {
             await model.load(provider: appModel.accountsProviders.primaryProvider)
         }
     }

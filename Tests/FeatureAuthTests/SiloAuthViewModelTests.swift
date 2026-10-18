@@ -264,12 +264,30 @@ final class SiloAuthViewModelTests: XCTestCase {
         XCTAssertEqual(url.absoluteString, "https://silo.test/pair?code=ABCD12")
     }
 
-    private func makeModel(_ http: SiloOnboardingHTTP,
+    func testCancellingAddressVerificationRevokesOnlyItsNewLogin() async throws {
+        let http = SiloOnboardingHTTP()
+        let model = makeModel(http, verificationOnly: true)
+        model.start()
+        try await wait { if case .profiles = model.phase { return true }; return false }
+        model.cancel()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while await http.count("/api/v2/auth/logout") == 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let headers = await http.lastHeaders("/api/v2/auth/logout")
+        XCTAssertEqual(headers?["Authorization"], "Bearer test-access")
+        model.cancel()
+        let count = await http.count("/api/v2/auth/logout")
+        XCTAssertEqual(count, 1)
+    }
+
+    private func makeModel(_ http: SiloOnboardingHTTP, verificationOnly: Bool = false,
                            completed: @escaping (UserSession) -> Void = { _ in XCTFail("Unexpected sign-in") }) -> SiloAuthViewModel {
         let url = URL(string: "https://silo.test")!
         return SiloAuthViewModel(
             server: MediaServer(id: "silo", name: "Silo", baseURL: url, provider: .silo),
             deviceID: "fixture", service: SiloAuthentication(baseURL: url, http: http),
+            verificationOnly: verificationOnly,
             onAuthenticated: completed
         )
     }
@@ -322,6 +340,7 @@ private actor SiloOnboardingHTTP: HTTPClient {
         requests.append(endpoint)
         let body: String
         switch endpoint.path {
+        case "/api/v2/auth/logout": body = "{}"
         case "/api/v2/system/info": body = #"{"api_major":2}"#
         case "/api/v2/auth/device/capability":
             body = #"{"state":"available","protocol_versions":[2],"allowed":true}"#

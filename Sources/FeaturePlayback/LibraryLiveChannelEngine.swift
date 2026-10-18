@@ -23,6 +23,12 @@ public final class LibraryLiveChannelEngine: LiveChannelEngine {
         librarySession?.recoverableProgrammeIssue
     }
     public var currentLibraryItem: LibraryChannelItem? { librarySession?.navigationItem }
+    public var livePlaybackFailureDiagnostic: PlaybackFailureDiagnostic? {
+        hasSource && decoderGeneration == generation ? underlyingEngine.livePlaybackFailureDiagnostic : nil
+    }
+    public var isCapturingLiveFailureDiagnostic: Bool {
+        hasSource && decoderGeneration == generation && underlyingEngine.isCapturingLiveFailureDiagnostic
+    }
     public var isPlaybackPositionReady: Bool { status == .ready && underlyingEngine.isPlaybackPositionReady }
     public var subtitlePresentationTime: TimeInterval { underlyingEngine.subtitlePresentationTime }
     public func renderSubtitles(at time: TimeInterval, style: SubtitleStyle) {
@@ -35,6 +41,7 @@ public final class LibraryLiveChannelEngine: LiveChannelEngine {
     private let librarySessionFactory: LibrarySessionFactory?
     private var generation = UUID()
     private var callbackGeneration = UUID()
+    private var decoderGeneration: UUID?
     private var operation: Task<Void, Error>?
     private var operationID: UUID?
     private var cleanup: Task<Void, Never>?
@@ -419,6 +426,7 @@ public final class LibraryLiveChannelEngine: LiveChannelEngine {
     }
 
     private func installCallbacks(stamp: UUID, scheduled: Bool) {
+        decoderGeneration = stamp
         callbackGeneration = UUID()
         let callbackStamp = callbackGeneration
         #if os(iOS)
@@ -462,6 +470,7 @@ public final class LibraryLiveChannelEngine: LiveChannelEngine {
     }
 
     private func clearCallbacks() {
+        decoderGeneration = nil
         underlyingEngine.onProgress = nil
         underlyingEngine.onFailure = nil
         underlyingEngine.onEnded = nil
@@ -488,6 +497,10 @@ public final class LibraryLiveChannelEngine: LiveChannelEngine {
     public var bufferedPosition: TimeInterval { underlyingEngine.bufferedPosition }
     public var liveTelemetry: EngineLiveTelemetry? { underlyingEngine.liveTelemetry }
     public var probedSourceFacts: EngineProbedSourceFacts? { underlyingEngine.probedSourceFacts }
+    public func liveScrubThumbnail(secondsIntoWindow seconds: TimeInterval, maxWidth: Int) async -> CGImage? {
+        guard librarySession == nil else { return nil }
+        return await underlyingEngine.liveScrubThumbnail(secondsIntoWindow: seconds, maxWidth: maxWidth)
+    }
     /// Playback Info reads the stream's variant, tracks and HLS logs off this.
     public var nowPlayingPlayer: AVPlayer? { underlyingEngine.nowPlayingPlayer }
     public var videoAspectRatio: Double? { underlyingEngine.videoAspectRatio }

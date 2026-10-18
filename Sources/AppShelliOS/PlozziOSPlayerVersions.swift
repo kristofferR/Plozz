@@ -9,6 +9,7 @@ struct PlozziOSPlayerVersionSheet: View {
     var onlySDR = false
     let onSelect: (String) -> Void
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.locale) private var locale
 
     var body: some View {
         NavigationStack {
@@ -18,21 +19,33 @@ struct PlozziOSPlayerVersionSheet: View {
                         ? PlayerVersionSelection.sdrAlternatives(for: item, mediaSourceID: mediaSourceID)
                         : PlayerVersionSelection.versions(for: item)) { version in
                         let selected = PlayerVersionSelection.isSelected(version, item: item, mediaSourceID: mediaSourceID)
+                        let presentation = MediaVersion.PickerPresentation(version, locale: locale)
                         Button {
                             dismiss()
                             if !selected { onSelect(version.id) }
                         } label: {
                             HStack(alignment: .top, spacing: 12) {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    if let label = version.displayLabel {
+                                    if let label = presentation.title {
                                         Text(verbatim: label)
                                     } else {
                                         Text("Original")
                                     }
-                                    if let name = version.fileName {
-                                        Text(verbatim: name).font(.caption).foregroundStyle(.secondary)
+                                    if !presentation.supplementalFacts.isEmpty {
+                                        Text(verbatim: presentation.supplementalFacts.joined(separator: " · "))
+                                            .font(.caption)
+                                            .foregroundStyle(Color.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                    if let name = presentation.releaseName {
+                                        Text(verbatim: name)
+                                            .font(.caption2)
+                                            .foregroundStyle(Color.secondary)
+                                            .lineLimit(2)
+                                            .truncationMode(.middle)
                                     }
                                 }
+                                .multilineTextAlignment(.leading)
                                 Spacer(minLength: 0)
                                 if selected { Image(systemName: "checkmark") }
                             }

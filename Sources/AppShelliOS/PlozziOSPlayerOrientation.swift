@@ -6,6 +6,28 @@ import Observation
 import SwiftUI
 import UIKit
 
+/// The in-place live player restricts only its own window, never another scene.
+@MainActor
+public enum PlozziOSWindowOrientation {
+    private static let owners = NSMapTable<UIWindow, PlozziOSOrientationHostingController>.weakToWeakObjects()
+
+    public static func supportedOrientations(for window: UIWindow?) -> UIInterfaceOrientationMask {
+        guard let window else { return .all }
+        return owners.object(forKey: window)?.orientation.supportedMask ?? .all
+    }
+
+    static func acquire(_ owner: PlozziOSOrientationHostingController, for window: UIWindow) {
+        owners.setObject(owner, forKey: window)
+    }
+
+    @discardableResult
+    static func release(_ owner: PlozziOSOrientationHostingController, for window: UIWindow) -> Bool {
+        guard owners.object(forKey: window) === owner else { return false }
+        owners.removeObject(forKey: window)
+        return true
+    }
+}
+
 @MainActor
 @Observable
 final class PlozziOSPlayerOrientation {
@@ -78,14 +100,21 @@ final class PlozziOSPlayerOrientation {
     }
 }
 
-/// Owns UIKit's actual full-screen presentation, so orientation policy ends with the player.
+/// Owns a full-screen cover or an in-place player's window-scoped orientation policy.
 final class PlozziOSOrientationHostingController: UIHostingController<AnyView> {
     let orientation: PlozziOSPlayerOrientation
+    private let ownsWindowOrientation: Bool
+    private weak var orientationWindow: UIWindow?
+    private var precedingOrientation: UIInterfaceOrientation?
     private var requestGeneration = 0
     private var hasAppeared = false
 
-    init(rootView: AnyView, orientation: PlozziOSPlayerOrientation) {
+    init(
+        rootView: AnyView, orientation: PlozziOSPlayerOrientation,
+        ownsWindowOrientation: Bool = false
+    ) {
         self.orientation = orientation
+        self.ownsWindowOrientation = ownsWindowOrientation
         super.init(rootView: rootView)
         modalPresentationStyle = .fullScreen
         orientation.host = self
@@ -108,6 +137,7 @@ final class PlozziOSOrientationHostingController: UIHostingController<AnyView> {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        orientation.host = self
         hasAppeared = true
         refreshAvailability()
         applyOrientation()
@@ -126,8 +156,28 @@ final class PlozziOSOrientationHostingController: UIHostingController<AnyView> {
     func tearDown() {
         hasAppeared = false
         requestGeneration += 1
-        orientation.status.dismiss()
-        orientation.host = nil
+        if orientation.host === self {
+            orientation.status.dismiss()
+            orientation.host = nil
+        }
+        releaseWindowOrientation()
+    }
+
+    private func releaseWindowOrientation() {
+        guard let window = orientationWindow else { return }
+        orientationWindow = nil
+        let preceding = precedingOrientation
+        precedingOrientation = nil
+        guard PlozziOSWindowOrientation.release(self, for: window) else { return }
+        window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        guard orientation.isAvailable, orientation.preference != .auto, window.isKeyWindow,
+              window.rootViewController?.presentedViewController == nil,
+              let scene = window.windowScene, scene.activationState == .foregroundActive,
+              let preceding, scene.effectiveGeometry.interfaceOrientation != preceding,
+              let mask = PlozziOSPlayerOrientation.mask(for: preceding) else { return }
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { error in
+            PlozzLog.playback.error("Restoring live guide orientation failed: \(error.localizedDescription)")
+        }
     }
 
     private func refreshAvailability() {
@@ -141,10 +191,25 @@ final class PlozziOSOrientationHostingController: UIHostingController<AnyView> {
     func invalidateOrientationPreferences() {
         setNeedsUpdateOfSupportedInterfaceOrientations()
         presentingViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        if ownsWindowOrientation {
+            viewIfLoaded?.window?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        }
     }
 
     func applyOrientation() {
         requestGeneration += 1
+        if ownsWindowOrientation {
+            if hasAppeared, orientation.isAvailable, let window = viewIfLoaded?.window {
+                if orientationWindow !== window {
+                    releaseWindowOrientation()
+                    precedingOrientation = window.windowScene?.effectiveGeometry.interfaceOrientation
+                    orientationWindow = window
+                    PlozziOSWindowOrientation.acquire(self, for: window)
+                }
+            } else {
+                releaseWindowOrientation()
+            }
+        }
         invalidateOrientationPreferences()
         guard hasAppeared, orientation.isAvailable, let scene = view.window?.windowScene,
               scene.activationState == .foregroundActive else { return }
@@ -166,6 +231,18 @@ final class PlozziOSOrientationHostingController: UIHostingController<AnyView> {
 }
 
 extension View {
+    func plozziOSLivePlayerOrientation(
+        isPresented: Bool, orientation: PlaybackOrientation
+    ) -> some View {
+        overlay(alignment: .top) {
+            if isPresented, UIDevice.current.userInterfaceIdiom == .phone {
+                PlozziOSLiveOrientationStatus(preference: orientation)
+                    .padding(.top, 60)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
     func plozziOSPlayerCover<Content: View>(
         item: Binding<PlozziOSPlaybackRequest?>,
         orientation: PlaybackOrientation,
@@ -179,6 +256,45 @@ extension View {
             )
                 .frame(width: 0, height: 0)
         }
+    }
+}
+
+private struct PlozziOSLiveOrientationStatus: View {
+    let preference: PlaybackOrientation
+    @State private var orientation: PlozziOSPlayerOrientation
+    @Environment(\.scenePhase) private var scenePhase
+
+    init(preference: PlaybackOrientation) {
+        self.preference = preference
+        _orientation = State(initialValue: PlozziOSPlayerOrientation(preference: preference))
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            PlozziOSLiveOrientationAttachment(orientation: orientation)
+                .frame(width: 0, height: 0)
+            TransientStatusView(presenter: orientation.status)
+        }
+        .onChange(of: preference) { _, value in orientation.updatePreference(value) }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { orientation.host?.applyOrientation() }
+        }
+    }
+}
+
+private struct PlozziOSLiveOrientationAttachment: UIViewControllerRepresentable {
+    let orientation: PlozziOSPlayerOrientation
+
+    func makeUIViewController(context: Context) -> PlozziOSOrientationHostingController {
+        PlozziOSOrientationHostingController(
+            rootView: AnyView(Color.clear), orientation: orientation, ownsWindowOrientation: true
+        )
+    }
+
+    func updateUIViewController(_ controller: PlozziOSOrientationHostingController, context: Context) {}
+
+    static func dismantleUIViewController(_ controller: PlozziOSOrientationHostingController, coordinator: ()) {
+        controller.tearDown()
     }
 }
 

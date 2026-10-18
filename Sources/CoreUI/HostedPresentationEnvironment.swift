@@ -13,6 +13,8 @@ public extension EnvironmentValues {
         redactionReasons = source.redactionReasons
         scenePhase = source.scenePhase
         themePalette = source.themePalette
+        gradientBackgroundsEnabled = source.gradientBackgroundsEnabled
+        artworkGradientTintSaturation = source.artworkGradientTintSaturation
         plozzMetrics = source.plozzMetrics
         plozzCardStyle = source.plozzCardStyle
         plozzCardFocusStyle = source.plozzCardFocusStyle

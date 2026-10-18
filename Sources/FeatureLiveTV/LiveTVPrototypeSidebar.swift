@@ -12,6 +12,7 @@ struct PrototypeBrowseSidebar: View {
     let search: () -> Void
     let enterGuide: () -> Void
     var multiviews: (() -> Void)?
+    var manageChannels: (() -> Void)?
     @FocusState private var focused: Control?
     @State private var categoryFade = PrototypeScrollFade()
     @State private var completedCategoryFocusRequest = 0
@@ -21,6 +22,7 @@ struct PrototypeBrowseSidebar: View {
     private enum Control: Hashable {
         case search
         case multiviews
+        case manageChannels
         case category(String?)
     }
 
@@ -52,6 +54,14 @@ struct PrototypeBrowseSidebar: View {
                     .focused($focused, equals: .multiviews)
                     .disabled(isEnteringCategory)
                     .accessibilityIdentifier("live-tv-multiview-favorites")
+            }
+            if let manageChannels {
+                Button("Manage channels", systemImage: "slider.horizontal.3", action: manageChannels)
+                    .frame(maxWidth: .infinity, minHeight: PrototypeLayout.controlHeight, alignment: .leading)
+                    .buttonStyle(PrototypeButtonStyle(surface: .control))
+                    .focused($focused, equals: .manageChannels)
+                    .disabled(isEnteringCategory)
+                    .accessibilityIdentifier("live-tv-manage-channels")
             }
 
             ScrollViewReader { proxy in

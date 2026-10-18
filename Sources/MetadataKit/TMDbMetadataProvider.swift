@@ -30,6 +30,7 @@ public struct TMDbMetadataProvider: ArtworkProvider {
     public let id = "tmdb"
     private let access: TMDbAccess
     private let detailHTTP: MetadataDiscoveryHTTPClient
+    private let imagesRequest: @Sendable (URL, [String: String]) async -> ImagesResponse?
 
     /// API host: the proxy base (which forwards to TMDb, injecting the key) or
     /// TMDb directly when a local token is configured.
@@ -47,8 +48,19 @@ public struct TMDbMetadataProvider: ArtworkProvider {
     }
 
     public init(access: TMDbAccess, detailHTTP: MetadataDiscoveryHTTPClient = MetadataDiscoveryHTTPClient()) {
+        self.init(access: access, detailHTTP: detailHTTP, imagesRequest: { url, headers in
+            await MetadataHTTP.get(ImagesResponse.self, url: url, headers: headers)
+        })
+    }
+
+    init(
+        access: TMDbAccess,
+        detailHTTP: MetadataDiscoveryHTTPClient = MetadataDiscoveryHTTPClient(),
+        imagesRequest: @escaping @Sendable (URL, [String: String]) async -> ImagesResponse?
+    ) {
         self.access = access
         self.detailHTTP = detailHTTP
+        self.imagesRequest = imagesRequest
     }
 
     public var isEnabled: Bool { access.isEnabled }
@@ -167,6 +179,27 @@ public struct TMDbMetadataProvider: ArtworkProvider {
     }
 
     // MARK: - Lookups
+
+    public func portraitHeroURL(for query: MetadataQuery) async -> URL? {
+        guard access.isEnabled, query.contentType != .music,
+              let id = await resolveID(for: query),
+              let images = await images(forID: id, isTV: query.isTV),
+              let path = Self.portraitHeroPath(posters: images.posters, backdrops: images.backdrops)
+        else { return nil }
+        let size = images.posters?.contains(where: { $0.file_path == path }) == true ? "w500" : "original"
+        return URL(string: "\(imageBase)/\(size)\(path)")
+    }
+
+    static func portraitHeroPath(posters: [Image]?, backdrops: [Image]?) -> String? {
+        func bestNeutral(_ images: [Image]?) -> String? {
+            images?.filter {
+                $0.file_path?.isEmpty == false && ($0.iso_639_1 ?? "").isEmpty
+            }.max { ($0.vote_average ?? 0) < ($1.vote_average ?? 0) }?.file_path
+        }
+        return bestNeutral(posters) ?? bestNeutral(backdrops)
+            ?? bestImagePath(posters, preferNeutral: false)
+            ?? bestImagePath(backdrops, preferNeutral: true)
+    }
 
     private func backdropPath(for query: MetadataQuery) async -> String? {
         guard let id = await resolveID(for: query) else { return nil }
@@ -507,7 +540,7 @@ public struct TMDbMetadataProvider: ArtworkProvider {
 
     private func images(forID id: String, isTV: Bool) async -> ImagesResponse? {
         guard let url = url("/3/\(isTV ? "tv" : "movie")/\(id)/images") else { return nil }
-        return await MetadataHTTP.get(ImagesResponse.self, url: url, headers: authHeaders)
+        return await imagesRequest(url, authHeaders)
     }
 
     private func movieReleaseDates(
@@ -771,7 +804,7 @@ public struct TMDbMetadataProvider: ArtworkProvider {
         let first_air_date: String?
         let release_date: String?
     }
-    struct ImagesResponse: Decodable {
+    struct ImagesResponse: Decodable, Sendable {
         let backdrops: [Image]?
         let logos: [Image]?
         let posters: [Image]?
@@ -779,7 +812,7 @@ public struct TMDbMetadataProvider: ArtworkProvider {
     struct StillsResponse: Decodable {
         let stills: [Image]?
     }
-    struct Image: Decodable {
+    struct Image: Decodable, Sendable {
         let file_path: String?
         let iso_639_1: String?
         let vote_average: Double?

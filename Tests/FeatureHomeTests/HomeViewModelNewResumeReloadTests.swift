@@ -9,14 +9,16 @@ import CoreModels
 /// the next episode; movies and in-place progress do not need that refresh.
 @MainActor
 final class HomeViewModelNewResumeReloadTests: XCTestCase {
-    private func makeViewModel(provider: FakeMediaProvider) -> HomeViewModel {
+    private func makeViewModel(
+        provider: FakeMediaProvider, visibility: HomeLibraryVisibility = .default
+    ) -> HomeViewModel {
         let server = MediaServer(id: "srv-a", name: "Local", baseURL: URL(string: "http://host")!, provider: provider.kind)
         let account = Account(id: "a", server: server, userID: "u", userName: "Me", deviceID: "d")
         let resolved = ResolvedAccount(account: account, provider: provider)
         return HomeViewModel(
             accounts: [resolved],
             layoutStore: InMemoryHomeLayoutStore(),
-            currentVisibility: { .default }
+            currentVisibility: { visibility }
         )
     }
 
@@ -44,7 +46,9 @@ final class HomeViewModelNewResumeReloadTests: XCTestCase {
         provider.separatesHomeResume = true
         let episode = MediaItem(id: "e1", title: "Episode", kind: .episode, seriesID: "show")
         provider.nextUpItems = [episode]
-        let vm = makeViewModel(provider: provider)
+        var visibility = HomeLibraryVisibility.default
+        visibility.mergeNextUpIntoContinueWatching = false
+        let vm = makeViewModel(provider: provider, visibility: visibility)
         await vm.load()
         func nextUp() -> [MediaItem] {
             vm.state.value?.librarySections.flatMap(\.sections)
@@ -90,6 +94,7 @@ final class HomeViewModelNewResumeReloadTests: XCTestCase {
         await vm.load()
         XCTAssertEqual(cw(vm).map(\.id), ["next"])
         visibility = .default
+        visibility.mergeNextUpIntoContinueWatching = false
         await vm.loadIfNeeded(for: visibility)
         XCTAssertTrue(cw(vm).isEmpty)
         XCTAssertEqual(vm.continueWatchingForDetail.map(\.id), ["next"])

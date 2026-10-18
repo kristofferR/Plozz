@@ -24,6 +24,8 @@ final class IPTVCatalog {
     enum Table: String { case entries, incoming }
     private(set) var db: OpaquePointer?
     private let key: SymmetricKey
+    static let maximumRetainedJournalBytes = 4 * 1_024 * 1_024
+    private let url: URL
     private var writeStatements: [String: OpaquePointer] = [:]
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     private static let teardownQueue = DispatchQueue(label: "com.plozz.iptv.catalog-teardown", qos: .utility)
@@ -38,6 +40,7 @@ final class IPTVCatalog {
     ]
 
     init(url: URL, key: Data) throws {
+        self.url = url
         self.key = SymmetricKey(data: key)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         var handle: OpaquePointer?
@@ -52,6 +55,7 @@ final class IPTVCatalog {
             // A previous connection may still be completing its off-main WAL checkpoint.
             try execute("PRAGMA busy_timeout=15000")
             try execute("PRAGMA journal_mode=WAL")
+            try execute("PRAGMA journal_size_limit=\(Self.maximumRetainedJournalBytes)")
             try execute("PRAGMA synchronous=NORMAL")
             try execute("PRAGMA cache_size=-4096")
             try execute("PRAGMA temp_store=FILE")
@@ -106,6 +110,29 @@ final class IPTVCatalog {
             let code = sqlite3_extended_errcode(db)
             if code & 0xff == SQLITE_INTERRUPT { try Task.checkCancellation() }
             throw Self.databaseError(code)
+        }
+    }
+
+    /// Run on the client's actor, not during synchronous provider construction.
+    /// A busy reader keeps its snapshot; never unlink or force-reset SQLite files.
+    func reclaimJournal() {
+        do {
+            let wal = URL(fileURLWithPath: url.path + "-wal")
+            let size = try wal.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+            guard size > Self.maximumRetainedJournalBytes else { return }
+        } catch CocoaError.fileReadNoSuchFile {
+            return
+        } catch {
+            PlozzLog.networking.error("IPTV journal size could not be read code=\((error as NSError).code)")
+            return
+        }
+        sqlite3_busy_timeout(db, 0)
+        defer { sqlite3_busy_timeout(db, 15_000) }
+        let status = sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_TRUNCATE, nil, nil)
+        if status == SQLITE_BUSY || status == SQLITE_LOCKED {
+            PlozzLog.networking.debug("IPTV journal reclamation deferred for an active reader")
+        } else if status != SQLITE_OK {
+            PlozzLog.networking.error("IPTV journal reclamation failed sqlite=\(status)")
         }
     }
 
@@ -250,6 +277,7 @@ final class IPTVCatalog {
             try setState(scope, String(Date().timeIntervalSince1970))
             try execute("COMMIT")
             outcome = .succeeded
+            reclaimJournal()
         } catch {
             outcome = IPTVPerformanceMetrics.outcome(for: error)
             if sqlite3_get_autocommit(db) == 0 {

@@ -50,6 +50,7 @@ public struct SettingsPageSurface: ViewModifier {
 
     public func body(content: Content) -> some View {
         content
+            .toggleStyle(SettingsSwitchToggleStyle())
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .contentMargins(.vertical, 24, for: .scrollContent)

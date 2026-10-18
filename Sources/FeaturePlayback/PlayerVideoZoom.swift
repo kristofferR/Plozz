@@ -31,11 +31,20 @@ public struct PlayerVideoZoom: Equatable, Sendable {
                                  Self.customPercentRange.upperBound)
     }
 
-    func scaleFactors(in bounds: CGRect, aspectRatio: Double?) -> CGVector {
+    /// `fitBounds` constrains Normal and Custom's base, never Crop or Stretch.
+    /// Both rectangles use the presentation view's coordinate space.
+    func scaleFactors(in bounds: CGRect, aspectRatio: Double?, fitBounds: CGRect? = nil) -> CGVector {
         switch mode {
-        case .fit: return CGVector(dx: 1, dy: 1)
-        case .custom:
-            let scale = CGFloat(customPercent) / 100
+        case .fit, .custom:
+            let viewport = fittingBounds(in: bounds, fitBounds: fitBounds)
+            let custom = mode == .custom ? CGFloat(customPercent) / 100 : 1
+            guard viewport != bounds else { return CGVector(dx: custom, dy: custom) }
+            let fitted = SubtitleOverlayGeometry.aspectFitRect(
+                in: bounds, aspectRatio: aspectRatio.map { CGFloat($0) }
+            ) ?? bounds
+            guard fitted.width > 0, fitted.height > 0 else { return CGVector(dx: 1, dy: 1) }
+            let normal = min(viewport.width / fitted.width, viewport.height / fitted.height)
+            let scale = normal * custom
             return CGVector(dx: scale, dy: scale)
         case .fill, .stretch:
             guard let fitted = SubtitleOverlayGeometry.aspectFitRect(
@@ -49,20 +58,36 @@ public struct PlayerVideoZoom: Equatable, Sendable {
         }
     }
 
-    func surfaceFrame(in bounds: CGRect, aspectRatio: Double?) -> CGRect {
-        scaled(bounds, around: bounds, by: scaleFactors(in: bounds, aspectRatio: aspectRatio))
+    func surfaceFrame(in bounds: CGRect, aspectRatio: Double?, fitBounds: CGRect? = nil) -> CGRect {
+        scaled(bounds, around: bounds, to: surfaceCenter(in: bounds, fitBounds: fitBounds),
+               by: scaleFactors(in: bounds, aspectRatio: aspectRatio, fitBounds: fitBounds))
     }
 
-    func videoRect(in bounds: CGRect, aspectRatio: Double?) -> CGRect? {
+    func videoRect(in bounds: CGRect, aspectRatio: Double?, fitBounds: CGRect? = nil) -> CGRect? {
         guard let fitted = SubtitleOverlayGeometry.aspectFitRect(
             in: bounds, aspectRatio: aspectRatio.map { CGFloat($0) }
         ) else { return nil }
-        return scaled(fitted, around: bounds, by: scaleFactors(in: bounds, aspectRatio: aspectRatio))
+        return scaled(fitted, around: bounds, to: surfaceCenter(in: bounds, fitBounds: fitBounds),
+                      by: scaleFactors(in: bounds, aspectRatio: aspectRatio, fitBounds: fitBounds))
     }
 
-    private func scaled(_ rect: CGRect, around bounds: CGRect, by scale: CGVector) -> CGRect {
-        CGRect(x: bounds.midX + (rect.minX - bounds.midX) * scale.dx,
-               y: bounds.midY + (rect.minY - bounds.midY) * scale.dy,
+    func surfaceCenter(in bounds: CGRect, fitBounds: CGRect? = nil) -> CGPoint {
+        let viewport = mode == .fit || mode == .custom
+            ? fittingBounds(in: bounds, fitBounds: fitBounds) : bounds
+        return CGPoint(x: viewport.midX, y: viewport.midY)
+    }
+
+    private func fittingBounds(in bounds: CGRect, fitBounds: CGRect?) -> CGRect {
+        guard let fitBounds,
+              fitBounds.minX.isFinite, fitBounds.minY.isFinite,
+              fitBounds.width.isFinite, fitBounds.height.isFinite else { return bounds }
+        let clipped = bounds.intersection(fitBounds)
+        return clipped.isNull || clipped.isEmpty ? bounds : clipped
+    }
+
+    private func scaled(_ rect: CGRect, around bounds: CGRect, to center: CGPoint, by scale: CGVector) -> CGRect {
+        CGRect(x: center.x + (rect.minX - bounds.midX) * scale.dx,
+               y: center.y + (rect.minY - bounds.midY) * scale.dy,
                width: rect.width * scale.dx, height: rect.height * scale.dy)
     }
 }

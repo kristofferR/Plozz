@@ -330,9 +330,10 @@ final class HomeAggregatorUnmergedTests: XCTestCase {
         )
         let episode = MediaItem(id: "episode", title: "Next episode", kind: .episode, seriesID: "show")
         let provider = UnmergedStub(nativeItems: ["next": [episode]])
-        let visibility = HomeLibraryVisibility(rowCustomization: .init(
-            defaults: .custom, shown: [definition.id], serverRows: [definition]
-        ))
+        let visibility = HomeLibraryVisibility(
+            rowCustomization: .init(defaults: .custom, shown: [definition.id], serverRows: [definition]),
+            mergeNextUpIntoContinueWatching: false
+        )
         let model = HomeViewModel(
             accounts: [resolved("acct", provider: provider)],
             layoutStore: InMemoryHomeLayoutStore(),
@@ -344,6 +345,84 @@ final class HomeAggregatorUnmergedTests: XCTestCase {
         model.applyWatchedState(.init(itemIDs: ["episode"], scopedItemIDs: ["acct:episode"], played: true))
         XCTAssertTrue(model.state.value?.serverRows.first?.items.isEmpty == true)
         XCTAssertTrue(model.continueWatchingForDetail.isEmpty)
+    }
+
+    func testDefaultMergeUsesCombinedFeedAndStopsSeparateRequestsAcrossLayouts() async {
+        let resume = MediaItem(id: "resume", title: "Resume", kind: .movie, resumePosition: 60, libraryID: "shows")
+        let next = MediaItem(id: "next", title: "Next episode", kind: .episode, libraryID: "shows")
+        let blocked = MediaItem(id: "blocked", title: "Excluded", kind: .episode, libraryID: "blocked")
+        let definitions: [HomeServerRowDefinition] = [
+            .init(accountID: "acct", serverName: "Server", providerKind: .jellyfin,
+                  section: .init(id: "resume", kind: .continueWatching)),
+            .init(accountID: "acct", serverName: "Server", providerKind: .jellyfin,
+                  section: .init(id: "nextUp", kind: .nextUp)),
+            .init(accountID: "acct", serverName: "Server", providerKind: .jellyfin,
+                  section: .init(id: "picks", kind: .recommendations))
+        ]
+        for preset in HomeRowCustomization.Defaults.allCases {
+            let provider = UnmergedStub(
+                libraries: [lib("shows", "Shows", .series), lib("blocked", "Blocked", .series)],
+                continueWatching: [resume, next, blocked],
+                nativeItems: ["resume": [resume], "nextUp": [next], "picks": [item("pick")]]
+            )
+            var customization = HomeRowCustomization(
+                defaults: preset, order: definitions.map(\.id),
+                shown: Set(definitions.map(\.id)), serverRows: definitions
+            )
+            if preset == .matchServer {
+                customization.resolvedDefaults = .init(
+                    mode: .server, order: definitions.map(\.id), serverRows: definitions
+                )
+            }
+            let visibility = HomeLibraryVisibility(
+                disabledKeys: ["acct:blocked"], rowCustomization: customization
+            )
+            let content = await HomeAggregator().unmergedContent(
+                from: [resolved("acct", provider: provider)], visibility: visibility
+            )
+            XCTAssertEqual(Set(content.continueWatching.map(\.id)), ["resume", "next"], preset.rawValue)
+            XCTAssertEqual(content.continueWatching.first { $0.id == "resume" }?.resumePosition, 60)
+            XCTAssertEqual(provider.nativeRequests, ["picks"])
+            XCTAssertTrue(provider.nextUpRequests.isEmpty)
+            XCTAssertEqual(provider.continueWatchingScopes, [["shows"]])
+            XCTAssertEqual(content.serverRows.map(\.definition.section.id), ["picks"])
+            XCTAssertTrue(content.librarySections.flatMap(\.sections).allSatisfy { $0.id != "nextUp" })
+        }
+    }
+
+    func testChangingMergePreferenceReloadsFeedAndRestoresNativeRows() async {
+        let resume = item("resume")
+        let next = MediaItem(id: "next", title: "Next episode", kind: .episode)
+        let definitions: [HomeServerRowDefinition] = [
+            .init(accountID: "acct", serverName: "Server", providerKind: .jellyfin,
+                  section: .init(id: "resume", kind: .continueWatching)),
+            .init(accountID: "acct", serverName: "Server", providerKind: .jellyfin,
+                  section: .init(id: "nextUp", kind: .nextUp))
+        ]
+        let provider = UnmergedStub(
+            continueWatching: [resume, next],
+            nativeItems: ["resume": [resume], "nextUp": [next]]
+        )
+        var visibility = HomeLibraryVisibility(
+            rowCustomization: .init(defaults: .custom, shown: Set(definitions.map(\.id)), serverRows: definitions),
+            mergeNextUpIntoContinueWatching: false
+        )
+        let model = HomeViewModel(
+            accounts: [resolved("acct", provider: provider)],
+            layoutStore: InMemoryHomeLayoutStore(), contentStore: InMemoryHomeContentStore(),
+            currentVisibility: { visibility }
+        )
+        await model.load()
+        XCTAssertEqual(model.state.value?.continueWatching.map(\.id), ["resume"])
+        XCTAssertEqual(model.state.value?.serverRows.map(\.definition.section.kind), [.nextUp])
+        visibility.mergeNextUpIntoContinueWatching = true
+        await model.loadIfNeeded(for: visibility)
+        XCTAssertEqual(Set(model.state.value?.continueWatching.map(\.id) ?? []), ["resume", "next"])
+        XCTAssertTrue(model.state.value?.serverRows.isEmpty == true)
+        visibility.mergeNextUpIntoContinueWatching = false
+        await model.loadIfNeeded(for: visibility)
+        XCTAssertEqual(model.state.value?.continueWatching.map(\.id), ["resume"])
+        XCTAssertEqual(model.state.value?.serverRows.map(\.definition.section.kind), [.nextUp])
     }
 
     // MARK: - Music exclusion
@@ -451,6 +530,10 @@ private final class UnmergedStub: MediaProvider, @unchecked Sendable {
     var nativeRequests: [String] { nativeCalls.withLock { $0 } }
     private let nativeBatches = Mutex<[[String]]>([])
     var nativeBatchRequests: [[String]] { nativeBatches.withLock { $0 } }
+    private let scopedCalls = Mutex<[[String]?]>([])
+    var continueWatchingScopes: [[String]?] { scopedCalls.withLock { $0 } }
+    private let nextUpCalls = Mutex<[String]>([])
+    var nextUpRequests: [String] { nextUpCalls.withLock { $0 } }
     /// Whether `items(in:)` (Recently Added) was requested — lets a test prove a
     /// non-opted-in row is never fetched.
     private(set) var itemsRequested = false
@@ -488,6 +571,17 @@ private final class UnmergedStub: MediaProvider, @unchecked Sendable {
         return stubbedLibraries
     }
     func continueWatching(limit: Int) async throws -> [MediaItem] { stubbedContinueWatching }
+    func continueWatching(limit: Int, inLibraries libraryIDs: [String]?) async throws -> [MediaItem] {
+        scopedCalls.withLock { $0.append(libraryIDs) }
+        return stubbedContinueWatching.filter { item in
+            guard let libraryIDs else { return true }
+            return item.libraryID.map(libraryIDs.contains) ?? true
+        }
+    }
+    func homeNextUp(libraryID: String, limit: Int) async throws -> [MediaItem] {
+        nextUpCalls.withLock { $0.append(libraryID) }
+        return []
+    }
     func serverHomeItems(
         section: ServerHomeSection, limit: Int, excludingLibraryIDs: Set<String>
     ) async throws -> [MediaItem] {

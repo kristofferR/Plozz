@@ -645,6 +645,52 @@ final class NativeSubtitlePresentationTests: XCTestCase {
         try await waitUntil { cues.isEmpty }
     }
 
+    func testNativeSDHSelectionUsesAccessibilityMetadataAmongSameLanguageTracks() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.copyItem(at: fixtureDirectory(), to: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let masterURL = directory.appendingPathComponent("master.m3u8")
+        let master = try String(contentsOf: masterURL, encoding: .utf8)
+            .replacingOccurrences(
+                of: #"NAME="Alternate""#,
+                with: #"NAME="Accessible",CHARACTERISTICS="public.accessibility.transcribes-spoken-dialog,public.accessibility.describes-music-and-sound""#
+            )
+        try master.write(to: masterURL, atomically: true, encoding: .utf8)
+        let server = try SubtitleFixtureServer(directory: directory)
+        let port = try await server.start()
+        defer { server.stop() }
+        let engine = NativeVideoEngine(startsMuted: true)
+        let model = LiveSubtitleModel()
+        model.beginLiveFeed(permitsTimingOffsets: false)
+        var cues: [SubtitleCue] = []
+        engine.onSubtitleCues = { cues = $0; model.updateLiveCues($0) }
+        let window = try await mount(engine, subtitles: model, liveClock: true)
+        defer { engine.stop(); window.isHidden = true }
+        let regular = MediaTrack(id: 2, kind: .subtitle, displayTitle: "English", language: "en", codec: "webvtt")
+        var sdh = regular
+        sdh.id = 3
+        sdh.isHearingImpaired = true
+        let tracks = [regular, sdh]
+        var playback = request(try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/master.m3u8")), tracks: tracks)
+        playback.isTranscoding = true
+        playback.streamingOptions = .init(quality: .hd720)
+        await engine.load(request: playback, startPosition: 0)
+        let chosen = try XCTUnwrap(tracks.defaultSubtitleSelection(
+            mode: .all, preferredLanguage: "en", hearingImpairedPreference: .preferSDH))
+        engine.selectSubtitleTrack(chosen)
+        try await waitUntil { cues.contains { $0.text == "Alternate" } }
+        XCTAssertFalse(cues.contains { $0.text == "Alpha" })
+        let item = try XCTUnwrap(engine.underlyingPlayer?.currentItem)
+        let loadedGroup = try await item.asset.loadMediaSelectionGroup(for: .legible)
+        let group = try XCTUnwrap(loadedGroup)
+        XCTAssertTrue(try XCTUnwrap(item.currentMediaSelection.selectedMediaOption(in: group))
+            .hasMediaCharacteristic(.describesMusicAndSoundForAccessibility))
+        engine.selectSubtitleTrack(regular)
+        try await waitUntil { cues.contains { $0.text == "Alpha" } }
+        XCTAssertFalse(try XCTUnwrap(item.currentMediaSelection.selectedMediaOption(in: group))
+            .hasMediaCharacteristic(.describesMusicAndSoundForAccessibility))
+    }
+
     func testPlozzigenRemoteHLSUsesTheSameOverlayAndPreservesSystemPresentationHandoff() async throws {
         let server = try SubtitleFixtureServer(directory: fixtureDirectory())
         let port = try await server.start()
@@ -717,7 +763,10 @@ final class NativeSubtitlePresentationTests: XCTestCase {
         let outputs = item.outputs.compactMap { $0 as? AVPlayerItemLegibleOutput }
         XCTAssertEqual(outputs.count, 1)
         XCTAssertEqual(outputs.first?.suppressesPlayerRendering, true)
-        XCTAssertNil(item.textStyleRules, "Owned captions must not bake Apple's final styling into the source cues")
+        XCTAssertTrue(
+            item.textStyleRules?.isEmpty ?? true,
+            "Owned captions must not bake Apple's final styling into the source cues"
+        )
     }
 
     private func captionFrames(in view: UIView, relativeTo window: UIWindow) -> [CGRect] {

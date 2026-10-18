@@ -51,7 +51,7 @@ final class IPTVHTTP: Sendable {
 
     func bytes(
         url: URL, headers: [String: String], method: String = "GET",
-        receivedResponse: (@Sendable (Int, String?) -> Void)? = nil
+        receivedResponse: (@Sendable (HTTPURLResponse) -> Void)? = nil
     ) async throws -> (URLSession.AsyncBytes, HTTPURLResponse) {
         try Task.checkCancellation()
         guard LiveTVPlaylistSource.isSupportedURL(url) else { throw IPTVError.invalidAddress }
@@ -62,6 +62,8 @@ final class IPTVHTTP: Sendable {
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
         let diagnostic = IPTVSetupDiagnostics.current
         diagnostic?.willRequest()
+        let guideDiagnostic = IPTVGuideDiagnostics.request
+        guideDiagnostic?.requesting()
         let id = UUID()
         // URLSession.bytes creates its native task asynchronously. Fence that
         // entire startup, not just a cancellation check before calling it.
@@ -95,7 +97,8 @@ final class IPTVHTTP: Sendable {
             throw IPTVError.malformed
         }
         diagnostic?.received(status: response.statusCode, response: .init(mimeType: response.mimeType))
-        receivedResponse?(response.statusCode, response.mimeType)
+        guideDiagnostic?.received(response)
+        receivedResponse?(response)
         guard (200...299).contains(response.statusCode) else {
             bytes.task.cancel()
             if response.statusCode == 401 || response.statusCode == 403 { throw IPTVError.authentication }

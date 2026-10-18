@@ -61,7 +61,8 @@ struct LiveTVPlayerGuideOverlay: View {
             openControls: {}, openSources: {}, openGuideTime: {},
             openToolbar: { embedding.back() },
             isLoading: false, loadFailed: false, reload: {},
-            libraryCatalog: libraryCatalog, loadLibraryGuide: loadLibraryGuide
+            libraryCatalog: libraryCatalog, loadLibraryGuide: loadLibraryGuide,
+            isEmbeddedInPlayer: true
         )
         .onAppear {
             rowID = model.guideRow(for: playingChannelID)

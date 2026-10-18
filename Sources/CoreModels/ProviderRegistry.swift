@@ -89,6 +89,12 @@ public protocol ProviderTeardown: Sendable {
     func teardown() async
 }
 
+/// Updates routes without discarding playback state or leaving retained
+/// consumers bound to an address the user removed.
+public protocol ServerAddressUpdating: Sendable {
+    func updateServerAddresses(_ alternatives: [URL])
+}
+
 /// A registry mapping `ProviderKind` → provider factory.
 ///
 /// The composition root (`AppShell`) registers the concrete factories it links
@@ -215,6 +221,30 @@ public final class ProviderRegistry: ProviderResolving, @unchecked Sendable {
         lock.lock()
         let staleKeys = cache.keys.filter { $0.accountID == accountID }
         let evicted = staleKeys.compactMap { cache.removeValue(forKey: $0)?.provider }
+        lock.unlock()
+        Self.teardown(evicted)
+    }
+
+    public func updateServerAddresses(accountID: String, alternatives: [URL]) {
+        lock.lock()
+        var evicted: [any MediaProvider] = []
+        for key in cache.keys.filter({ $0.accountID == accountID }) {
+            guard let entry = cache[key] else { continue }
+            guard let routing = entry.provider as? any ServerAddressUpdating else {
+                evicted.append(entry.provider)
+                cache[key] = nil
+                continue
+            }
+            routing.updateServerAddresses(alternatives)
+            var session = entry.context.session
+            session.server.alternateConnectionURLs = alternatives.isEmpty ? nil : alternatives
+            let context = ProviderResolutionContext(
+                session: session, accountID: entry.context.accountID,
+                credentialRevision: entry.context.credentialRevision,
+                localMediaContext: entry.context.localMediaContext
+            )
+            cache[key] = CacheEntry(context: context, provider: entry.provider)
+        }
         lock.unlock()
         Self.teardown(evicted)
     }

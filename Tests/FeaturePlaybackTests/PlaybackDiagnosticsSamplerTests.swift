@@ -7,6 +7,73 @@ import os
 
 @MainActor
 final class PlaybackDiagnosticsSamplerTests: XCTestCase {
+    func testActualAudioPipelineTracksConversionFallbackTrackChangesAndUnknownWithoutAProbe() {
+        let sampler = PlaybackDiagnosticsSampler()
+        defer { sampler.stop() }
+        var telemetry: EngineLiveTelemetry?
+        sampler.start(
+            player: nil, mode: .plozzigen,
+            metadata: .init(audio: .init(codec: "truehd", profile: "Dolby Atmos", channels: 8)),
+            engineTelemetry: { telemetry }, includesSystemMetrics: false
+        )
+        XCTAssertNil(sampler.latest?.audioPipelineDescription)
+        XCTAssertNil(sampler.latest?.audioOutputDescription)
+        for pipeline in [
+            "TRUEHD Atmos → APAC 7.1.4", "TRUEHD → FLAC bridge",
+            "TRUEHD → EAC3 bridge", "Stream-copy (EAC3+JOC Atmos)",
+            "libavcodec aac -> CoreAudio", nil
+        ] {
+            telemetry = .init(audioPipelineDescription: pipeline)
+            sampler.sampleTick()
+            XCTAssertEqual(sampler.latest?.audioPipelineDescription, pipeline)
+            XCTAssertNil(sampler.latest?.audioOutputDescription)
+        }
+        telemetry = .init(audioPipelineDescription: "TRUEHD Atmos → APAC 7.1.4")
+        sampler.sampleTick()
+        telemetry = nil
+        sampler.sampleTick()
+        XCTAssertNil(sampler.latest?.audioPipelineDescription, "Missing telemetry must not retain a previous pipeline")
+    }
+
+    func testAudioPipelineDoesNotLeakAcrossStopRestartOrNativeRouteHandoff() {
+        let sampler = PlaybackDiagnosticsSampler()
+        defer { sampler.stop() }
+        var route = LiveChannelEngineRoute.localHLS
+        sampler.start(
+            player: nil, mode: .plozzigen,
+            engineTelemetry: { .init(audioPipelineDescription: "TRUEHD Atmos → APAC 7.1.4") },
+            liveRoute: { route }, includesSystemMetrics: false
+        )
+        sampler.sampleTick()
+        XCTAssertNotNil(sampler.latest?.audioPipelineDescription)
+        route = .nativeHLS
+        sampler.sampleTick()
+        XCTAssertNil(sampler.latest?.audioPipelineDescription)
+        route = .localHLS
+        sampler.sampleTick()
+        XCTAssertNotNil(sampler.latest?.audioPipelineDescription)
+        sampler.stop()
+        XCTAssertNil(sampler.latest?.audioPipelineDescription)
+        sampler.start(player: nil, mode: .plozzigen, includesSystemMetrics: false)
+        sampler.sampleTick()
+        XCTAssertNil(sampler.latest?.audioPipelineDescription)
+    }
+
+    func testNativeAndServerTranscodesDoNotAcquireAnEngineConversionClaim() {
+        for mode: PlaybackDiagnostics.PlaybackMode in [.directPlay, .remux, .transcode] {
+            let sampler = PlaybackDiagnosticsSampler()
+            defer { sampler.stop() }
+            sampler.start(
+                player: nil, mode: mode,
+                engineTelemetry: { .init(audioPipelineDescription: "TRUEHD Atmos → APAC 7.1.4") },
+                probedFacts: { .init(audioDecoder: "TRUEHD Atmos → APAC 7.1.4") },
+                includesSystemMetrics: false
+            )
+            sampler.sampleTick()
+            XCTAssertNil(sampler.latest?.audioPipelineDescription)
+        }
+    }
+
     func testLiveActiveTracksReplaceInitialFactsAndClearOnItemReplacement() async throws {
         let item = AVPlayerItem(asset: AVMutableComposition())
         let output = MediaSourceMetadata(

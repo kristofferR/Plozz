@@ -1,350 +1,212 @@
 #if canImport(SwiftUI)
 import SwiftUI
 import CoreModels
-import CoreNetworking
 import CoreUI
 
-/// Shared arranger; only the input catalog is fetched, only while this page is open.
+/// The shared section editor adapts existing row feeds without changing their identities.
 public struct HomeRowsSettingsView: View {
     public let libraries: [AggregatedLibrary]
     public let accounts: [ResolvedAccount]
     public let visibility: HomeLibraryVisibilityModel
-    @State private var recommendations: [String: [LibrarySection]] = [:]
-    @State private var serverRows: [HomeServerRowDefinition] = []
-    @State private var failures: [String: AppError] = [:]
-    @State private var isLoading = false
+    @Environment(HeroSettingsModel.self) private var hero
+    @Environment(HeroBackgroundSettingsModel.self) private var heroBackground
+    @State private var inventory: HomeSectionCatalogModel
+    @State private var isReordering = false
     @State private var isLifting = false
     @State private var reloadRevision = 0
-    @State private var catalogIdentity: RequestID?
+    @State private var editError: AppError?
 
     public init(
         libraries: [AggregatedLibrary], accounts: [ResolvedAccount],
         visibility: HomeLibraryVisibilityModel
     ) {
+        self.init(libraries: libraries, accounts: accounts, visibility: visibility, inventory: HomeSectionCatalogModel())
+    }
+
+    init(
+        libraries: [AggregatedLibrary], accounts: [ResolvedAccount],
+        visibility: HomeLibraryVisibilityModel, inventory: HomeSectionCatalogModel
+    ) {
         self.libraries = libraries
         self.accounts = accounts
         self.visibility = visibility
+        _inventory = State(initialValue: inventory)
     }
 
-    private var availableLibraries: [AggregatedLibrary] {
-        libraries.filter { !$0.library.isMusic && visibility.isEnabled($0.key) }
-    }
-
-    private var choices: [HomeRowChoice] {
-        let shared = HomeRowChoice.shared
-        let native = (visibility.visibility.rowCustomization?.availableServerRows ?? []) + serverRows
-        var seen = Set<HomeRowID>()
-        let nativeChoices = native.filter { row in
-            guard case .server = row.id, seen.insert(row.id).inserted else { return false }
-            return row.section.libraryID.map { id in
-                visibility.isEnabled("\(row.accountID):\(id)")
-            } != false
-        }.map(HomeRowChoice.init(serverRow:))
-        return shared.filter { $0.id != .libraries && $0.id != .liveTV }
-            + nativeChoices
-            + availableLibraries.flatMap { library in
-                HomeRowChoice.baseRows(for: library)
-                    + (recommendations[library.key] ?? []).map {
-                        HomeRowChoice(section: $0, library: library)
-                    }
-            } + shared.filter { $0.id == .libraries || $0.id == .liveTV }
+    private var requestID: HomeSectionCatalogModel.RequestID {
+        HomeSectionCatalogModel.requestID(libraries: libraries, accounts: accounts, visibility: visibility)
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            HomeRowPresetActions(
-                selection: visibility.visibility.rowCustomization?.defaults,
-                resolved: visibility.visibility.rowCustomization?.resolvedDefaults,
-                accounts: accounts.map(\.account),
-                failures: visibility.serverMatchFailures,
-                onSelect: { preset in
-                    visibility.useRowDefaults(preset)
-                    Task { await visibility.prepareServerDefaults(accounts: accounts) }
+        HomeEditorPage(title: Text("Customize Home")) {
+            #if os(tvOS)
+            HStack(spacing: SettingsFormMetrics.controlSpacing) {
+                SettingsPageHeader("Customize Home")
+                reorderButton
+            }
+            editorControls
+            #endif
+            HomeEditorLink {
+                HomeHeroSettingsView(libraries: libraries, accounts: accounts, visibility: visibility)
+                    .environment(hero)
+                    .environment(heroBackground)
+            } label: {
+                HomeEditorRowLabel(
+                    title: Text("Hero"), subtitle: heroSummary
+                )
+            }
+            .accessibilityIdentifier("home-section-hero")
+            .disabled(isReordering)
+
+            let catalog = inventory.requestID == requestID ? inventory.catalog : HomeSectionCatalog(libraries: [])
+            let sections = catalog.sections(in: visibility.visibility)
+            let choices = catalog.editableChoices(in: visibility.visibility)
+            if isReordering {
+                let byID = Dictionary(choices.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+                LiftableReorderList(
+                    sections: .init(enabled: sections.enabled, disabled: []),
+                    disabledSectionTitle: "Hidden", disabledPlaceholder: "No hidden rows",
+                    isLifting: $isLifting, allowsHiding: false,
+                    row: { id in
+                        let choice = byID[id]
+                        return .init(
+                            title: choice?.homeEditorTitle ?? Text("Section"),
+                            symbolName: "rectangle.grid.1x2",
+                            providerKind: choice?.library?.providerKind ?? choice?.serverRow?.providerKind,
+                            mediaShareTransport: choice?.library?.transportKind,
+                            subtitle: choice?.homeEditorSource
+                        )
+                    },
+                    onChange: { order in
+                        do {
+                            try visibility.reorderHomeSections(order.enabled, catalog: catalog)
+                            editError = nil
+                        } catch { editError = (error as? AppError) ?? .invalidResponse }
+                    }
+                )
+                .disabled(inventory.isLoading)
+                .accessibilityIdentifier("home-section-reorder-list")
+            } else {
+                ForEach(sections.enabled, id: \.self) { id in
+                    if let choice = choices.first(where: { $0.id == id }) {
+                        HomeEditorLink {
+                            HomeSectionSettingsView(
+                                choice: choice, inventory: inventory, visibility: visibility,
+                                libraries: libraries, accounts: accounts
+                            )
+                        } label: {
+                            HomeSectionChoiceLabel(choice: choice)
+                        }
+                        .accessibilityIdentifier("home-section-\(id.presentationID)")
+                    }
                 }
-            )
-            .disabled(isLifting)
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Rows").settingsSectionHeader()
-                Text("Tap and hold a row for options, or move it to Hidden to hide it.")
-                    .font(.footnote)
-                    .plozzForeground(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
-            let choices = choices
-            let byID = Dictionary(choices.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-            LiftableReorderList(
-                sections: visibility.visibility.rowSections(choices: choices),
-                disabledSectionTitle: "Hidden",
-                disabledPlaceholder: "No hidden rows",
-                isLifting: $isLifting,
-                row: { id in
-                    let choice = byID[id]
-                    return LiftableReorderList<HomeRowID>.Row(
-                        title: choice?.localizedTitle.map(Text.init)
-                            ?? Text(verbatim: choice?.title ?? ""),
-                        symbolName: choice?.library == nil ? "square.stack.3d.up.fill" : "rectangle.grid.1x2",
-                        providerKind: choice?.library?.providerKind ?? choice?.serverRow?.providerKind,
-                        mediaShareTransport: choice?.library?.transportKind,
-                        subtitle: choice?.library.map {
-                            $0.library.displayName + Text(verbatim: " · \($0.serverName)")
-                        } ?? choice?.serverRow.map {
-                            Text(verbatim: $0.serverName)
-                        } ?? (id == .liveTV ? Text("All live sources") : Text("All libraries"))
-                    )
-                },
-                onChange: { visibility.applyRows($0, choices: choices) }
-            )
-            if isLoading {
-                ProgressView("Loading available rows…")
+            addSectionButton(identifier: "home-section-add-bottom")
+            if editError != nil {
+                InlineErrorMessage(Text("Couldn't update this section. Try again."))
             }
-            ForEach(availableLibraries.filter { failures[$0.key] != nil }) { library in
-                VStack(alignment: .leading, spacing: 8) {
-                    InlineErrorMessage(
-                        Text("Couldn't load recommended rows from \(library.library.title). Your saved choices are unchanged.")
-                    )
-                    .font(.footnote)
-                    Button("Retry") { reloadRevision += 1 }
-                        .plozzActionButton(role: .secondary)
-                        .disabled(isLifting)
+            HomeCatalogStatus(inventory: inventory, accounts: accounts, libraries: libraries) {
+                reloadRevision += 1
+            }
+            .disabled(isReordering)
+        }
+        #if os(iOS)
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                SettingsPageLink {
+                    addSectionDestination
+                } label: {
+                    Label("Add section", systemImage: "plus")
                 }
+                .labelStyle(.iconOnly)
+                .disabled(isReordering)
+                .accessibilityIdentifier("home-section-add")
+                reorderButton
             }
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            editorControls
+                .padding(.horizontal, 24)
+                .padding(.vertical, 8)
+                .background { SettingsPageBackground() }
+        }
+        #endif
+        .task(id: HomeSectionCatalogModel.loadID(
+            libraries: libraries, accounts: accounts, visibility: visibility, revision: reloadRevision
+        )) {
+            await inventory.load(libraries: libraries, accounts: accounts, visibility: visibility)
+        }
+        .onChange(of: requestID) { _, _ in
+            isReordering = false
+            isLifting = false
+            editError = nil
+        }
+    }
+
+    private var editorControls: some View {
+        #if os(tvOS)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) { controls }
+                .fixedSize(horizontal: true, vertical: false)
+            VStack(alignment: .leading, spacing: 8) { controls }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .task(id: RequestID(
-            accounts: accounts.map(\.account.id),
-            credentials: accounts.map(\.credentialRevision),
-            users: accounts.map(\.provider.session.userID), plexHomeUsers: accounts.map(\.plexHomeUserID),
-            libraries: availableLibraries.map(\.key),
-            scope: ObjectIdentifier(visibility), revision: reloadRevision
-        )) {
-            let identity = RequestID(
-                accounts: accounts.map(\.account.id),
-                credentials: accounts.map(\.credentialRevision),
-                users: accounts.map(\.provider.session.userID), plexHomeUsers: accounts.map(\.plexHomeUserID),
-                libraries: availableLibraries.map(\.key),
-                scope: ObjectIdentifier(visibility), revision: 0
-            )
-            if catalogIdentity != identity {
-                recommendations = [:]
-                serverRows = []
-                catalogIdentity = identity
-            }
-            await visibility.prepareServerDefaults(accounts: accounts)
-            async let recommendations: Void = loadRecommendations()
-            async let sections: Void = loadServerRows()
-            _ = await (recommendations, sections)
+        .focusSection()
+        #else
+        controls
+            .frame(maxWidth: .infinity, alignment: .leading)
+        #endif
+    }
+
+    private var controls: some View {
+        Group {
+            HomeRowPresetPicker(visibility: visibility)
+                .id(ObjectIdentifier(visibility))
+                .disabled(isReordering)
+            #if os(tvOS)
+            addSectionButton(identifier: "home-section-add")
+            #endif
         }
     }
 
-    private struct RequestID: Hashable {
-        let accounts: [String]
-        let credentials: [CredentialRevision]
-        let users: [String]
-        let plexHomeUsers: [String?]
-        let libraries: [String]
-        let scope: ObjectIdentifier
-        let revision: Int
+    private var reorderButton: some View {
+        Button {
+            isReordering.toggle()
+            isLifting = false
+        } label: {
+            if isReordering { Text("Done").fixedSize(horizontal: false, vertical: true) }
+            else { Text("Reorder").fixedSize(horizontal: false, vertical: true) }
+        }
+        .disabled(isLifting || (!isReordering && (inventory.isLoading
+            || inventory.catalog.sections(in: visibility.visibility).enabled.count < 2)))
+        .accessibilityIdentifier("home-section-reorder")
+        #if os(tvOS)
+        .plozzActionButton(role: .secondary)
+        #endif
     }
 
-    private func loadServerRows() async {
-        if visibility.visibility.rowCustomization?.defaults == .matchServer,
-           visibility.visibility.rowCustomization?.resolvedDefaults != nil {
-            serverRows = visibility.visibility.rowCustomization?.availableServerRows ?? []
-            return
+    private func addSectionButton(identifier: String) -> some View {
+        SettingsPageLink {
+            addSectionDestination
+        } label: {
+            Text("Add section").fixedSize(horizontal: false, vertical: true)
         }
-        await withTaskGroup(of: (String, Result<[HomeServerRowDefinition], AppError>).self) { group in
-            var next = 0
-            func enqueue() {
-                guard next < accounts.count, !Task.isCancelled else { return }
-                let source = accounts[next]
-                next += 1
-                group.addTask {
-                    do {
-                        let layout = try await source.provider.serverHomeLayout()
-                        let rows = (layout?.sections ?? []).map {
-                            HomeServerRowDefinition(
-                                accountID: source.account.id, serverName: source.account.server.name,
-                                providerKind: source.account.server.provider, section: $0
-                            )
-                        }
-                        return (source.account.id, .success(rows))
-                    } catch is CancellationError {
-                        return (source.account.id, .failure(.cancelled))
-                    } catch {
-                        return (source.account.id, .failure((error as? AppError) ?? .unknown("")))
-                    }
-                }
-            }
-            for _ in 0..<min(3, accounts.count) { enqueue() }
-            var loaded = Dictionary(grouping: serverRows, by: \.accountID)
-            while let (accountID, result) = await group.next() {
-                guard !Task.isCancelled else { group.cancelAll(); return }
-                switch result {
-                case let .success(rows): loaded[accountID] = rows
-                case let .failure(error):
-                    if error != .cancelled {
-                        PlozzLog.app.error("Home server row catalog request failed; preserving known rows")
-                    }
-                }
-                enqueue()
-            }
-            serverRows = accounts.flatMap { loaded[$0.account.id] ?? [] }
-        }
+        .plozzActionButton(role: .secondary)
+        .disabled(isReordering)
+        .accessibilityIdentifier(identifier)
     }
 
-    private func loadRecommendations() async {
-        isLoading = true
-        defer { isLoading = false }
-        failures = [:]
-        let sources = availableLibraries.compactMap { library -> (AggregatedLibrary, any MediaProvider)? in
-            guard LibraryHomeRowKind.available(for: library).contains(.hubs),
-                  let provider = accounts.first(where: { $0.account.id == library.accountID })?.provider
-            else { return nil }
-            return (library, provider)
-        }
-        await withTaskGroup(of: (String, Result<[LibrarySection], AppError>).self) { group in
-            var next = 0
-            func enqueue() {
-                guard next < sources.count, !Task.isCancelled else { return }
-                let (library, provider) = sources[next]
-                next += 1
-                group.addTask {
-                    do {
-                        return (library.key, .success(try await provider.homeHubs(
-                            libraryID: library.library.id, kind: library.library.kind,
-                            limit: 8, includeUnpromoted: true
-                        )))
-                    } catch is CancellationError {
-                        return (library.key, .failure(.cancelled))
-                    } catch {
-                        return (library.key, .failure((error as? AppError) ?? .unknown("")))
-                    }
-                }
-            }
-            for _ in 0..<min(3, sources.count) { enqueue() }
-            while let (key, result) = await group.next() {
-                guard !Task.isCancelled else { group.cancelAll(); return }
-                switch result {
-                case let .success(rows): recommendations[key] = rows
-                case let .failure(error):
-                    failures[key] = error
-                    if error != .cancelled {
-                        PlozzLog.app.error("Home row catalog request failed")
-                    }
-                }
-                enqueue()
-            }
-        }
-    }
-}
-
-private struct HomeRowPresetActions: View {
-    let selection: HomeRowCustomization.Defaults?
-    let resolved: HomeResolvedRowDefaults?
-    let accounts: [Account]
-    let failures: [String: AppError]
-    let onSelect: (HomeRowCustomization.Defaults) -> Void
-    @State private var resetDefaults: HomeRowCustomization.Defaults?
-
-    private func actionTitle(for preset: HomeRowCustomization.Defaults) -> LocalizedStringResource {
-        preset == .matchServer ? "Match server" : "Combined rows"
+    private var addSectionDestination: some View {
+        HomeAddSectionView(
+            inventory: inventory, visibility: visibility, libraries: libraries, accounts: accounts
+        )
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Presets").settingsSectionHeader()
-            if selection != .matchServer && selection != .combined {
-                Text("Custom arrangement")
-                    .font(.subheadline.weight(.medium))
-                    .accessibilityIdentifier("home-row-preset-custom")
-            }
-            ViewPreferenceChoiceGroup {
-                ForEach([HomeRowCustomization.Defaults.matchServer, .combined], id: \.self) { preset in
-                    Button {
-                        guard selection != preset else { return }
-                        resetDefaults = preset
-                    } label: {
-                        HStack {
-                            Text(actionTitle(for: preset))
-                                .multilineTextAlignment(.leading)
-                            Spacer()
-                            if selection == preset {
-                                Image(systemName: "checkmark").accessibilityHidden(true)
-                            }
-                        }
-                        .font(.body.weight(.medium))
-                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(SettingsFormButtonStyle())
-                    .accessibilityAddTraits(selection == preset ? .isSelected : [])
-                    .accessibilityIdentifier("home-row-preset-\(preset.rawValue)")
-                    .confirmationDialog(
-                        "Replace your row arrangement?",
-                        isPresented: Binding(
-                            get: { resetDefaults == preset },
-                            set: { if !$0, resetDefaults == preset { resetDefaults = nil } }
-                        ),
-                        titleVisibility: .visible
-                    ) {
-                        Button(actionTitle(for: preset)) {
-                            onSelect(preset)
-                            resetDefaults = nil
-                        }
-                        Button("Cancel", role: .cancel) { resetDefaults = nil }
-                    } message: {
-                        if preset == .matchServer {
-                            Text("Follow your servers' Home arrangements. With multiple servers, common rows are combined and the other server rows stay visible. This adapts until you customize a row.")
-                        } else {
-                            Text("Start with rows across all libraries. You can also add individual library or server rows, then arrange everything together.")
-                        }
-                    }
-                }
-            }
-            if selection == .matchServer {
-                VStack(alignment: .leading, spacing: 8) {
-                    let failedAccounts = accounts.filter { failures[$0.id] != nil }
-                    if failedAccounts.isEmpty {
-                        matchDescription
-                    } else {
-                        ForEach(failedAccounts) { account in
-                            if let error = failures[account.id] {
-                                failureMessage(serverName: account.server.name, error: error)
-                                    .accessibilityIdentifier("home-server-failure-\(account.id)")
-                            }
-                        }
-                    }
-                }
-                    .font(.footnote)
-                    .plozzForeground(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    private func failureMessage(serverName: String, error: AppError) -> Text {
-        if error == .serverUnreachable {
-            return Text("\(serverName) is offline.")
-        }
-        if error.requiresSignIn {
-            return Text("Sign in to \(serverName) again.")
-        }
-        return Text("Couldn't load Home rows from \(serverName).")
-    }
-
-    private var matchDescription: Text {
-        switch resolved?.mode {
-        case .combined:
-            return Text("Common rows are combined across servers. Each server's other default rows stay visible.")
-        case .providerFallback:
-            return Text("This source doesn't share a saved Home arrangement. Using its default rows.")
-        case .server where resolved?.source == .promotedHubs:
-            return Text("Using Plex's promoted Home rows. Other clients' pinned-library choices aren't shared.")
-        case .server:
-            return Text("Following your server's Home rows. Music and reading are not included.")
-        case nil:
-            return Text("Follow your servers' Home rows, combining common rows when you have multiple servers.")
-        }
+    private var heroSummary: Text {
+        #if os(tvOS)
+        if hero.settings.style == .followsFocus { return Text("Showcase") }
+        #endif
+        return hero.settings.isEnabled ? Text("Pinned at top") : Text("Off")
     }
 }
 #endif

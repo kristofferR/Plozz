@@ -7,6 +7,7 @@ struct LiveTVSetupWelcome: View {
     let useServer: () -> Void
     var issue: LocalizedStringResource? = nil
     var serverStatuses: [LiveTVServerEnrollmentStatus] = []
+    var retryServers: (() -> Void)?
     var createChannel: (() -> Void)?
     var retryLibrary: (() -> Void)?
     var automaticChannels: LiveTVAutomaticChannelsState? = nil
@@ -90,6 +91,10 @@ struct LiveTVSetupWelcome: View {
                     ForEach(serverStatuses) { status in
                         LiveTVEnrollmentStatusRow(status: status)
                     }
+                    if serverStatuses.contains(where: { $0.failure != nil }), let retryServers {
+                        Button("Retry", action: retryServers)
+                            .buttonStyle(SettingsFocusButtonStyle(size: .contained))
+                    }
                 }
                 .frame(maxWidth: maximumWidth, alignment: .leading)
                 .padding(inset)
@@ -98,7 +103,7 @@ struct LiveTVSetupWelcome: View {
             .scrollIndicators(.hidden)
         }
         #if os(tvOS)
-        .background(palette.settingsBackground)
+        .background { SettingsPageBackground() }
         #endif
         .foregroundStyle(palette.primaryText)
         .accessibilityIdentifier("live-tv-source-welcome")

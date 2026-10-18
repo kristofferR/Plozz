@@ -483,13 +483,16 @@ public extension AppTheme {
 public struct AppBackground: View {
     private let palette: ThemePalette
     @Environment(\.gradientBackgroundsEnabled) private var gradientEnabled
+    @Environment(\.plozzDialogBackgroundOwned) private var dialogBackgroundOwned
 
     public init(palette: ThemePalette) {
         self.palette = palette
     }
 
     public var body: some View {
-        if gradientEnabled {
+        if dialogBackgroundOwned {
+            Color.clear
+        } else if gradientEnabled {
             AmbientGradientBackground(palette: palette)
         } else {
             palette.backgroundBase.ignoresSafeArea()

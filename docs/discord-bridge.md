@@ -172,3 +172,71 @@ Offline regression tests:
 python3 -m unittest discover -s tools/tests -p 'test_discord_bridge.py'
 actionlint .github/workflows/discord-bridge.yml
 ```
+
+## TestFlight announcements
+
+The separate **TestFlight Discord announcements** workflow uses the same Plozz
+bot in the [updates channel](https://discord.com/channels/1527028230106906704/1560139816757235762).
+It does not run Copilot, mirror conversations, or change the issue bridge.
+Publishing a GitHub release triggers a check; a roughly 15-minute schedule also
+handles delayed Apple review and builds uploaded outside Fastlane. GitHub may
+delay scheduled runs, so this is not an instant-delivery guarantee.
+
+App Store Connect is the authority: only nonexpired, `VALID` builds that belong
+to `Plozz External` and have external state `IN_BETA_TESTING` are announced.
+Uploads, internal availability, and pending review are not advertised as ready.
+The public beta link must still be enabled for that group.
+
+Each Apple version/build has one bot-owned message with its available platforms,
+Plozz display version, TestFlight link, and published GitHub release-notes link
+when available. Published releases read the catalog from their exact release tag
+and validate its release ID, build, and Apple version against TestFlight. The
+public date does not depend on the release entry already being merged into `main`.
+An unreadable or mismatched tagged catalog fails visibly rather than substituting
+Apple's retained marketing version.
+
+Before a GitHub release is published, the bot uses a matching entry from `main`
+if present; otherwise it announces only the build number, without inventing a
+public date. It directs readers to TestFlight's notes and adds the public date
+and release link on a later check. Platform availability and label corrections
+update the same message instead of creating another announcement. Dotted hotfix
+builds remain distinct and sort numerically.
+
+Setup:
+
+1. Configure repository Actions secrets `TESTFLIGHT_ASC_KEY_ID`,
+   `TESTFLIGHT_ASC_ISSUER_ID`, and `TESTFLIGHT_ASC_PRIVATE_KEY` (the complete
+   `.p8` PEM), alongside the existing `DISCORD_BOT_TOKEN`. A dedicated read-only
+   App Store Connect key is preferable; an existing release key may be reused
+   with the owner's approval, but retains its broader privileges. The script
+   only makes GET requests to Apple and signs short-lived JWTs in memory.
+2. Give the bot View Channel, Send Messages, Embed Links, and Read Message
+   History in the updates channel. Administrator is not required. The preflight
+   checks effective role/channel/member permissions before reading history.
+3. Set repository variable `TESTFLIGHT_DISCORD_MIN_BUILD` to the first build
+   that should be announced (initial deployment: `56`). Earlier builds are
+   excluded to prevent a backlog of old announcements.
+4. Merge the workflow to `main`, then manually run it in `check` mode. This
+   verifies both services and logs the proposed public messages without posting.
+5. Set `TESTFLIGHT_DISCORD_ENABLED=true` and run `sync`. Disable that variable to
+   stop automatic posts. Pushes run offline tests only and never receive secrets.
+
+Live jobs always execute the code on `main`, including release-triggered jobs;
+they do not run scripts from a release tag or a manually selected feature branch.
+Only release-catalog JSON is read from release tags; tagged code is never executed.
+They share a single concurrency group. Message footers and deterministic nonces
+provide retry deduplication without a database or expiring Actions cache. Existing
+bot messages are verified before writing; human copies of markers are ignored.
+Ambiguous writes are not retried immediately, and duplicate bot markers fail
+visibly. Keep the bot's messages/footers intact: deleting a message allows a later
+run to recreate it while its build remains eligible.
+
+Failures appear as failed Actions runs; they do not rebuild, reupload, change
+App Store Connect, or turn a successful app release into a failed release lane.
+Recover by fixing the reported credentials/permissions/API problem and rerunning
+this workflow, not `fastlane beta`.
+
+```bash
+python3 -m unittest discover -s tools/tests -p 'test_*discord*.py'
+actionlint .github/workflows/testflight-discord.yml
+```

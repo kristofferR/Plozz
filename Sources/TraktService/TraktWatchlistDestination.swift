@@ -210,7 +210,7 @@ public actor TraktWatchlistDestination:
             return TraktWatchlistIDs(tvdb: Int(externalID.value))
         case .trakt:
             return TraktWatchlistIDs(trakt: Int(externalID.value))
-        case .plex, .aniList, .myAnimeList, .aniDB:
+        case .plex, .aniList, .myAnimeList, .aniDB, .wetrakr:
             // Identities Trakt does not index. Never reached in practice, since
             // `capabilities.globalIdentityNamespaces` excludes them.
             return TraktWatchlistIDs()

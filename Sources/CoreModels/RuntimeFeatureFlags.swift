@@ -2,6 +2,7 @@ import Foundation
 
 public enum RuntimeFeatureFlag: String, CaseIterable, Codable, Hashable, Sendable {
     case universalWatchlist
+    case wetrakr
 }
 
 /// Typed runtime rollout values shared by both application shells. The flag

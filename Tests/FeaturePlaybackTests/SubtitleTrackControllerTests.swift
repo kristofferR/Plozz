@@ -209,6 +209,102 @@ final class SubtitleTrackControllerTests: XCTestCase {
 
     // MARK: - Load-time default: once-per-load guard
 
+    func testSDHDefaultsApplyAcrossEnginesAndPreserveManualChoice() throws {
+        for kind in [PlaybackEngineKind.native, .plozzigen] {
+            let (sut, host, engine) = makeSUT(engineKind: kind)
+            let regular = embeddedText(1)
+            var sdh = embeddedText(2)
+            sdh.isHearingImpaired = true
+            engine.subtitleTracks = [regular, sdh]
+            host.behavior.hearingImpairedPreference = .preferSDH
+            host.rule = .init(mode: .all, preferredLanguages: ["en"])
+            let request = PlaybackRequest(
+                item: .init(id: "movie", title: "Movie", kind: .movie),
+                streamURL: URL(string: "https://example.test/movie.mp4")!,
+                subtitleTracks: engine.subtitleTracks
+            )
+            host.request = request
+            sut.applyInitialSubtitleForNewLoad(for: request)
+            XCTAssertEqual(sut.selectedSubtitleTrackID, 2)
+            XCTAssertEqual(engine.lastSelectedSubtitleID, 2)
+            sut.selectSubtitleOption(id: 1)
+            sut.applyInitialSubtitleSelectionIfReady(for: request)
+            XCTAssertEqual(sut.selectedSubtitleTrackID, 1)
+            sut.selectSubtitleOption(id: PlayerTrackOption.offID)
+            sut.applyInitialSubtitleSelectionIfReady(for: request)
+            XCTAssertNil(sut.selectedSubtitleTrackID)
+        }
+    }
+
+    func testSDHSelectionWaitsForEmbeddedTracksAndManualOffWins() throws {
+        let (sut, host, engine) = makeSUT(engineKind: .plozzigen)
+        host.behavior.hearingImpairedPreference = .onlySDH
+        host.rule = .init(mode: .all, preferredLanguages: ["en"])
+        var sdh = imageSub(2)
+        sdh.isHearingImpaired = true
+        let request = PlaybackRequest(
+            item: .init(id: "movie", title: "Movie", kind: .movie),
+            streamURL: URL(string: "https://example.test/movie.mkv")!,
+            subtitleTracks: [embeddedText(1), sdh]
+        )
+        host.request = request
+        engine.status = .loading
+        sut.applyInitialSubtitleForNewLoad(for: request)
+        XCTAssertTrue(engine.subtitleSelections.isEmpty)
+        engine.subtitleTracks = [embeddedText(1), imageSub(2)]
+        sut.applyInitialSubtitleSelectionIfReady(for: request)
+        XCTAssertEqual(engine.lastSelectedSubtitleID, 2, "Provider SDH metadata must reach automatic bitmap selection")
+        XCTAssertTrue(host.liveSubtitles.rendersPrimary)
+        engine.subtitleTracks = []
+        sut.applyInitialSubtitleForNewLoad(for: request)
+        sut.selectSubtitleOption(id: PlayerTrackOption.offID)
+        engine.subtitleTracks = [sdh]
+        sut.applyInitialSubtitleSelectionIfReady(for: request)
+        XCTAssertNil(sut.selectedSubtitleTrackID)
+    }
+
+    func testStrictSDHAndRememberedOffNeverChooseRegularSubtitle() {
+        let (sut, host, engine) = makeSUT()
+        engine.subtitleTracks = [embeddedText(1)]
+        host.behavior.hearingImpairedPreference = .onlySDH
+        host.rule = .init(mode: .all, preferredLanguages: ["en"])
+        host.remembered = .language("en")
+        let request = PlaybackRequest(
+            item: .init(id: "episode", title: "Episode", kind: .episode),
+            streamURL: URL(string: "https://example.test/movie.mp4")!,
+            subtitleTracks: engine.subtitleTracks
+        )
+        host.request = request
+        sut.applyInitialSubtitleForNewLoad(for: request)
+        XCTAssertNil(sut.selectedSubtitleTrackID)
+        engine.subtitleTracks[0].isHearingImpaired = true
+        host.remembered = .off
+        sut.applyInitialSubtitleForNewLoad(for: request)
+        XCTAssertNil(sut.selectedSubtitleTrackID)
+    }
+
+    func testSDHSidecarWinsOverRegularEmbeddedTrack() throws {
+        let (sut, host, engine) = makeSUT(engineKind: .plozzigen)
+        var sidecar = textSidecar(2)
+        sidecar.isExternal = true
+        sidecar.isHearingImpaired = true
+        engine.subtitleTracks = [embeddedText(1)]
+        host.behavior.hearingImpairedPreference = .preferSDH
+        host.rule = .init(mode: .all, preferredLanguages: ["en"])
+        let request = PlaybackRequest(
+            item: .init(id: "movie", title: "Movie", kind: .movie),
+            streamURL: URL(string: "https://example.test/movie.mkv")!,
+            subtitleTracks: [embeddedText(1), sidecar]
+        )
+        host.request = request
+        sut.applyInitialSubtitleForNewLoad(for: request)
+        let selected = try XCTUnwrap(sut.selectedSubtitleTrackID)
+        XCTAssertGreaterThanOrEqual(selected, 900_000)
+        XCTAssertTrue(try XCTUnwrap(sut.subtitleTrack(id: selected)).isSDHSubtitle)
+        XCTAssertTrue(engine.lastSubtitleSelectionCleared)
+        host.overlay.cancelAll()
+    }
+
     func testInitialDefaultAppliesOncePerLoad() {
         let (sut, host, engine) = makeSUT(engineKind: .native)
         host.remembered = .off                       // deterministic default route → clear

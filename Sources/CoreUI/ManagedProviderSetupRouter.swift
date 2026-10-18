@@ -13,6 +13,7 @@ public final class ManagedProviderSetupRouter {
     }
 
     public var request: Request?
+    public var addressAccount: Account?
     public init() {}
     public func connectIPTV(
         playlist: LiveTVPlaylistSource? = nil, account: Account? = nil, mode: IPTVCredential.Mode = .playlist

@@ -6,6 +6,93 @@ cache that every feature module reuses on tvOS and iOS/iPadOS — guarded behind
 
 ## Responsibility
 
+- **Reorder-only lists** — `LiftableReorderList(allowsHiding: false)` presents
+  enabled entries only and keeps them enabled through native dragging, remote
+  lift-and-move and context-menu movement. It has no Hidden divider or Hide/Show
+  actions. Existing callers keep the reorder-and-hide behavior by default.
+
+- **Playback failures** — `PlaybackFailureView` owns the full-screen TV/mobile
+  error layout, bounded symbol inline with the heading, readable summary, adaptive
+  native actions and optional Details sheet. Hosts own retry and dismissal; the error surface owns
+  its dark palette without changing browsing themes. Its opaque themed surface
+  stays legible over video without depending on glass or motion.
+  `PlaybackDiagnosticDetailsView` is shared by on-demand playback, Live TV and
+  IPTV setup. It renders and shares only the structured `PlaybackDiagnosticReport`,
+  including app/OS identity; it is not the continuously sampled diagnostics HUD.
+
+- **Touch hero actions** — `HeroActionRow` preserves readable intrinsic widths
+  before falling back to a vertical arrangement. `TouchHeroActionButtonStyle`
+  lets labels wrap and uses bounded 24pt corners so tall accessibility-size
+  content stays inside the button surface. Circular actions retain their 48pt
+  touch targets and cap glyph scaling at XXX Large; text buttons continue to
+  honor the full accessibility text size.
+
+- **Setup presentation** — `ConnectionCodeView` shares the readable monospaced
+  code panel across server sign-in and device pairing. `SetupCodeComparisonView`
+  keeps both devices' confirmation copy and code treatment consistent while
+  callers retain confirmation and cancellation ownership. `SetupSectionCard`
+  groups methods and counted summaries without styling native controls.
+  `SetupSummaryView` scrolls the heading, full server names, and supplied profile
+  grid while keeping Done/Continue reachable. TV rows and profile tiles provide
+  native focus targets so the remote can reach long summaries. TV summaries scroll
+  to the page's top edge, with initial header spacing inside the scroll content
+  rather than an inset clipping boundary. `VerticalEdgeFadeMask` softens only the
+  bottom above the fixed action while more content remains; the final rows stay
+  undimmed at the end.
+
+- **Reduce Motion** — `ReducedMotion` suppresses explicit and implicit SwiftUI
+  animations at the TV app root without removing layout offsets or replacing
+  view identity. Native hero artwork uses a crossfade instead of a parallax wipe;
+  changing the system preference finishes an in-flight wipe. Timeline-driven
+  liquid backgrounds and player-menu marquees also stop their decorative motion.
+  Native focus feedback and meaningful playback/countdown progress remain available.
+
+- **First-use choices** — `FirstUseChoiceView` shares the Live TV preview and
+  playback-version introduction heading, native actions, and Settings reminder.
+  Hosts own persistence and cancellation; dismissing a version prompt never
+  records a mode. Mobile uses a vertically stacked, scrolling adaptation.
+
+- **Settings row typography** — `SettingsRowMetrics.titleFont` is the shared
+  body-size label for navigation rows, TV switch variants, and labeled controls.
+  Keep headings separate; do not give toggles a larger headline font or add
+  per-screen compensating font overrides. Native iOS/iPadOS switches retain
+  system sizing. TV option/segmented pickers use the same body-sized labels;
+  `settingsHelperText()` uses the smaller caption size for explanatory copy
+  (tvOS footnote and body render at the same size).
+- **Settings form geometry** — `settingsFormRowLayout()` gives links, On/Off
+  rows, and compact inline steppers the same content padding and minimum height.
+  TV form groups use a uniform 16pt focus inset. The contained focus radius is
+  the 28pt group radius minus that inset (12pt), including illustrated groups.
+  Headings, compact labels, helper copy and ordinary dividers share the control
+  text keyline: 16pt group inset plus 12pt row padding. Groups provide
+  `settingsFormTextInset`; `settingsFormTextLayout()` consumes it for static
+  content, while padded focus-row labels reset it to prevent double insets.
+  Outside a grouped form the text helpers add no padding. Legacy uncontained
+  checkmark groups retain their separate focus-bleed geometry.
+  Standalone page links use the `.navigation` row role: idle and focused surfaces
+  both read the same 28pt radius, with no focus bleed or corner tightening.
+  Adjacent page links have an 8pt gap; separate control sections keep their larger gap.
+  Page titles and Back belong inside the scrolling content, not in a fixed
+  header strip that shortens the viewport. `SettingsPageHeader` supplies their
+  horizontal Back/title layout, not a separate pinned container. `SettingsBackButton`
+  selects the shared native bordered capsule while callers retain navigation and
+  focus ownership. The full-width header is a native focus section, so Up from
+  right-aligned controls can reach the leading Back button. The full-screen subtitle editor is
+  an explicit exception: its stationary heading sits above a scrolling tool pane.
+  TV Settings categories and descendants share the centered
+  `SettingsFormMetrics.pageWidth`. `SettingsPageStack` keeps that width throughout
+  navigation; only explicitly full-width destinations use the whole viewport.
+- **Settings page navigation** — the TV workspace uses `SettingsPageStack` for
+  the retained category list and its equally sized child pages. Only the current page owns input,
+  accessibility and Back; a pop restores the originating link's focus after the
+  shared 420ms eased fade with 64pt directional travel, rather than crossing the
+  screen. Retained parents and inserted children use the same motion and keep
+  their final layout sizes throughout. Input and native entry/return focus transfer
+  only after the fade completes, so overlapping pages cannot steal focus.
+  `SettingsPageLink`, `SettingsPageDismiss` and
+  boolean destinations retain native navigation outside this workspace,
+  including iOS/iPadOS. `SettingsPageMotion` is also used by nested form and
+  subtitle panels, with Reduce Motion respected by their hosts.
 - **Native action controls** — `plozzActionButton` only selects the system
   glass/glass-prominent styles, or bordered styles on older systems. It adds no
   font, padding, capsule, border, focus effect or press scaling. Setup, profile/PIN,
@@ -20,6 +107,38 @@ cache that every feature module reuses on tvOS and iOS/iPadOS — guarded behind
   keeps visible title-and-icon labels and uses the same `playerGlassButton`
   treatment, including native menus. Only the existing reduced-transparency
   playback path draws the shared frosted fallback.
+- **Settings steppers** — TV makes the whole labeled row one focus target using
+  the existing `SettingsFormButtonStyle`, including its helper, persistent minus/plus cues and
+  `SettingsRowMetrics.titleFont` value. Labels must be supplied to the shared
+  stepper, not placed outside its focus target. Left/Right adjusts,
+  Select increments, and Up/Down remains native focus navigation. Bounds clamp
+  unless a caller explicitly requests wrapping. Width reserves the longest value.
+  `SettingsAdjustmentFocusScope` shares the player's horizontal input ownership,
+  held-press cancellation, and navigation-rail protection. VoiceOver adjustment
+  uses the same stepping operation. Mobile retains separate buttons.
+- **Grouped Settings rows** — `SettingsControlRows` inserts palette separators
+  between tvOS rows sharing a container, never after the last visible row. Keep
+  a control and its helper in one child view; the divider belongs after both.
+  Conditional rows keep their SwiftUI identity, and separators add no focus or
+  accessibility stops. Focus fills stay within row bounds, with the shared
+  8pt `dividerFocusClearance` on each side of the line. Icon-led category lists
+  start their dividers at `SettingsRowMetrics.iconTitleInset`, sharing the actual
+  row icon width, gap and content padding; leading alignment also follows RTL.
+  Illustrated Settings groups instead use a 16pt gap and 16pt padding without
+  internal dividers. Grouped steppers inherit
+  the same leading inset as their neighboring rows, with no extra resting chip.
+  Mobile keeps its existing stack/native-list presentation.
+- **Long Settings labels** — `LabeledSettingRow` preserves the aligned horizontal
+  layout when it fits. On tvOS, longer copy switches to a wrapping label above
+  its control rather than overlapping it or reducing the shared body font.
+  Mobile retains its existing layout.
+- **Grouped settings navigation** — `SettingsDisclosureLabel` supplies a
+  direction-aware disclosure indicator and optional value without adding row
+  padding. `SettingsSectionGroup` owns those insets; do not nest a separately
+  padded `SettingsRowLabel` in it. Inline actions use `plozzActionButton`, not
+  the group's full-width row-button style. Place a standalone native action in
+  a layout container so its accessibility bounds do not include the row's
+  noninteractive space.
 - **Unwatched episode counts** — a default-on profile preference replaces the
   top-right watch-status mark with a number on series/season cards.
   Episode counts use charcoal tiles with white digits so they stay quieter than
@@ -79,7 +198,7 @@ cache that every feature module reuses on tvOS and iOS/iPadOS — guarded behind
   5%-white wash in Dark and Black, or a 5%-black wash in Light, so they remain
   distinct without replacing the gradient's colour. SwiftUI surfaces keep their
   shadow and a matching hairline edge. Gradient Off or Reduce Transparency restores the original solid
-  surface and border; unrelated raised cards and dialogs remain unchanged.
+  surface and border; unrelated raised cards remain unchanged.
   PIN keys retain their existing focus, press, and hover treatment. Their resting
   gradient fill and edge also apply on systems before Liquid Glass.
   The detail information band retains its darker 40%-opaque surface.
@@ -91,10 +210,25 @@ cache that every feature module reuses on tvOS and iOS/iPadOS — guarded behind
   alpha. The texture is created only when a card needs it, its longest edge is
   capped at 480 pixels, and it is rebuilt only for palette or viewport size
   changes. Scrolling updates each background's sampling rectangle, not its
-  texture or foreground content. Native focus,
+  texture or foreground content. `settingsPageBackground()` provides the same
+  page-aligned texture to Settings' focusable information cards, without the
+  detail page's darker information band. Nested workspace pages inherit that
+  background instead of painting another gradient. Native focus,
   clipping and text remain TVUIKit-owned.
   Text stays opaque and native focus geometry is unchanged. Gradient Off or
   Reduce Transparency restores both the solid band and solid card fills.
+- **App-owned dialogs** — `plozzSheet` owns one opaque, theme-aware surface:
+  the native presentation background on iPhone/iPad, and the existing rounded
+  overlay card over `PlozzDialogBackdrop` on tvOS. TV uses a clear native
+  full-screen presentation because its glass sheet leaves refracted edge strips
+  around custom backgrounds. The shared surface honors Gradient Backgrounds in
+  Dark, Black, and Light without adding blur, including with Reduce Transparency.
+  `AppBackground` and `SettingsPageBackground` defer to that surface inside a
+  dialog rather than repainting smaller rectangles over it. Use `.floatingCard`
+  only for content already owning its dimmer and `.overlay` card.
+  `plozzFullScreenCover` resets background ownership for nested page flows;
+  bindings, dismissal callbacks, and explicit preferred color schemes remain
+  caller-owned. Native alerts and confirmation dialogs remain system-styled.
 - **Focusable building blocks** — focus-aware buttons, cards, tab bars,
   parallax containers, brand QR code rendering, code-font numerals.
   Native card focus observation is separate from explicit focus requests.
@@ -136,9 +270,22 @@ cache that every feature module reuses on tvOS and iOS/iPadOS — guarded behind
   Entry-gate state remains observable for episode rows; ordinary Home rows
   retain native column-aligned entry and cover/return behavior.
 - **Grouped settings interactions** — `SettingsSectionGroup` uses explicit
-  menu pickers on iOS. Custom value menus use `SettingsMenuLabel` to show
+  native switch toggles and menu pickers on iOS/iPadOS. Standalone mobile
+  settings/Live TV controls and the shared `SettingsSwitchToggleStyle` also
+  use the system switch; do not draw a replacement track or knob, wrap the
+  toggle in a button, or override its native animation/accessibility.
+  The switch alone clears inherited tint so monochrome page accents do not
+  hide its thumb against the enabled track; neighboring controls keep their tint.
+  tvOS uses native On/Off toggles with shared settings row typography, not drawn
+  switch tracks. Focus-gated and side-effectful action rows retain their owned
+  buttons and show the same On/Off text.
+  Custom value menus use `SettingsMenuLabel` to show
   the selected value with up/down chevrons, matching editable pickers rather
   than read-only `LabeledContent`. Navigation keeps its right-facing chevron.
+  Unavailable settings use a natively disabled control with a short explanation.
+  Share-only streaming quality shows a disabled **Original quality** picker with
+  **Unavailable for network shares.** beneath it; saved server-quality preferences
+  are left untouched. Compatible-server quality menus remain enabled.
   A visual group occupies one native List cell; automatic
   pickers can promote their menu to that whole cell and intercept neighboring
   navigation links or controls. Keep picker activation local without replacing
@@ -303,6 +450,11 @@ cache that every feature module reuses on tvOS and iOS/iPadOS — guarded behind
   The alpha-derived highlight mask produced an offset crescent at extreme tilt.
   Continue Watching, landscape/square artwork, transparent landscape library
   covers keep their no-internal-zoom alpha-masked path.
+  Alpha-masked images arm native enlargement only on actual focus and release
+  it after the native defocus animation. This keeps newly mounted episode
+  previews at their 480pt artwork width with 40pt gaps, rather than painting
+  every preview at its enlarged focus width. Portraits keep UIKit's mask active
+  at rest so opaque artwork retains its native rounded corners.
   Portrait artwork and placeholders are opaque rectangles; UIKit alone rounds
   the visible surface. Pre-rounded alpha pixels beneath that native mask create
   a second corner silhouette that can separate from the highlight. Transparent
@@ -334,7 +486,11 @@ cache that every feature module reuses on tvOS and iOS/iPadOS — guarded behind
   images remain identical across focus changes: no late bitmap replacement,
   delayed number repositioning, custom poster scale, spring, duration or timer.
   Background/foreground indicator layers share the existing bounded bitmap cache;
-  only data, environment or size changes render new pixels. Mobile and
+  foreground identity uses the visible status and badge geometry, not unrelated
+  playback progress or download state. Different posters with identical badges
+  reuse the same concrete pixels; status/count, environment, size and scale
+  changes still invalidate them. Background and combined layers retain all
+  progress, download and scrim inputs. Mobile and
   landscape cards keep their combined indicator rendering.
   The button keeps the existing artwork slot and committed-bounds bitmap
   preparation, preserving row pitch and captions.
@@ -342,7 +498,17 @@ cache that every feature module reuses on tvOS and iOS/iPadOS — guarded behind
   native image or trigger artwork/status rendering. A mounted poster prepares
   its latest inputs at the committed UIKit size, with a per-poster autorelease
   pool for temporary raster surfaces. Creation uses shared loading surfaces
-  (evictable cache targets: 8 entries, 4 MiB), not per-item composition.
+  (bounded to 8 entries, 4 MiB), not per-item composition.
+  Cold source-image conversion runs on the same two-operation worker lane as
+  Browse, never synchronously inside native poster layout. The existing native
+  image view receives the finished pixels without replacing its focus owner.
+  Identical pending requests coalesce; replacement, detachment and dismantling
+  cancel work, and generation checks reject stale completions. A replacement
+  shows a safe placeholder rather than the previous title or unprotected artwork.
+  SwiftUI indicator and protected/extended treatment preparation still requires
+  the main actor. Final Home and Browse bitmaps share one memory-budgeted cache;
+  warm returning artwork paints immediately, and a memory warning prevents
+  in-flight work from repopulating a purged cache.
   Ordinary artwork uses one final normalized/composited surface rather than
   retaining an additional unmarked full-size copy per card. Identical status
   presentations share concrete pixels in a separate 24 MiB/64-entry cache;
@@ -356,7 +522,7 @@ cache that every feature module reuses on tvOS and iOS/iPadOS — guarded behind
   Ordinary watch flags/check badges use opaque white; episode-count tiles keep
   their dark fill and white text.
   This keeps lazy-row estimation out of the expensive rendering path without
-  delaying first paint through another observable loading state.
+  adding another observable loading state to the row.
   Portrait television rows fit six full cards and a quarter of the seventh at
   standard display size. `PlozzMetrics.portraitRowSlotWidth` uses the actual
   navigation-safe viewport and visible card margins, shared by loaded cards,

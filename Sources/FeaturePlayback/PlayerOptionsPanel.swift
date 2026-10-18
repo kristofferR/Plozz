@@ -45,6 +45,7 @@ struct PlayerOptionsPanel: View {
     let maximumHeight: CGFloat
 
     @Environment(\.plozzHDRDisplayActive) private var hdrDisplayActive
+    @Environment(\.locale) private var locale
 
     /// The panel body's measured natural height, driving the glass box's height.
     @State private var bodyHeight: CGFloat
@@ -408,7 +409,7 @@ struct PlayerOptionsPanel: View {
         switch category {
         case .version:
             VStack(alignment: .leading, spacing: 12) {
-                PlayerMenuRowStack(rows: Self.versionRows(model: model, close: close), palette: palette, focus: $focus)
+                PlayerMenuRowStack(rows: Self.versionRows(model: model, locale: locale, close: close), palette: palette, focus: $focus)
                 Text("Resumes at the current position. Different cuts may have different timing.")
                     .font(.caption)
                     .plozzForeground(.secondary)
@@ -747,13 +748,19 @@ struct PlayerOptionsPanel: View {
         return rows
     }
 
-    static func versionRows(model: PlayerControlsModel, close: @escaping () -> Void) -> [TrackRow] {
+    static func versionRows(
+        model: PlayerControlsModel, locale: Locale = .current, close: @escaping () -> Void
+    ) -> [TrackRow] {
         model.versions.options.enumerated().map { index, option in
-            TrackRow(
+            let presentation = MediaVersion.PickerPresentation(option.version, locale: locale)
+            return TrackRow(
                 id: index, header: nil,
-                title: option.version.displayLabel.map { Text(verbatim: $0) } ?? Text("Original"),
-                subtitle: option.version.fileName.map { Text(verbatim: $0) },
+                title: presentation.title.map { Text(verbatim: $0) } ?? Text("Original"),
+                subtitle: presentation.releaseName.map { Text(verbatim: $0) },
                 isSelected: option.isSelected, isToggle: false,
+                facts: presentation.supplementalFacts.isEmpty ? nil
+                    : Text(verbatim: presentation.supplementalFacts.joined(separator: " · ")),
+                titleLineLimit: nil,
                 action: {
                     withAnimation { close() }
                     model.versions.select(option.id)

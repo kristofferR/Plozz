@@ -1,6 +1,6 @@
 // Plozz pairing links Worker.
 //
-// Serves pairing, Trakt authentication, and community shortcuts (see wrangler.toml routes):
+// Serves pairing, tracker authentication, and community shortcuts (see wrangler.toml routes):
 //   1. /.well-known/apple-app-site-association
 //        The Apple App Site Association (AASA) file that lets iOS treat
 //        https://plozz.app/pair as a Universal Link into the Plozz app.
@@ -12,7 +12,7 @@
 //        Safari loads this page, which explains how to get Plozz and finish setup.
 //
 // Everything else on plozz.app is still served by the existing `plozz-website`
-// Cloudflare Pages project — this Worker claims only the listed routes.
+// Cloudflare Worker — this Worker claims only the listed routes.
 
 const APP_ID = "N8Z5T4AK3X.com.thatcube.Plozz";
 
@@ -20,7 +20,7 @@ const APP_ID = "N8Z5T4AK3X.com.thatcube.Plozz";
 // Store release). The /pair page adapts its copy if this is ever emptied.
 const APP_STORE_URL = "https://testflight.apple.com/join/EKfReNMu";
 const SHORTLINKS = [
-  { path: "/discord", target: "https://discord.gg/YkXnmB8rcF" },
+  { path: "/discord", target: "https://discord.gg/34tvRebP5Q" },
   { path: "/github", target: "https://github.com/brandomoore/Plozz" },
 ];
 
@@ -73,11 +73,15 @@ export default {
       });
     }
 
-    if (url.pathname === "/auth/trakt/callback") {
+    const tracker = {
+      "/auth/trakt/callback": "Trakt",
+      "/auth/wetrakr/callback": "WeTrakr",
+    }[url.pathname];
+    if (tracker) {
       // ASWebAuthenticationSession intercepts this navigation on a verified app.
       // Never echo, persist or exchange the authorization code on the server.
       return new Response(
-        "Return to Plozz to finish connecting Trakt. If Plozz did not receive the sign-in, cancel and start Connect Trakt again in the app.",
+        `Return to Plozz to finish connecting ${tracker}. If Plozz did not receive the sign-in, cancel and start Connect ${tracker} again in the app.`,
         {
           headers: {
             "content-type": "text/plain; charset=utf-8",
@@ -90,7 +94,7 @@ export default {
       );
     }
 
-    // The wildcards also catch similarly prefixed pages; keep those on Pages.
+    // The wildcards also catch similarly prefixed pages; keep those on the website.
     if (SHORTLINKS.some(({ path }) => url.pathname.startsWith(path))) {
       return fetch(request);
     }

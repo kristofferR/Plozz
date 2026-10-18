@@ -315,11 +315,16 @@ private struct IPTVConnectionProgress: View {
 
 private struct IPTVConnectionStatus: View {
     let model: IPTVAuthViewModel
+    @State private var showsDetails = false
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let issue = model.issue {
                 Label(issue, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.red)
+                if model.failureReport != nil {
+                    Button("Details") { showsDetails = true }
+                        .accessibilityIdentifier("iptv-failure-details")
+                }
             }
 
             Button(action: model.connect) {
@@ -328,6 +333,11 @@ private struct IPTVConnectionStatus: View {
             .plozzActionButton(role: .primary)
             .disabled(!model.canConnect)
             .accessibilityIdentifier("iptv-connect")
+        }
+        .plozzSheet(isPresented: $showsDetails) {
+            if let report = model.failureReport {
+                PlaybackDiagnosticDetailsSheet(report: report)
+            }
         }
     }
 }

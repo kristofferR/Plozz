@@ -41,7 +41,7 @@ public struct LiveTVServerChannelReference: Equatable, Sendable {
 public enum LiveTVServerImportError: Error, Equatable, Sendable {
     case accountUnavailable, permissionDenied, unsupportedAPI, unsupportedPlaybackMode
     case tunerUnavailable, serviceUnavailable, invalidCatalog, invalidGuide
-    case subscriptionRequired, guideRequired
+    case subscriptionRequired, guideRequired, guideUnavailable
     case configurationNotSaved
 
     public var userDescription: LocalizedStringResource {
@@ -50,6 +50,7 @@ public enum LiveTVServerImportError: Error, Equatable, Sendable {
         case .permissionDenied: "This server account doesn't have permission to use Live TV."
         case .subscriptionRequired: "This server requires an active subscription for Live TV."
         case .guideRequired: "This server requires a configured guide before this channel can play."
+        case .guideUnavailable: "Guide unavailable"
         case .configurationNotSaved: "The discovered Live TV source couldn't be saved. Try again."
         case .unsupportedAPI: "This server doesn't support the Live TV API used by Plozz."
         case .unsupportedPlaybackMode: "This server's Live TV playback mode isn't supported."
@@ -81,6 +82,21 @@ public enum LiveTVServerImportError: Error, Equatable, Sendable {
         case .tunerUnavailable: return .tunerUnavailable
         case .invalidChannel: return .invalidCatalog
         case .invalidGuideWindow: return .invalidGuide
+        }
+    }
+
+    static func sanitizedGuide(_ error: any Error) -> Self {
+        if error is DecodingError { return .invalidGuide }
+        if let error = error as? AppError {
+            switch error {
+            case .invalidResponse, .decoding: return .invalidGuide
+            default: break
+            }
+        }
+        let failure = sanitized(error, fallback: .guideUnavailable)
+        switch failure {
+        case .unsupportedAPI, .serviceUnavailable: return .guideUnavailable
+        default: return failure
         }
     }
 }

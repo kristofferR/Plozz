@@ -184,6 +184,20 @@ public struct SiloAuthentication: Sendable {
             accessToken: try credential.encoded())
     }
 
+    /// Dispose of a login used only to approve an alternate address. This never
+    /// touches the saved account's existing rotating credential.
+    public func endVerificationSession(_ session: UserSession) async throws {
+        let credential = try SiloCredential.decode(session.accessToken)
+        try await endVerificationLogin(accessToken: credential.accessToken)
+    }
+
+    public func endVerificationLogin(accessToken: String) async throws {
+        _ = try await http.send(
+            SiloAPI.endpoint("/auth/logout", method: .post, token: accessToken),
+            baseURL: baseURL
+        )
+    }
+
     func request<T: Decodable>(
         _ path: String, token: String? = nil, profileID: String? = nil,
         profileToken: String? = nil, query: [URLQueryItem] = []

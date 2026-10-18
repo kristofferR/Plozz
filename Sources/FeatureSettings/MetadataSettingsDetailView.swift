@@ -269,6 +269,7 @@ public struct MetadataSettingsDetailView: View {
                     selection: orderModeBinding,
                     title: orderModeTitle
                 )
+                .settingsWorkspaceEntry()
 
                 Text("Shared by all profiles.")
                     .font(.caption)
@@ -429,7 +430,7 @@ public struct MetadataSettingsDetailView: View {
 
     private var diagnosticsLink: some View {
         SettingsPanel(contentPadding: .settingsPanelRowContent) {
-            NavigationLink(value: SettingsRoute.metadataDiagnostics) {
+            SettingsRouteLink(value: SettingsRoute.metadataDiagnostics) {
                 SettingsRowLabel(
                     icon: "chart.bar.xaxis",
                     title: "Diagnostics"
@@ -667,19 +668,14 @@ private struct MetadataDiagnosticsCachePanel: View {
             title: "Cache",
             contentPadding: .settingsPanelRowContent
         ) {
-            VStack(spacing: 16) {
+            SettingsControlRows(nonTVSpacing: 16) {
+                #if os(tvOS)
+                budgetControls
+                #else
                 HStack(alignment: .top, spacing: 28) {
-                    budgetControl(
-                        title: "Artwork",
-                        options: Self.artworkBudgetOptions,
-                        selection: artworkBudgetBinding
-                    )
-                    budgetControl(
-                        title: "Lookups",
-                        options: Self.metadataBudgetOptions,
-                        selection: metadataBudgetBinding
-                    )
+                    budgetControls
                 }
+                #endif
 
                 Button(role: .destructive) {
                     confirmClear = true
@@ -707,17 +703,30 @@ private struct MetadataDiagnosticsCachePanel: View {
         }
     }
 
+    @ViewBuilder private var budgetControls: some View {
+        budgetControl(
+            title: "Artwork", options: Self.artworkBudgetOptions, selection: artworkBudgetBinding
+        )
+        budgetControl(
+            title: "Lookups", options: Self.metadataBudgetOptions, selection: metadataBudgetBinding
+        )
+    }
+
     private func budgetControl(
         title: LocalizedStringResource,
         options: [Int],
         selection: Binding<Int>
     ) -> some View {
+        #if os(tvOS)
+        SettingsStepper(options: options, selection: selection, label: title) { "\($0) MB" }
+        #else
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.headline.weight(.semibold))
             SettingsStepper(options: options, selection: selection) { "\($0) MB" }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        #endif
     }
 
     private var artworkBudgetBinding: Binding<Int> {

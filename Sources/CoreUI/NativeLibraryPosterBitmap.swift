@@ -39,6 +39,10 @@ struct NativePosterOverlay {
 
 @MainActor
 enum NativePosterArtworkBitmap {
+    #if DEBUG
+    nonisolated private static let compositionCounter = OSAllocatedUnfairLock(initialState: (total: 0, main: 0))
+    static var compositionCounts: (total: Int, main: Int) { compositionCounter.withLock { $0 } }
+    #endif
     struct IndicatorKey: Equatable {
         let inputs: NativePosterIndicators
         let metrics: PlozzMetrics
@@ -53,6 +57,29 @@ enum NativePosterArtworkBitmap {
         let dynamicTypeSize: DynamicTypeSize
         let legibilityWeight: LegibilityWeight?
         let layer: NativePosterIndicatorLayer
+
+        private enum RenderedInputs: Equatable {
+            case complete(NativePosterIndicators)
+            case foreground(MediaPlaybackIndicatorPresentation.Status?, inset: CGFloat, cornerRadius: CGFloat?)
+        }
+
+        private var renderedInputs: RenderedInputs {
+            guard layer == .foreground, case .playback(let inputs) = inputs else {
+                return .complete(inputs)
+            }
+            // Progress, downloads and bottom scrims are not drawn in this layer.
+            return .foreground(status, inset: inputs.badgeInset, cornerRadius: inputs.artworkCornerRadius)
+        }
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.renderedInputs == rhs.renderedInputs
+                && lhs.metrics == rhs.metrics && lhs.palette == rhs.palette
+                && lhs.watchIndicator == rhs.watchIndicator && lhs.showsEpisodeCount == rhs.showsEpisodeCount
+                && lhs.seerConnected == rhs.seerConnected && lhs.locale == rhs.locale
+                && lhs.layoutDirection == rhs.layoutDirection && lhs.colorScheme == rhs.colorScheme
+                && lhs.contrast == rhs.contrast && lhs.dynamicTypeSize == rhs.dynamicTypeSize
+                && lhs.legibilityWeight == rhs.legibilityWeight && lhs.layer == rhs.layer
+        }
 
         init(
             _ indicators: NativePosterIndicators, environment: EnvironmentValues,
@@ -73,12 +100,16 @@ enum NativePosterArtworkBitmap {
             self.layer = layer
         }
 
-        var overlayPlacement: NativePosterOverlayPlacement? {
+        private var status: MediaPlaybackIndicatorPresentation.Status? {
             guard case .playback(let inputs) = inputs, inputs.rendersStatus else { return nil }
-            switch MediaPlaybackIndicatorPresentation.status(
+            return MediaPlaybackIndicatorPresentation.status(
                 for: inputs.playback, hidesStatus: inputs.hidesStatus, indicator: watchIndicator,
                 showsEpisodeCount: showsEpisodeCount, seerConnected: seerConnected
-            ) {
+            )
+        }
+
+        var overlayPlacement: NativePosterOverlayPlacement? {
+            switch status {
             case .episodeCount:
                 return watchIndicator == .unwatched ? .croppedCount : .floating
             case .library, .watched:
@@ -101,22 +132,30 @@ enum NativePosterArtworkBitmap {
         return CGSize(width: 2, height: 2 * size.height / size.width)
     }
 
-    private static let placeholders: NSCache<NSString, UIImage> = {
-        let cache = NSCache<NSString, UIImage>()
-        cache.countLimit = 8
-        cache.totalCostLimit = 4 * 1024 * 1024
-        return cache
-    }()
+    private static var placeholders: [(key: String, image: UIImage, cost: Int)] = []
+    private static var placeholderBytes = 0
 
     static func placeholder(size: CGSize, scale: CGFloat, clipsToArtwork: Bool = true) -> UIImage {
-        let key = "\(size.width)x\(size.height)@\(scale):\(clipsToArtwork)" as NSString
-        if let cached = placeholders.object(forKey: key) { return cached }
+        let key = "\(size.width)x\(size.height)@\(scale):\(clipsToArtwork)"
+        if let index = placeholders.firstIndex(where: { $0.key == key }) {
+            let entry = placeholders.remove(at: index)
+            placeholders.append(entry)
+            return entry.image
+        }
         guard let image = image(
             source: nil, size: size, scale: scale,
             backgroundColor: .darkGray, clipsToArtwork: clipsToArtwork
         ) else { return placeholder }
         if let pixels = image.cgImage {
-            placeholders.setObject(image, forKey: key, cost: pixels.bytesPerRow * pixels.height)
+            let cost = pixels.bytesPerRow * pixels.height
+            if cost <= 4 * 1024 * 1024 {
+                _ = indicatorMemoryWarning
+                while !placeholders.isEmpty && (placeholderBytes + cost > 4 * 1024 * 1024 || placeholders.count >= 8) {
+                    placeholderBytes -= placeholders.removeFirst().cost
+                }
+                placeholders.append((key, image, cost))
+                placeholderBytes += cost
+            }
         }
         return image
     }
@@ -140,6 +179,8 @@ enum NativePosterArtworkBitmap {
         MainActor.assumeIsolated {
             indicatorCache.removeAll()
             indicatorBytes = 0
+            placeholders.removeAll()
+            placeholderBytes = 0
         }
     }
 
@@ -193,26 +234,81 @@ enum NativePosterArtworkBitmap {
             PlozzLog.app.error("Unable to prepare native poster artwork with invalid dimensions")
             return nil
         }
-        let gradient: CGGradient?
-        if let scrim = artworkBackground.scrim {
-            let stops = scrim.stops
-            guard let resolved = CGGradient(
-                colorsSpace: CGColorSpaceCreateDeviceRGB(),
-                colors: stops.map { UIColor($0.color).cgColor } as CFArray,
-                locations: stops.map(\.location)
-            ) else {
-                PlozzLog.app.error("Unable to prepare native artwork legibility gradient")
-                return nil
-            }
-            gradient = resolved
-        } else {
-            gradient = nil
-        }
+        let gradient = gradient(for: artworkBackground)
+        guard artworkBackground.scrim == nil || gradient != nil else { return nil }
         return compose(
             source: source, overlay: overlay, size: size, scale: scale, backgroundColor: backgroundColor,
             clipsToArtwork: clipsToArtwork, dimming: artworkBackground.dimming, gradient: gradient,
             drawOverlay: drawOverlay
         )
+    }
+
+    static func composite(
+        source: UIImage?, overlay: UIImage?, size: CGSize, scale: CGFloat,
+        backgroundColor: UIColor?, clipsToArtwork: Bool,
+        artworkBackground: NativePosterArtworkBackground
+    ) async -> UIImage? {
+        guard size.width.isFinite, size.height.isFinite, scale.isFinite,
+              size.width > 0, size.height > 0, scale > 0,
+              source.map({ $0.size.width > 0 && $0.size.height > 0 }) ?? true else {
+            PlozzLog.app.error("Unable to prepare native poster artwork with invalid dimensions")
+            return nil
+        }
+        let gradient = gradient(for: artworkBackground)
+        guard artworkBackground.scrim == nil || gradient != nil else { return nil }
+        return await composeOffMain(
+            source: source, overlay: overlay, size: size, scale: scale,
+            backgroundColor: backgroundColor, clipsToArtwork: clipsToArtwork,
+            dimming: artworkBackground.dimming, gradient: gradient
+        )
+    }
+
+    private static func gradient(for background: NativePosterArtworkBackground) -> CGGradient? {
+        guard let scrim = background.scrim else { return nil }
+        let stops = scrim.stops
+        let gradient = CGGradient(
+            colorsSpace: CGColorSpaceCreateDeviceRGB(),
+            colors: stops.map { UIColor($0.color).cgColor } as CFArray,
+            locations: stops.map(\.location)
+        )
+        if gradient == nil {
+            PlozzLog.app.error("Unable to prepare native artwork legibility gradient")
+        }
+        return gradient
+    }
+
+    // Share one bounded lane with library cards rather than occupying Swift's
+    // cooperative executor or starting an unbounded task per visible poster.
+    nonisolated private static let composeQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "Plozz native poster composition"
+        queue.maxConcurrentOperationCount = 2
+        queue.qualityOfService = .userInitiated
+        return queue
+    }()
+
+    static func composeOffMain(
+        source: UIImage?, overlay: UIImage?, size: CGSize, scale: CGFloat,
+        backgroundColor: UIColor?, clipsToArtwork: Bool, dimming: CGFloat = 0, gradient: CGGradient? = nil
+    ) async -> UIImage? {
+        let cancelled = OSAllocatedUnfairLock(initialState: false)
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                composeQueue.addOperation {
+                    guard !cancelled.withLock({ $0 }) else { return continuation.resume(returning: nil) }
+                    let image = autoreleasepool {
+                        compose(
+                            source: source, overlay: overlay, size: size, scale: scale,
+                            backgroundColor: backgroundColor, clipsToArtwork: clipsToArtwork,
+                            dimming: dimming, gradient: gradient
+                        )
+                    }
+                    continuation.resume(returning: cancelled.withLock { $0 } ? nil : image)
+                }
+            }
+        } onCancel: {
+            cancelled.withLock { $0 = true }
+        }
     }
 
     /// Draws the pixels. Safe off the main actor; callers validate the dimensions.
@@ -221,6 +317,12 @@ enum NativePosterArtworkBitmap {
         backgroundColor: UIColor?, clipsToArtwork: Bool, dimming: CGFloat = 0, gradient: CGGradient? = nil,
         drawOverlay: (CGContext) -> Void = { _ in }
     ) -> UIImage {
+        #if DEBUG
+        compositionCounter.withLock {
+            $0.total += 1
+            if Thread.isMainThread { $0.main += 1 }
+        }
+        #endif
         let format = UIGraphicsImageRendererFormat()
         format.scale = scale
         format.preferredRange = .standard
@@ -272,6 +374,69 @@ enum NativePosterArtworkBitmap {
                 outside.fill()
             }
         }
+    }
+}
+
+@MainActor
+enum NativePosterBitmapCache {
+    private final class Entry {
+        weak var source: UIImage?
+        let image: UIImage
+        let cost: Int
+        var access: UInt64
+
+        init(source: UIImage?, image: UIImage, cost: Int, access: UInt64) {
+            self.source = source
+            self.image = image
+            self.cost = cost
+            self.access = access
+        }
+    }
+
+    static let byteLimit = ArtworkMemoryBudget.current.compositeBytes
+    static let countLimit = ArtworkMemoryBudget.current.compositeCount
+    private(set) static var retainedBytes = 0
+    private(set) static var renderCount = 0
+    private(set) static var purges = 0
+    private static var cache: [NSObject: Entry] = [:]
+    private static var clock: UInt64 = 0
+    private static let memoryWarning = NotificationCenter.default.addObserver(
+        forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main
+    ) { _ in
+        MainActor.assumeIsolated {
+            cache.removeAll()
+            retainedBytes = 0
+            purges &+= 1
+        }
+    }
+
+    static func cachedImage(source: UIImage?, key: NSObject) -> UIImage? {
+        clock &+= 1
+        guard let entry = cache[key], entry.source === source else { return nil }
+        entry.access = clock
+        return entry.image
+    }
+
+    static func observePurges() -> Int {
+        _ = memoryWarning
+        return purges
+    }
+
+    static func store(_ image: UIImage, source: UIImage?, key: NSObject) {
+        renderCount += 1
+        if let replaced = cache.removeValue(forKey: key) { retainedBytes -= replaced.cost }
+        guard let pixels = image.cgImage else { return }
+        let (cost, overflow) = pixels.bytesPerRow.multipliedReportingOverflow(by: pixels.height)
+        guard !overflow, cost <= byteLimit else { return }
+        _ = memoryWarning
+        while !cache.isEmpty && (retainedBytes + cost > byteLimit || cache.count >= countLimit) {
+            guard let oldest = cache.min(by: { $0.value.access < $1.value.access }) else { break }
+            retainedBytes -= oldest.value.cost
+            cache.removeValue(forKey: oldest.key)
+        }
+        clock &+= 1
+        cache[key] = Entry(source: source, image: image, cost: cost, access: clock)
+        retainedBytes += cost
     }
 }
 
@@ -357,37 +522,10 @@ enum NativeLibraryPosterBitmap {
         }
     }
 
-    private final class Entry {
-        weak var source: UIImage?
-        let image: UIImage
-        let cost: Int
-        var access: UInt64
-
-        init(source: UIImage?, image: UIImage, cost: Int, access: UInt64) {
-            self.source = source
-            self.image = image
-            self.cost = cost
-            self.access = access
-        }
-    }
-
-    static let byteLimit = ArtworkMemoryBudget.current.compositeBytes
-    static let countLimit = ArtworkMemoryBudget.current.compositeCount
-    private(set) static var retainedBytes = 0
-    private(set) static var renderCount = 0
-    private static var cache: [Key: Entry] = [:]
-    private static var clock: UInt64 = 0
-    private static let memoryWarning = NotificationCenter.default.addObserver(
-        forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main
-    ) { _ in
-        MainActor.assumeIsolated {
-            cache.removeAll()
-            retainedBytes = 0
-            purges &+= 1
-        }
-    }
-    /// Memory-warning purges so far; a draw that spans one shows its result but doesn't cache it.
-    private static var purges = 0
+    static var byteLimit: Int { NativePosterBitmapCache.byteLimit }
+    static var countLimit: Int { NativePosterBitmapCache.countLimit }
+    static var retainedBytes: Int { NativePosterBitmapCache.retainedBytes }
+    static var renderCount: Int { NativePosterBitmapCache.renderCount }
 
     private struct Content: View {
         let presentation: Presentation
@@ -424,10 +562,7 @@ enum NativeLibraryPosterBitmap {
 
     /// The composite for `key`, if it is still cached for this exact source image.
     static func cachedImage(source: UIImage?, key: Key) -> UIImage? {
-        clock &+= 1
-        guard let entry = cache[key], entry.source === source else { return nil }
-        entry.access = clock
-        return entry.image
+        NativePosterBitmapCache.cachedImage(source: source, key: key)
     }
 
     static func image(source: UIImage?, key: Key, environment: EnvironmentValues) -> UIImage? {
@@ -437,7 +572,7 @@ enum NativeLibraryPosterBitmap {
             source: source, overlay: overlay, size: key.size, scale: key.scale,
             backgroundColor: .darkGray, clipsToArtwork: false
         )
-        store(image, source: source, key: key)
+        NativePosterBitmapCache.store(image, source: source, key: key)
         return image
     }
 
@@ -449,42 +584,17 @@ enum NativeLibraryPosterBitmap {
         // A cell that scrolled away cancels before its indicator layer is rendered.
         guard !Task.isCancelled,
               let overlay = indicatorLayer(source: source, key: key, environment: environment) else { return nil }
-        _ = memoryWarning // observe purges from the first draw on
-        let purgesBefore = purges
+        let purgesBefore = NativePosterBitmapCache.observePurges()
         // Awaited directly rather than detached, so a cell that scrolls away cancels the draw too.
-        guard let image = await composeOffMain(source: source, overlay: overlay, size: key.size, scale: key.scale),
+        guard let image = await NativePosterArtworkBitmap.composeOffMain(
+            source: source, overlay: overlay, size: key.size, scale: key.scale,
+            backgroundColor: .darkGray, clipsToArtwork: false
+        ),
               !Task.isCancelled else { return nil }
-        if purges == purgesBefore { store(image, source: source, key: key) }
-        return image
-    }
-
-    /// Composites get their own bounded lane, like artwork decoding: CPU-bound pixel work on
-    /// Swift's cooperative pool (2-3 threads on tvOS) would hold up unrelated async work.
-    private nonisolated static let composeQueue: OperationQueue = {
-        let queue = OperationQueue()
-        queue.maxConcurrentOperationCount = 2
-        queue.qualityOfService = .userInitiated
-        return queue
-    }()
-
-    private static func composeOffMain(
-        source: UIImage?, overlay: UIImage, size: CGSize, scale: CGFloat
-    ) async -> UIImage? {
-        let cancelled = OSAllocatedUnfairLock(initialState: false)
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                composeQueue.addOperation {
-                    // A queued draw for a cell that scrolled away is skipped, not drawn.
-                    guard !cancelled.withLock({ $0 }) else { return continuation.resume(returning: nil) }
-                    continuation.resume(returning: NativePosterArtworkBitmap.compose(
-                        source: source, overlay: overlay, size: size, scale: scale,
-                        backgroundColor: .darkGray, clipsToArtwork: false
-                    ))
-                }
-            }
-        } onCancel: {
-            cancelled.withLock { $0 = true }
+        if NativePosterBitmapCache.purges == purgesBefore {
+            NativePosterBitmapCache.store(image, source: source, key: key)
         }
+        return image
     }
 
     private static func indicatorLayer(source: UIImage?, key: Key, environment: EnvironmentValues) -> UIImage? {
@@ -508,21 +618,5 @@ enum NativeLibraryPosterBitmap {
         return overlay
     }
 
-    private static func store(_ image: UIImage, source: UIImage?, key: Key) {
-        renderCount += 1
-        if let replaced = cache.removeValue(forKey: key) { retainedBytes -= replaced.cost }
-        guard let pixels = image.cgImage else { return }
-        let (cost, overflow) = pixels.bytesPerRow.multipliedReportingOverflow(by: pixels.height)
-        guard !overflow, cost <= byteLimit else { return }
-        _ = memoryWarning
-        while !cache.isEmpty && (retainedBytes + cost > byteLimit || cache.count >= countLimit) {
-            guard let oldest = cache.min(by: { $0.value.access < $1.value.access }) else { break }
-            retainedBytes -= oldest.value.cost
-            cache.removeValue(forKey: oldest.key)
-        }
-        clock &+= 1
-        cache[key] = Entry(source: source, image: image, cost: cost, access: clock)
-        retainedBytes += cost
-    }
 }
 #endif

@@ -104,6 +104,10 @@ public protocol MediaProvider: Sendable {
     /// Unsupported providers throw `.notFound`, never a misleading empty page.
     func collections(in libraryID: String, page: PageRequest) async throws -> MediaPage
 
+    /// Collections owned by or shared with the current server viewer, including
+    /// ones not published in a library. Advertise `.personalCollections`.
+    func personalCollections(page: PageRequest) async throws -> MediaPage
+
     /// Members of a server-defined collection, not a library's collection list.
     /// Preserve the server's collection order (including smart/custom ordering);
     /// `page.sort` is deliberately ignored. Do not filter members to collections.
@@ -362,6 +366,23 @@ public protocol InteractiveBrowseActivityReporting: Sendable {
 /// host, and effective port must all match, so a path that merely resembles a
 /// provider endpoint on Plex Discover or a CDN is never adopted as local art.
 public enum MediaProviderURLIdentity {
+    /// Prefer the specific proxy prefix when approved bases share an origin.
+    public static func matchingBaseURL(for url: URL, among bases: [URL]) -> URL? {
+        bases.filter { relativeResourcePath(of: url, under: $0) != nil }
+            .max { $0.path.count < $1.path.count }
+    }
+
+    public static func relativeEncodedResourcePath(of url: URL, under baseURL: URL) -> String? {
+        guard relativeResourcePath(of: url, under: baseURL) != nil,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let base = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else { return nil }
+        let basePath = base.percentEncodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let prefix = basePath.isEmpty ? "" : "/" + basePath
+        guard components.percentEncodedPath == prefix
+            || components.percentEncodedPath.hasPrefix(prefix + "/") else { return nil }
+        return String(components.percentEncodedPath.dropFirst(prefix.count).drop(while: { $0 == "/" }))
+    }
+
     public static func relativeResourcePath(
         of url: URL,
         under baseURL: URL
@@ -443,6 +464,10 @@ public extension MediaProvider {
     var catalogIdentityRequiresEnrichment: Bool { false }
 
     func collections(in libraryID: String, page: PageRequest) async throws -> MediaPage {
+        throw AppError.notFound
+    }
+
+    func personalCollections(page: PageRequest) async throws -> MediaPage {
         throw AppError.notFound
     }
 

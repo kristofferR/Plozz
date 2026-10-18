@@ -4,8 +4,14 @@ import CoreModels
 import AetherEngine
 
 enum PlozzigenLiveFailure {
-    static func appError(_ info: PlaybackErrorInfo?, deliveryFailure: AppError? = nil) -> AppError {
+    static func appError(
+        _ info: PlaybackErrorInfo?, deliveryFailure: AppError? = nil, fallbackError: Error? = nil
+    ) -> AppError {
         if let deliveryFailure { return deliveryFailure }
+        if info == nil, let error = fallbackError as? AppError { return error }
+        if info == nil, let error = fallbackError as? URLError {
+            return error.code == .cancelled ? .cancelled : .serverUnreachable
+        }
         guard let info else { return .unknown("live playback failed") }
         if info.kind == .sourceRateLimited { return .rateLimited(retryAfter: nil) }
         if info.kind == .sourceRefused, info.underlyingDomain == nil {
@@ -71,18 +77,23 @@ enum PlozzigenLiveFailure {
 
     static func record(
         _ info: PlaybackErrorInfo?, attempt: PlaybackFailureAttempt?, stage: PlaybackFailureDiagnostic.Stage,
-        fallbackError: Error? = nil
+        fallbackError: Error? = nil, evidence: PlaybackFailureEvidence? = nil,
+        deliveryDiagnostic: PlaybackFailureDiagnostic? = nil
     ) {
         let error = fallbackError.map { $0 as NSError }
         guard appError(info) != .cancelled, !(fallbackError is CancellationError),
               !(error?.domain == NSURLErrorDomain && error?.code == NSURLErrorCancelled) else { return }
         attempt?.fail(
             stage: stage,
+            reason: deliveryDiagnostic?.reason ?? .other,
             engineFailure: info.flatMap { .init(rawValue: $0.kind.rawValue) }
                 ?? (stage == .audioSession ? .audioSessionFailed : .unknown),
             domain: .init(info == nil ? error?.domain : info?.underlyingDomain),
             code: info == nil ? error?.code : info?.underlyingCode,
-            httpStatus: info?.kind == .sourceRefused && info?.underlyingDomain == nil ? info?.underlyingCode : nil
+            httpStatus: deliveryDiagnostic?.httpStatus
+                ?? (info?.kind == .sourceRefused && info?.underlyingDomain == nil ? info?.underlyingCode : nil),
+            format: evidence?.delivery?.root?.format ?? .unknown,
+            evidence: evidence
         )
     }
 }

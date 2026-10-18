@@ -29,6 +29,11 @@ public protocol WatchMutationApplying: Sendable {
     func scrobbleTrakt(_ intent: TraktScrobbleIntent) async throws
     /// Mirrors a finished watch to Simkl.
     func scrobbleSimkl(_ intent: TraktScrobbleIntent) async throws
+    var wetrakrAccountIdentity: String? { get }
+    func scrobbleWetrakr(
+        _ intent: TraktScrobbleIntent, capturedAt: Date,
+        idempotencyKey: String, expectedAccountIdentity: String
+    ) async throws
     /// Mirrors a finished watch to AniList (anime only).
     func scrobbleAniList(_ intent: TraktScrobbleIntent) async throws
     /// Mirrors a finished watch to MyAnimeList (anime only).
@@ -51,6 +56,13 @@ public extension WatchMutationApplying {
     }
     func expandTargets(for mutation: WatchMutation) async -> WatchTargetExpansion { .none }
     func scrobbleSimkl(_ intent: TraktScrobbleIntent) async throws {}
+    var wetrakrAccountIdentity: String? { nil }
+    func scrobbleWetrakr(
+        _ intent: TraktScrobbleIntent, capturedAt: Date,
+        idempotencyKey: String, expectedAccountIdentity: String
+    ) async throws {
+        throw AppError.invalidResponse
+    }
     func scrobbleAniList(_ intent: TraktScrobbleIntent) async throws {}
     func scrobbleMAL(_ intent: TraktScrobbleIntent) async throws {}
 }
@@ -219,6 +231,13 @@ public actor WatchStateReconciler {
         _ mutation: WatchMutation,
         onPersisted: @Sendable () -> Void = {}
     ) async -> Bool {
+        var mutation = mutation
+        if mutation.trakt != nil, mutation.wetrakrAccountIdentity == nil,
+           let identity = applier.wetrakrAccountIdentity {
+            mutation.wetrakrAccountIdentity = identity
+            mutation.wetrakrCapturedAt = mutation.capturedAt
+            mutation.wetrakrPending = true
+        }
         if let authorization = mutation.authorization {
             do {
                 try await authorization.require()
@@ -488,6 +507,7 @@ public actor WatchStateReconciler {
             merged.trakt = nil
             merged.traktPending = false
             merged.simklPending = false
+            merged.wetrakrPending = false
             merged.anilistPending = false
             merged.malPending = false
         } else {
@@ -499,6 +519,11 @@ public actor WatchStateReconciler {
             merged.simklPending = incoming.simklPending || existing.simklPending
             merged.anilistPending = incoming.anilistPending || existing.anilistPending
             merged.malPending = incoming.malPending || existing.malPending
+            if !incoming.wetrakrPending, existing.wetrakrPending, incoming.trakt == nil {
+                merged.wetrakrPending = true
+                merged.wetrakrAccountIdentity = existing.wetrakrAccountIdentity
+                merged.wetrakrCapturedAt = existing.wetrakrCapturedAt
+            }
         }
         // Either side still owing twin expansion keeps it owed; preserve the origin
         // seed if the newer mutation lacked one (e.g. a mark-watched coalescing onto
@@ -836,6 +861,24 @@ public actor WatchStateReconciler {
                     // keep pending; retry next drain
                     FanoutDiagnostics.emit("drain.simkl canonical=\(mutation.canonicalMediaID) -> THROW(\(error)) -> still pending")
                 }
+            }
+        }
+
+        try await WatchMutationDeliveryAuthorization.check()
+        if mutation.wetrakrPending, let intent = mutation.trakt {
+            do {
+                guard let identity = mutation.wetrakrAccountIdentity,
+                      let capturedAt = mutation.wetrakrCapturedAt else { throw AppError.invalidResponse }
+                let key = WatchlistReconciliationIdentity.credential(
+                    "\(mutation.id)|\(capturedAt.timeIntervalSince1970)"
+                )
+                try await applier.scrobbleWetrakr(
+                    intent, capturedAt: capturedAt, idempotencyKey: key, expectedAccountIdentity: identity
+                )
+                mutation.wetrakrPending = false
+            } catch {
+                try await WatchMutationDeliveryAuthorization.check()
+                FanoutDiagnostics.emit("drain.wetrakr -> failed; still pending")
             }
         }
 

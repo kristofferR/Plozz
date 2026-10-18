@@ -158,6 +158,7 @@ public struct MobileSubtitleStyleEditor: View {
                 }
             }
         }
+        .toggleStyle(SettingsSwitchToggleStyle())
         .navigationTitle("Appearance")
         .navigationBarTitleDisplayMode(.inline)
         .modifier(SystemCaptionStyleConfirmationDialog(

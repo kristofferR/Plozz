@@ -8,26 +8,6 @@ import UIKit
 /// Shared title-level detail sections. Platform shells keep their own Cast rail
 /// first, then place this view beneath it so content and ordering stay identical
 /// while the adaptive grids naturally collapse on iPhone.
-#if os(tvOS) && canImport(UIKit)
-/// Makes the presenting sheet's own host transparent, so the card floats over
-/// the page (dimmed) instead of on an opaque full-screen plate.
-private struct ClearSheetBackground: UIViewRepresentable {
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView()
-        DispatchQueue.main.async {
-            view.superview?.superview?.backgroundColor = .clear
-        }
-        return view
-    }
-
-    func updateUIView(_ uiView: UIView, context: Context) {}
-}
-#else
-private struct ClearSheetBackground: View {
-    var body: some View { Color.clear }
-}
-#endif
-
 private struct OverviewCardHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
@@ -90,6 +70,10 @@ public struct DetailInformationSections: View {
     }
 
     public var body: some View {
+        if let url = item.metadataProvenance.wetrakrWatchlistURL {
+            WetrakrWatchlistLink(url: url)
+                .padding(.horizontal, horizontalInset)
+        }
         if hasContent {
             sectionBody
                 .environment(\.plozzNativeInformationFocus, true)
@@ -378,7 +362,7 @@ public struct DetailInformationSections: View {
                 cornerRadius: cardCornerRadius,
                 focusedScale: PlozzTheme.Metrics.readOnlyFocusedCardScale
             )
-            .sheet(isPresented: $showsFullOverview) {
+            .plozzSheet(isPresented: $showsFullOverview, style: overviewPresentationStyle) {
                 overviewSheet
             }
         } else {
@@ -559,6 +543,14 @@ public struct DetailInformationSections: View {
         #endif
     }
 
+    private var overviewPresentationStyle: PlozzSheetStyle {
+        #if os(tvOS)
+        .floatingCard
+        #else
+        .standard
+        #endif
+    }
+
     #if os(tvOS)
     /// A centred card, sized to its text — deliberately NOT the
     /// `NavigationStack` + `navigationTitle` used on iOS.
@@ -623,7 +615,6 @@ public struct DetailInformationSections: View {
             .clipShape(RoundedRectangle(cornerRadius: 32, style: .continuous))
             .plozzSurface(.overlay, cornerRadius: 32)
         }
-        .background(ClearSheetBackground())
     }
     #endif
 
@@ -644,7 +635,7 @@ public struct DetailInformationSections: View {
             #if !os(tvOS)
             .scrollContentBackground(.hidden)
             #endif
-            .background(palette.settingsBackground)
+            .background { SettingsPageBackground() }
             .navigationTitle(item.title)
             #if !os(tvOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -659,7 +650,6 @@ public struct DetailInformationSections: View {
             #endif
         }
         #if !os(tvOS)
-        .presentationBackground(palette.settingsBackground)
         .presentationCornerRadius(overviewSheetCornerRadius)
         .preferredColorScheme(palette.isLight ? .light : .dark)
         // Elevation edge for dark themes, reusing the Settings sheet treatment:

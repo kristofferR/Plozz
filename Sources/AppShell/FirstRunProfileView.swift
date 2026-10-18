@@ -79,7 +79,7 @@ struct FirstRunProfileView: View {
         // Pressing Menu on this one-time setup screen accepts the seeded profile
         // and continues, so the app never suspends from here.
         .onExitCommand { appState.confirmFirstRunProfile() }
-        .sheet(isPresented: $editing) {
+        .plozzSheet(isPresented: $editing) {
             ProfileEditorView(
                 editingProfile: profile,
                 canDelete: false,

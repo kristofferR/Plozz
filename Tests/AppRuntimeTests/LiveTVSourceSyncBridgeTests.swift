@@ -241,6 +241,25 @@ final class LiveTVSourceSyncBridgeTests: XCTestCase {
         XCTAssertNil(manifest.source)
     }
 
+    func testDeferredProfileDeletionCannotRepublishSources() async throws {
+        let fixture = try Fixture()
+        let source = LiveTVPlaylistSource(name: "Local", playlistURL: URL(string: "https://example.test/live")!)
+        try fixture.store.save(.init(playlists: [source]))
+        let initial = try await fixture.bridge.capture(fixture.snapshot([:]))
+        XCTAssertFalse(initial.isEmpty)
+        fixture.profiles.applySyncedProfileDTOs([:], deletions: [fixture.profileID])
+
+        let captured = try await fixture.restartedBridge().capture(fixture.snapshot(initial))
+        let name = LiveTVPortableRecordKey(
+            profileID: fixture.profileID, kind: .source, entityID: source.id
+        ).recordName
+        let manifest = try JSONDecoder().decode(
+            LiveTVSourceSyncManifest.self, from: XCTUnwrap(captured[name])
+        )
+        XCTAssertNil(manifest.source)
+        XCTAssertEqual(try fixture.store.load().playlists, [source])
+    }
+
     func testTamperedImportedTransferDoesNotInstallOrPublishASource() async throws {
         let sender = try Fixture()
         let receiver = try Fixture()

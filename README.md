@@ -12,6 +12,13 @@
 </p>
 
 <p align="center">
+  <b>Dolby TrueHD Atmos &amp; DTS:X — with height channels on Apple TV.</b>
+  <br />
+  Overhead sound from your own movie library, on tvOS 26 or later
+  with compatible audio equipment.
+</p>
+
+<p align="center">
   <a href="https://plozz.app"><b>plozz.app</b></a>
 </p>
 
@@ -20,7 +27,7 @@
 </p>
 
 <p align="center">
-  <a href="https://discord.gg/YkXnmB8rcF"><img src="https://img.shields.io/badge/Join_the_community-5865F2?style=for-the-badge&amp;logo=discord&amp;logoColor=white" alt="Join the Plozz community on Discord" /></a>
+  <a href="https://plozz.app/discord"><img src="https://img.shields.io/badge/Join_the_community-5865F2?style=for-the-badge&amp;logo=discord&amp;logoColor=white" alt="Join the Plozz community on Discord" /></a>
 </p>
 
 <p align="center">
@@ -120,6 +127,10 @@ available when you want them.
   other clients hand back to you, powered by
   [AetherEngine](https://github.com/superuser404notfound/AetherEngine).
   ([The full format list](https://github.com/superuser404notfound/AetherEngine/blob/main/docs/formats.md).)
+- **Dolby TrueHD Atmos and DTS:X with height channels on Apple TV** — hear
+  sound all around you and above you. Enabled by default for supported movie
+  and episode soundtracks on tvOS 26 or later with compatible audio equipment.
+  [Compatibility details](docs/playback-engines.md#dependency-version).
 - **Change versions without leaving the player** — switch between files or
   editions on the active server on Apple TV, iPhone, and iPad. Keep your
   playback position, pause state, speed, quality limit, and matching audio and

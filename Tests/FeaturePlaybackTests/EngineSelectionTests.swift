@@ -119,6 +119,18 @@ final class EngineSelectionTests: XCTestCase {
 
     // MARK: Image-subtitle rerouting
 
+    func testSDHBitmapReroutesEvenWhenRegularTextExists() {
+        var bitmap = imageSub(id: 2, language: "en")
+        bitmap.isHearingImpaired = true
+        let regular = MediaTrack(id: 1, kind: .subtitle, displayTitle: "English", language: "en")
+        XCTAssertEqual(EngineSelection.route(
+            request: request(subtitleTracks: [regular, bitmap]), forceTranscode: false,
+            plozzigenAvailable: true, capabilities: .detected(),
+            subtitleRule: .init(mode: .all, preferredLanguages: ["en"]),
+            hearingImpairedPreference: .preferSDH
+        ), .plozzigen)
+    }
+
     func testImageBasedDefaultSubtitleReroutesNativeToPlozzigen() {
         // No source facts → router picks native; the only English subtitle is
         // image-based and the rule wants English → reroute to Plozzigen.

@@ -33,6 +33,7 @@ struct PrototypeBrowser: View {
     let isLoading: Bool
     let loadFailed: Bool
     let reload: () -> Void
+    var openChannelManagement: (() -> Void)?
     var hideChannel: ((LiveTVPrototypeChannel, LiveTVGuideRowID) -> Void)?
     var selectionAction: LocalizedStringResource?
     var selectedChannelIDs: Set<String> = []
@@ -40,6 +41,7 @@ struct PrototypeBrowser: View {
     var loadLibraryGuide: ((Set<String>, DateInterval) -> Void)?
     var openLibraryItem: ((LibraryChannelItem) -> Void)?
     var leadingExit: (() -> Void)?
+    var isEmbeddedInPlayer = false
     @State private var scrollID: LiveTVGuideRowID?
     @State private var pendingFocus: PrototypeBrowseFocus?
     @State private var restorationFallback: PrototypeBrowseFocus?
@@ -112,7 +114,13 @@ struct PrototypeBrowser: View {
                     ContentUnavailableView {
                         Label("All channels are hidden", systemImage: "eye.slash")
                     } description: {
-                        Text("Restore channels in Settings > Live TV > Hidden channels.")
+                        Text("Your channels are still saved. Review Hidden channels to show them again.")
+                    } actions: {
+                        if let openChannelManagement {
+                            Button("Manage channels", action: openChannelManagement)
+                                .buttonStyle(PrototypeButtonStyle())
+                                .focused($recoveryFocused)
+                        }
                     }
                 } else if model.visibleChannels.isEmpty {
                     ContentUnavailableView {
@@ -260,7 +268,12 @@ struct PrototypeBrowser: View {
                 timeline.offset = value
             }
         }
-        .padding([.leading, .top], PrototypeLayout.guideInset)
+        .padding(.leading, PrototypeLayout.guideInset)
+        #if os(iOS)
+        .padding(.top, isEmbeddedInPlayer ? 0 : PrototypeLayout.guideInset)
+        #else
+        .padding(.top, PrototypeLayout.guideInset)
+        #endif
         .padding(.trailing, PrototypeLayout.guideTrailingInset)
         .background { PrototypeGuideSurface() }
         .clipShape(PrototypeLayout.guideShape)
@@ -527,7 +540,7 @@ struct PrototypeBrowser: View {
 
     private var allChannelsHidden: Bool {
         guard model.visibleChannels.isEmpty else { return false }
-        let hidden = model.hiddenChannelIDs
+        let hidden = model.effectiveHiddenChannelIDs
         return !model.channels.isEmpty && model.channels.allSatisfy { hidden.contains($0.id) }
     }
 

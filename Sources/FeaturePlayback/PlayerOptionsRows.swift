@@ -121,6 +121,7 @@ struct PlayerOptionsInputScope<Screen: Equatable, Content: View>: View {
                 guard let row = focusedRow, case .submenu = row.kind else { return nil }
                 return row.slot
             },
+            idealWidth: PlayerOptionsPanel.standardWidth,
             onMove: { direction, isRepeat in
                 if !isRepeat { accelerator = SubtitleStyleAccelerator() }
                 move(direction)

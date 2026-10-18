@@ -104,6 +104,124 @@ final class PlayerVideoZoomTests: XCTestCase {
         XCTAssertNil(zoom.videoRect(in: .zero, aspectRatio: 16 / 9))
     }
 
+    func testNormalFitsTheWholePictureInsidePortraitLandscapeAndTabletSafeAreas() throws {
+        for (bounds, insets) in safeAreaCases {
+            let safe = bounds.inset(by: insets)
+            for aspect: Double in [4 / 3, 16 / 9, 2.4, 9 / 16] {
+                let normal = PlayerVideoZoom()
+                let expected = try XCTUnwrap(SubtitleOverlayGeometry.aspectFitRect(
+                    in: safe, aspectRatio: CGFloat(aspect)
+                ))
+                let picture = try XCTUnwrap(normal.videoRect(in: bounds, aspectRatio: aspect, fitBounds: safe))
+                assertRect(picture, equals: expected)
+                XCTAssertTrue(safe.insetBy(dx: -0.001, dy: -0.001).contains(picture))
+                XCTAssertEqual(picture.width / picture.height, aspect, accuracy: 0.0001)
+                let scale = normal.scaleFactors(in: bounds, aspectRatio: aspect, fitBounds: safe)
+                XCTAssertEqual(scale.dx, scale.dy)
+                XCTAssertLessThanOrEqual(scale.dx, 1.0001)
+                XCTAssertEqual(picture.midX, safe.midX, accuracy: 0.0001)
+                XCTAssertEqual(picture.midY, safe.midY, accuracy: 0.0001)
+
+                let crop = PlayerVideoZoom(mode: .fill)
+                let cropped = try XCTUnwrap(crop.videoRect(in: bounds, aspectRatio: aspect, fitBounds: safe))
+                XCTAssertEqual(cropped, crop.videoRect(in: bounds, aspectRatio: aspect))
+                XCTAssertTrue(cropped.insetBy(dx: -0.001, dy: -0.001).contains(bounds))
+                XCTAssertEqual(cropped.width / cropped.height, aspect, accuracy: 0.0001)
+                let stretch = PlayerVideoZoom(mode: .stretch)
+                assertRect(try XCTUnwrap(stretch.videoRect(in: bounds, aspectRatio: aspect, fitBounds: safe)),
+                           equals: bounds)
+            }
+        }
+    }
+
+    func testCustomRemainsRelativeToNormalOnlyWhenTheCallerOptsIntoSafeFitting() throws {
+        for (bounds, insets) in safeAreaCases {
+            let safe = bounds.inset(by: insets)
+            let normal = try XCTUnwrap(PlayerVideoZoom().videoRect(
+                in: bounds, aspectRatio: 16 / 9, fitBounds: safe
+            ))
+            for percent in [50, 100, 150, 200] {
+                let zoom = PlayerVideoZoom(mode: .custom, customPercent: percent)
+                let rect = try XCTUnwrap(zoom.videoRect(in: bounds, aspectRatio: 16 / 9, fitBounds: safe))
+                XCTAssertEqual(rect.midX, normal.midX, accuracy: 0.0001)
+                XCTAssertEqual(rect.midY, normal.midY, accuracy: 0.0001)
+                XCTAssertEqual(rect.width, normal.width * CGFloat(percent) / 100, accuracy: 0.0001)
+                XCTAssertEqual(rect.height, normal.height * CGFloat(percent) / 100, accuracy: 0.0001)
+                XCTAssertEqual(zoom.videoRect(in: bounds, aspectRatio: 16 / 9),
+                               zoom.videoRect(in: bounds, aspectRatio: 16 / 9, fitBounds: bounds))
+            }
+        }
+    }
+
+    func testSafeFittingUsesTheSameShiftAndScaleForAuthoredTextAndBitmapCues() throws {
+        for (bounds, insets) in safeAreaCases {
+            let safe = bounds.inset(by: insets)
+            let picture = try XCTUnwrap(PlayerVideoZoom().videoRect(
+                in: bounds, aspectRatio: 16 / 9, fitBounds: safe
+            ))
+            let expected = try XCTUnwrap(SubtitleOverlayGeometry.aspectFitRect(in: safe, aspectRatio: 16 / 9))
+            let anchor = CGPoint(x: 0.2, y: 0.7)
+            let origin = SubtitleOverlayGeometry.anchoredOrigin(
+                anchor: anchor, alignment: .topLeft, contentSize: CGSize(width: 20, height: 10),
+                videoRect: picture, limits: bounds
+            )
+            XCTAssertEqual(origin.x, expected.minX + anchor.x * expected.width, accuracy: 0.0001)
+            XCTAssertEqual(origin.y, expected.minY + anchor.y * expected.height, accuracy: 0.0001)
+            let bitmap = SubtitleOverlayGeometry.bitmapRect(
+                normalizedRect: CGRect(x: anchor.x, y: anchor.y, width: 0.3, height: 0.1),
+                canvasSize: CGSize(width: 1920, height: 1080), videoRect: picture
+            )
+            assertRect(bitmap, equals: CGRect(
+                x: expected.minX + anchor.x * expected.width,
+                y: expected.minY + anchor.y * expected.height,
+                width: expected.width * 0.3, height: expected.height * 0.1
+            ))
+        }
+    }
+
+    func testMissingAspectAndInvalidSafeBoundsRemainFiniteAndPreserveLegacyDefaults() throws {
+        let bounds = CGRect(x: 12, y: 20, width: 844, height: 390)
+        let safe = bounds.inset(by: UIEdgeInsets(top: 9, left: 60, bottom: 21, right: 12))
+        for aspect: Double? in [nil, 0, -.infinity, .nan] {
+            let frame = PlayerVideoZoom().surfaceFrame(in: bounds, aspectRatio: aspect, fitBounds: safe)
+            XCTAssertTrue(safe.insetBy(dx: -0.001, dy: -0.001).contains(frame))
+            XCTAssertNil(PlayerVideoZoom().videoRect(in: bounds, aspectRatio: aspect, fitBounds: safe))
+            XCTAssertEqual(PlayerVideoZoom().surfaceFrame(in: bounds, aspectRatio: aspect), bounds)
+        }
+        for invalid in [CGRect.zero, .null, .infinite, CGRect(x: -500, y: -500, width: 1, height: 1)] {
+            XCTAssertEqual(PlayerVideoZoom().videoRect(in: bounds, aspectRatio: 16 / 9, fitBounds: invalid),
+                           PlayerVideoZoom().videoRect(in: bounds, aspectRatio: 16 / 9))
+        }
+        assertRect(try XCTUnwrap(PlayerVideoZoom().videoRect(
+            in: bounds, aspectRatio: 16 / 9, fitBounds: bounds.insetBy(dx: -30, dy: -40)
+        )), equals: try XCTUnwrap(PlayerVideoZoom().videoRect(in: bounds, aspectRatio: 16 / 9)))
+    }
+
+    private var safeAreaCases: [(CGRect, UIEdgeInsets)] {
+        [
+            (CGRect(x: 0, y: 0, width: 390, height: 844),
+             UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0)),
+            (CGRect(x: 0, y: 0, width: 844, height: 390),
+             UIEdgeInsets(top: 0, left: 59, bottom: 21, right: 0)),
+            (CGRect(x: 0, y: 0, width: 844, height: 390),
+             UIEdgeInsets(top: 0, left: 0, bottom: 21, right: 59)),
+            (CGRect(x: 23, y: 41, width: 844, height: 390),
+             UIEdgeInsets(top: 17, left: 63, bottom: 29, right: 11)),
+            (CGRect(x: 0, y: 0, width: 1024, height: 1366), .zero),
+            (CGRect(x: 0, y: 0, width: 1366, height: 1024),
+             UIEdgeInsets(top: 24, left: 0, bottom: 20, right: 0))
+        ]
+    }
+
+    private func assertRect(
+        _ actual: CGRect, equals expected: CGRect, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        XCTAssertEqual(actual.minX, expected.minX, accuracy: 0.0001, file: file, line: line)
+        XCTAssertEqual(actual.minY, expected.minY, accuracy: 0.0001, file: file, line: line)
+        XCTAssertEqual(actual.width, expected.width, accuracy: 0.0001, file: file, line: line)
+        XCTAssertEqual(actual.height, expected.height, accuracy: 0.0001, file: file, line: line)
+    }
+
     func testModeCyclingCustomBoundsAndIndependentSessions() {
         let first = PlayerVideoZoomModel()
         let second = PlayerVideoZoomModel()
@@ -256,6 +374,24 @@ final class PlayerVideoZoomTests: XCTestCase {
         XCTAssertTrue(engine.output.superview === current)
         XCTAssertEqual(engine.output.frame, frame)
     }
+
+    #if os(tvOS)
+    func testSafeAreaFittingOptInIsInertOnTelevision() throws {
+        let controller = UIViewController()
+        controller.additionalSafeAreaInsets = UIEdgeInsets(top: 20, left: 60, bottom: 40, right: 10)
+        controller.view.frame = television
+        let video = VideoPresentationView(frame: television)
+        controller.view.addSubview(video)
+        let engine = ZoomVideoEngine()
+        video.attach(engine)
+        video.update(zoom: PlayerVideoZoom(), fitsInsideSafeArea: true)
+        video.layoutIfNeeded()
+        XCTAssertNil(video.fitBounds)
+        XCTAssertEqual(video.videoRect, PlayerVideoZoom().videoRect(in: television, aspectRatio: 4 / 3))
+        XCTAssertEqual(engine.output.frame, television)
+        XCTAssertTrue(engine.transportCalls.isEmpty)
+    }
+    #endif
 }
 
 @MainActor

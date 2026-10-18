@@ -175,15 +175,17 @@ public struct LiveTVSourcesConfiguration: Codable, Equatable, Sendable {
     public var playlists: [LiveTVPlaylistSource]
     public var servers: [LiveTVServerSource]
     public var syncCheckpoint: LiveTVSourcesSyncCheckpoint?
+    public var serverSyncCheckpoint: LiveTVServerSyncCheckpoint?
 
     public init(playlists: [LiveTVPlaylistSource] = [], servers: [LiveTVServerSource] = []) {
         self.playlists = playlists
         self.servers = servers
         syncCheckpoint = nil
+        serverSyncCheckpoint = nil
     }
 
     private enum CodingKeys: String, CodingKey {
-        case version, playlists, servers, syncCheckpoint
+        case version, playlists, servers, syncCheckpoint, serverSyncCheckpoint
     }
 
     public init(from decoder: any Decoder) throws {
@@ -193,6 +195,7 @@ public struct LiveTVSourcesConfiguration: Codable, Equatable, Sendable {
         playlists = try values.decode([LiveTVPlaylistSource].self, forKey: .playlists)
         servers = try values.decodeIfPresent([LiveTVServerSource].self, forKey: .servers) ?? []
         syncCheckpoint = try values.decodeIfPresent(LiveTVSourcesSyncCheckpoint.self, forKey: .syncCheckpoint)
+        serverSyncCheckpoint = try values.decodeIfPresent(LiveTVServerSyncCheckpoint.self, forKey: .serverSyncCheckpoint)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -201,6 +204,25 @@ public struct LiveTVSourcesConfiguration: Codable, Equatable, Sendable {
         try values.encode(playlists, forKey: .playlists)
         try values.encode(servers, forKey: .servers)
         try values.encodeIfPresent(syncCheckpoint, forKey: .syncCheckpoint)
+        try values.encodeIfPresent(serverSyncCheckpoint, forKey: .serverSyncCheckpoint)
+    }
+
+    /// Portable server-state receipts share the source save, not its fallible journal commit.
+    /// They are separate from the encrypted playlist channel's checkpoint and never exported.
+    public struct LiveTVServerSyncCheckpoint: Codable, Equatable, Sendable {
+        public struct Receipt: Codable, Equatable, Sendable {
+            public let stateDigest: Data
+            public let value: Data
+        }
+
+        public let profileID: String
+        public let accountEpoch: String
+        public var observed: [String: Receipt] = [:]
+
+        public init(profileID: String, accountEpoch: String) {
+            self.profileID = profileID
+            self.accountEpoch = accountEpoch
+        }
     }
 
     /// Saved atomically with the credential-bearing configuration in Keychain.

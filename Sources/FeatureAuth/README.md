@@ -30,10 +30,34 @@ session persistence.
     both stores.
 - **UI surfaces** — `AuthView` (root sign-in orchestrator) and the
   per-flow views above. `BrandQRCodeView` renders the Quick Connect /
-  Plex Link codes as scannable QR + readable digits.
+  Plex Link codes as scannable QR. `ConnectionCodeView` supplies the shared
+  readable code panel for Quick Connect, Plex Link, Silo, and device setup.
+  `ServerAddressesView` uses the shared provider logo and Settings surfaces to
+  separate server/sign-in identity, saved addresses, and address entry. Full
+  addresses wrap without truncation, with the protocol labeled separately;
+  mobile Copy preserves the complete URL, and accessibility reads it intact.
+  Routing and device-scope explanations remain secondary to native add/remove actions;
+  removal still requires confirmation, and the original address cannot be removed.
+  The add action uses a native title-and-icon label so the group's muted row-icon
+  color cannot override the prominent button's contrasting foreground.
 
 ## Invariants
 
+- **Alternate addresses belong to one local sign-in.** `ServerAddressesModel`
+  verifies Jellyfin/Emby public server IDs and Plex machine identifiers without
+  sending saved credentials. Silo uses fresh native device pairing and matches
+  the authenticated installation, account, profile, and device; it revokes that
+  verification login without replacing the original credential. Cancellation
+  also disposes of any unfinished verification login already received.
+  A public identity is a consistency check, not proof of transport trust:
+  users must explicitly approve trusted addresses, with an HTTP warning.
+  `AccountStore.updateServerAddresses` compares the original account snapshot
+  before writing metadata; profile authorization and cancellation are checked
+  again after asynchronous work. Account IDs, credential revisions, active
+  selection, and watch state do not change. Aliases are excluded from sync and
+  device-transfer descriptors. Address-only reloads update existing providers
+  through `ServerAddressUpdating`, including retained music consumers, rather
+  than invalidating every provider and losing active Silo grants.
 - **Tokens NEVER leave the Keychain.** Never written to `UserDefaults`,
   never logged. `AccountStore` is split-storage by design.
 - **Pure state machine.** `SessionStateMachine` has no I/O — all side
@@ -121,16 +145,34 @@ session persistence.
 
 ## Automatically Sign In
 
-Settings → Profiles offers an off-by-default, device-only startup preference on
+Individual profile settings and Everyone → Profiles expose the same
+off-by-default, device-only startup preference on
 tvOS and iOS/iPadOS. When enabled from an authenticated profile, the next launch
 opens the last successfully used profile without the profile picker or PIN.
 This is the only startup control. When disabled, households with multiple
 profiles see the picker and protected profiles require their PIN as usual.
 The retired ask-on-startup preference is ignored, not converted into consent
-to bypass a PIN. The toggle has no helper text; only errors appear beneath it.
+to bypass a PIN. The description explains that it signs in to the last-used
+profile automatically on this device; this is not a per-profile or synced preference.
+
+On mobile, applying configuration sync refreshes the unchanged active profile
+without starting a new explicit activation. Cosmetic updates preserve a successful
+or in-flight Plex PIN entry. Synced profile changes and locks still pass the
+profile gates, and source membership/credential changes still reconcile or revoke
+Plex access. Deliberate selection, even of the current profile, remains a fresh
+authorization boundary.
 Automatic sign-in applies to Plozz profiles regardless of their providers,
 including profiles without server accounts. Plex Home token restoration is the
 provider-specific part, not a restriction on who can use the setting.
+
+Plex authorization follows the profile's enabled sources, not individual library
+visibility. Disabling an entire Plex source preserves its saved Home-user binding
+but clears its live credentials, PIN proof, and pending authorization. It no longer
+prompts when entering the profile or participates in automatic sign-in. Re-enabling
+the source verifies current protection and requires its PIN before content access;
+neither old credentials nor an in-flight response can authorize it. Hiding libraries
+within an enabled source does not waive authentication. Separate Plozz Profile Locks
+and Kids Profile exit gates are unchanged.
 
 `AppRuntime.AutomaticSignInStore` retains one session in a non-synchronizable,
 ThisDeviceOnly Keychain item (per Apple TV system user). It stores authenticated
@@ -138,6 +180,12 @@ Plex server and Discover tokens, never a PIN. The preference and session are not
 part of profile sync, device pairing, or credential export. Restoration requires
 the same profile, lock revision, account credential revisions, and Plex bindings;
 missing or changed state returns to the normal gates, never the owner's identity.
+Protected Plex credentials also require a device-local record of successful,
+nonempty PIN authentication. Enabling the preference alone never grants this
+proof. Older startup sessions without it must authenticate again on that device.
+Resolved credentials and PIN proof also belong to the originating account
+credential revision, server identity, and server user. Replacing that source
+cannot reuse old proof or save old tokens under a new automatic-sign-in session.
 
 Only the startup entry point can restore this session, once per process. Manual
 profile activation discards startup unlock credit and Plex overrides, so switching
@@ -145,6 +193,49 @@ back to a protected Plex Home user still requires their PIN, including two Plozz
 profiles mapped to the same Plex user. Local Profile Locks and Kids Profile exit
 gates remain in force for manual switching. Disabling automatic sign-in removes
 the stored session without changing any PIN; sign-out invalidates it.
+Every unresolved Plex binding verifies current Home-user protection before entry,
+even if its last saved status said no PIN. Removing and later re-adding a Plex PIN
+must therefore prompt on the next manual switch. Old unprotected token-cache
+entries are purged, not replayed. Until authorization completes, neither server
+nor Discover access may substitute the owner's credentials. Only an already
+authorized in-memory identity may repair a missing Discover credential; that
+repair cannot authorize a new profile activation.
+
+Before clearing a protected Plex Home binding's PIN requirement, Plozz requires
+current Home-user metadata explicitly reporting no PIN and a successful PIN-less
+switch for the same profile, user and account credential. A successful switch
+using the owner's credential alone is not proof of PIN removal or PIN knowledge.
+Legacy bindings without a verified protection marker cannot restore unprotected
+cached tokens or automatic-sign-in sessions until they are revalidated.
+Verification is not PIN entry: both shells show a neutral loading state while
+checking and a retryable error when protection cannot be determined. The PIN
+heading, identity badge, and keypad are instantiated only after Plex explicitly
+confirms that the selected Home user is protected. An unprotected user never
+passes through a PIN screen, including while its authorization cover dismisses.
+Plex's account-password flag (`hasPassword`) is not Home PIN protection; only
+the explicit `protected` field establishes that requirement.
+Plex rejecting a PIN-less switch leaves a retryable authentication error, not a
+PIN prompt for an unprotected user. A supplied PIN goes directly to the switch endpoint;
+stale, missing or unavailable Home-user metadata cannot block authentication or
+discard the entered PIN. A rejected entered PIN also permits one authenticated
+PIN-less attempt only after metadata confirms the Plex PIN was removed, including when a separate
+Plozz lock supplied its former matching PIN. Network errors and rejected switches
+never unlock the profile. Cancellation and superseded profile/account/lock state invalidate the
+attempt. A successful switch cannot dismiss another account's PIN prompt,
+and cancelling retains the gate unless an authorized fallback profile activates.
+That activation gate is distinct from editing an existing profile's Plex user.
+A requested "watching as" change remains an in-memory proposal: the saved
+binding, current server/Discover credentials, and other accounts stay unchanged
+through verification, wrong PINs, and connection errors. Successful authentication
+publishes the new binding and credentials together; Cancel discards the proposal.
+Stale completions after another selection, profile/lock change, credential
+replacement, or account removal cannot commit it. Account owners use the same
+verification path as other Home users, not an unauthenticated clear-binding row.
+The shared keypad cancels its final-digit display delay before cancellation or
+disappearance, so an abandoned entry cannot submit afterward. Mobile PIN sheets
+also block interactive dismissal while the gate remains unresolved.
+This does not create, remove or change a separate Plozz Profile Lock, even when
+the person chose the same digits for both locks.
 
 Foreground account or profile-membership credential recovery must leave a
 launching session in `launching`. The shell's bootstrap owns profile/PIN gates

@@ -193,7 +193,7 @@ public final class NativeSubtitleCueOutput: NSObject, AVPlayerItemLegibleOutputP
 
     public func updateStyle(_ style: SubtitleStyle) {
         self.style = style
-        item?.textStyleRules = rendersThroughPlayer ? style.textStyleRules() : nil
+        item?.textStyleRules = rendersThroughPlayer ? (style.textStyleRules() ?? []) : []
     }
 
     public func setSystemPresentation(_ active: Bool) {
@@ -232,7 +232,9 @@ public final class NativeSubtitleCueOutput: NSObject, AVPlayerItemLegibleOutputP
         previous?.setDelegate(nil, queue: nil)
         if let previous { item.remove(previous) }
         item.add(next)
-        item.textStyleRules = rendersThroughPlayer ? style.textStyleRules() : nil
+        // Clearing with nil can reach MediaToolbox's text-markup array parser
+        // as a null CFArray during a live caption ownership transition.
+        item.textStyleRules = rendersThroughPlayer ? (style.textStyleRules() ?? []) : []
         timeline.reset()
         onCues([])
     }

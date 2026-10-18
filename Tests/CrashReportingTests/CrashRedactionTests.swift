@@ -95,12 +95,67 @@ final class CrashRedactionTests: XCTestCase {
         }
     }
 
-    private func playbackFailure(status: Int) throws -> Event {
+    func testPlaybackEvidenceRoundTripsAndScrubsNestedPrivateValues() throws {
+        var root = PlaybackDeliveryEvidence.Request(
+            sequence: 1, resource: .root, method: .get, startedMilliseconds: 10
+        )
+        root.status = 200
+        root.format = .hls
+        root.receivedBytes = 100
+        let evidence = PlaybackFailureEvidence(
+            route: .nativeHLS, firstFrameReady: false, nativeCapture: .captured,
+            nativeErrors: [
+                .init(domain: "AVFoundationErrorDomain", code: -11850),
+                .init(domain: "CoreMediaErrorDomain", code: -12939)
+            ],
+            nativeLogErrors: [.init(domain: "CoreMediaErrorDomain", code: -12312)],
+            delivery: .init(root: root, recent: [root])
+        )
+        let event = try playbackFailure(status: 403, evidence: evidence)
+        var raw = SentryCrashReporter.playbackEvidenceData(evidence)
+        raw["url"] = "private"
+        raw["nativeErrors"] = [["domain": "coremedia", "code": -12939, "description": "private"]]
+        var delivery = try XCTUnwrap(raw["delivery"] as? [String: Any])
+        var request = try XCTUnwrap(delivery["root"] as? [String: Any])
+        request["headers"] = ["Authorization": "private"]
+        delivery["root"] = request
+        raw["delivery"] = delivery
+        event.context?["playback_failure"]?["evidence"] = raw
+        let clean = try XCTUnwrap(CrashRedaction.scrub(event))
+        let bytes = try JSONSerialization.data(withJSONObject: XCTUnwrap(clean.context?["playback_failure"]))
+        XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("private"))
+        let diagnostic = try JSONDecoder().decode(PlaybackFailureDiagnostic.self, from: bytes)
+        XCTAssertEqual(diagnostic.evidence?.delivery?.root, root)
+        XCTAssertEqual(diagnostic.evidence?.nativeErrors.last?.code, -12939)
+        XCTAssertEqual(clean.fingerprint?.suffix(3), ["nativeHLS", "coremedia", "-12939"])
+    }
+
+    func testPlaybackEvidenceRejectsUnboundedAndUntrustedNestedValues() throws {
+        let evidence = PlaybackFailureEvidence(
+            route: .nativeHLS, nativeErrors: [.init(domain: "CoreMediaErrorDomain", code: -12939)]
+        )
+        for (key, value) in [
+            ("route", "private" as Any),
+            ("nativeCapture", "private" as Any),
+            ("nativeErrors", [["domain": "private", "code": -12939]] as Any),
+            ("nativeErrors", [["domain": "coremedia", "code": Int.max]] as Any),
+            ("nativeErrors", Array(repeating: ["domain": "coremedia", "code": -12939] as [String: Any], count: 9) as Any),
+            ("delivery", ["recent": [["sequence": -1]]] as Any)
+        ] {
+            let event = try playbackFailure(status: 403, evidence: evidence)
+            var raw = SentryCrashReporter.playbackEvidenceData(evidence)
+            raw[key] = value
+            event.context?["playback_failure"]?["evidence"] = raw
+            XCTAssertNil(CrashRedaction.scrub(event), key)
+        }
+    }
+
+    private func playbackFailure(status: Int, evidence: PlaybackFailureEvidence? = nil) throws -> Event {
         let diagnostics = PlaybackFailureDiagnostics()
         let buffer = CrashPlaybackBuffer()
         diagnostics.start { buffer.append($0) }
         let attempt = try XCTUnwrap(diagnostics.begin(layer: .iptvProxy, content: .live))
-        attempt.fail(stage: .response, reason: .authentication, httpStatus: status, format: .html)
+        attempt.fail(stage: .response, reason: .authentication, httpStatus: status, format: .html, evidence: evidence)
         return try XCTUnwrap(SentryCrashReporter.playbackEvent(XCTUnwrap(buffer.last)))
     }
 

@@ -33,6 +33,7 @@ final class AppAdmissionIntegrationTests: XCTestCase {
         standalone: Bool = false,
         profileSetupComplete: Bool = false,
         withAccount: Bool = false,
+        accountProvider: ProviderKind = .jellyfin,
         profileSecrets: (any SecureStoring)? = nil
     ) throws -> Harness {
         let suite = "AppAdmissionIntegrationTests.\(UUID().uuidString)"
@@ -40,15 +41,22 @@ final class AppAdmissionIntegrationTests: XCTestCase {
             UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite)
         }
         let defaults = UserDefaults(suiteName: suite)!
-        let accounts = AccountStore(secureStore: InMemorySecureStore())
+        let secrets = InMemorySecureStore()
+        let accounts = AccountStore(
+            secureStore: secrets, mediaCredentialVault: MediaCredentialVault(secureStore: secrets),
+            credentialJournal: try CredentialMutationJournal(
+                store: DurableLocalStateStore(secureStore: InMemorySecureStore())
+            )
+        )
         if withAccount {
             try accounts.add(Account(
                 id: "media-account",
                 server: MediaServer(
                     id: "server",
                     name: "Server",
-                    baseURL: URL(string: "https://server.example")!,
-                    provider: .jellyfin
+                    baseURL: URL(string: accountProvider == .mediaShare
+                        ? "smb://server.example/media" : "https://server.example")!,
+                    provider: accountProvider
                 ),
                 userID: "viewer",
                 userName: "Viewer",
@@ -75,6 +83,28 @@ final class AppAdmissionIntegrationTests: XCTestCase {
         XCTAssertFalse(harness.state.pendingStandaloneLiveTVEntry)
         XCTAssertEqual(harness.state.state, .onboarding(.selectingServer, canReturnToApp: false))
         XCTAssertEqual(harness.profiles.activeProfile.name, "Me")
+    }
+
+    func testSyncedUnknownIdentityDoesNotBlockKnownNonPlexSources() throws {
+        for provider in [ProviderKind.iptv, .jellyfin, .emby, .silo, .mediaShare] {
+            let harness = try makeHarness(
+                profileSetupComplete: true, withAccount: true, accountProvider: provider
+            )
+            harness.state.bootstrap()
+            harness.state.profileFlow.switchProfile(to: harness.profiles.activeProfileID)
+            XCTAssertTrue(harness.state.isLiveTVProfileAuthorized, "Initial admission: \(provider)")
+
+            harness.profiles.noteIdentityQuestions(
+                for: ["media-account"],
+                forProfile: harness.profiles.activeProfileID,
+                knownNonPlexAccountIDs: []
+            )
+
+            XCTAssertTrue(harness.profiles.activeProfile.awaitsIdentity(amongAccounts: ["media-account"]))
+            XCTAssertNil(harness.state.profileFlow.pendingIdentityAccountID)
+            XCTAssertTrue(harness.state.isLiveTVProfileAuthorized, "Provider has no identity chooser: \(provider)")
+            XCTAssertEqual(harness.profiles.activeProfile.pendingIdentityAccountIDs, ["media-account"])
+        }
     }
 
     func testInAppIPTVSetupRetainsTheSignedInNavigationThroughCompletion() throws {

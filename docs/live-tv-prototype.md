@@ -11,6 +11,35 @@ management, guide/search, Multiview, playback and profile-scoped iCloud sync. Ex
 profile authorization, parental approval, account, source and persistence gates
 remain in force.
 
+For past failures, attempted repairs and related tests, see the short
+[IPTV troubleshooting history](iptv-history.md). It is historical context,
+not a specification.
+
+## Diagnosing disappearing sources
+
+**Send to Developer** automatically includes a structured Live TV source journal
+on iPhone, iPad and Apple TV, including TestFlight/Release builds. No debug launch
+arguments or playback overlay are required. Reproduce the disappearance and send
+diagnostics before removing or re-adding accounts; the send action captures the
+current account selection, active profile/storage scopes, saved source document
+and enrollment suppression without refreshing a provider.
+
+The local journal retains up to 48 hours, 512 events and 256 KiB across restarts,
+separately from the short Recent Activity buffer. It records missing versus
+unreadable source storage, save/removal and sync origins, suppression changes,
+account membership, Sources/guide admission and loading, enrollment decisions,
+and correlated IPTV catalog progress/failures. Launch IDs, sequence numbers and
+build numbers distinguish sessions and versions. Provider catalog IDs link an
+import to its account; profile, account, source and scope identifiers are hashed.
+Names, server/playlist addresses, credentials, content and error descriptions
+are never journal fields. Source snapshots cap detailed entries at 64 and report
+the omitted count; eviction and persistence failures are explicit in the export.
+
+The journal is local application-support data excluded from backup. Upload still
+requires the existing crash-reporting consent and an explicit diagnostic send;
+recording does not enable automatic uploads. Do not interpret absent events
+after an eviction or storage failure as proof an action never occurred.
+
 ## Cached Home cards
 
 Normal Live TV use publishes a small, profile-scoped **local** Home snapshot:
@@ -344,8 +373,17 @@ suffixes, never original filenames. The suffix must agree with the encrypted
 upstream URL. Known raw transport-stream URLs use Aether's regular live-source
 path rather than its HLS-only native bypass; HLS retains native playback,
 including fragmented MP4. Hosted tests require a rendered frame and advancing
-time through the authenticated proxy on both platforms. Extensionless raw
-streams are not classified by this suffix-based correction.
+time through the authenticated proxy on both platforms. Opaque or otherwise
+undeclared HTTP addresses receive a bounded content check before engine loading:
+at most 1,024 consumed bytes and a 15-second request/resource deadline. Manifest
+bytes select native HLS (including fragmented MP4); framed MPEG-TS selects raw
+ingest, regardless of a missing or generic MIME type. Other bytes go to Aether's
+container probe rather than being assumed to be HLS. The check closes before
+playback opens its request, so it adds a sequential request for these addresses,
+not a simultaneous provider stream. It applies to legacy direct HTTP channels
+as well as account-backed proxy URLs; declared formats skip the extra check.
+Cancellation or replacement retires the owned check, and an HTTP refusal is
+reported rather than retried on another route.
 The proxy observes player disconnects while waiting for upstream headers or
 body data, cancels its native HTTP tasks, and drains owned request work on close.
 Within one live proxy, root requests are serialized so duplicate player probes
@@ -435,16 +473,54 @@ Favorites and recent channels are saved per Plozz profile and restored across
 sessions. Initially empty or temporarily unavailable source catalogs do not
 erase saved IDs. Unreadable preferences are not overwritten, and failed writes
 offer a retry rather than displaying an unsaved change as successful.
-Search/category state remains session-scoped. Playlist addresses, optional guide
+Search text remains session-scoped; browse selections are saved locally with
+the profile. Playlist addresses, optional guide
 addresses and their order, source names, and enabled states are stored securely
 per profile. Server sources store an account reference, not duplicate credentials.
 View preferences and source management live in **Settings > Live TV**.
-On Apple TV, Sources shows the actual source controls in the existing detail
-pane, without an intermediate Manage sources page. Enable/disable and removal
-are available there; playlist/guide editing and server renaming open their
-specific editors directly. Hidden-channel restoration also lives in its detail
-pane. Setup and source pages reuse Plozz's shared settings groups, row labels,
+On Apple TV, Sources stays inside the Settings detail pane. Saved sources use
+compact icon/name/status rows instead of repeating every control and hostname.
+Playlist icons optionally load the source origin's favicon, with a generic
+fallback; no playlist credentials or third-party favicon service are used.
+Each source opens its controls and diagnostics on a child page with Back.
+Guide lookback/lookahead use native value menus on TV so all day choices fit
+the fixed detail column without overflowing horizontal pills.
+Child pages inherit the workspace background rather than drawing a second
+gradient. Hidden-channel restoration also lives in its detail pane.
+Setup and source pages reuse Plozz's shared settings groups, row labels,
 switches, focus/card styles and page heading.
+
+**Manage IPTV channels** is available from Categories on mobile and Manage
+channels in the TV sidebar. Category choices are scoped to the configured
+source and profile, so equally named groups from different sources stay separate.
+Automatic follows the regional filter, Show overrides it, and Hide excludes the
+category. A hidden membership wins when a channel belongs to several categories;
+an individual Show channel exception wins over category/regional filtering.
+Manual channel hiding and scan exclusions remain separate.
+
+Management links use shared disclosure labels with group-owned padding.
+Visibility uses a native menu on iPhone/iPad and a disclosed selection page
+on TV. Hidden-channel recovery uses native secondary action buttons aligned
+to the trailing edge; narrow widths and large text place the action below the
+description rather than squeezing it.
+
+The optional regional filter includes channels matching **any selected country
+OR language**. It uses supplied tags, normalizing known codes/English names, not
+guesses from channel names. Nonmatching and untagged channels appear in the
+searchable **Hidden channels** page with a reason and a Show channel action.
+Nothing is deleted. Reset category and region visibility retains individual
+hidden channels, scan exclusions, and favorites. Settings also offers this reset.
+Non-IPTV providers are not region-filtered.
+
+Favorite category follows membership after refresh without writing a favorite
+record for every channel. Individual favorites survive unfavoriting a category;
+individually removed favorites remain exceptions. Rules follow new channels in
+the same category, while a renamed category is a new choice. Category, region,
+and individual exception choices participate in the existing profile-scoped
+Live TV sync; browse filters and recent playback remain local. Hidden channels
+are excluded from guide/search, pickers, and Home without stopping playback
+already deliberately started.
+
 On iPhone/iPad, Sources and its grouped detail pages use a scroll-based settings
 surface rather than embedding multiple navigation links in one native List cell.
 Saved sources appear first as compact icon/name/status rows. Each opens its own
@@ -452,6 +528,20 @@ page for enabling, editing, checking and removing that source; guide policy and
 diagnostics sit behind named links rather than expanding every source inline.
 Each tap pushes only its selected destination, and Back returns one level.
 This applies to both Settings and the Live TV toolbar's Sources entry.
+Channel, guide and access failures appear beside the affected enabled source,
+using the shared theme-aware inline error style and naming failed guides.
+On mobile, the source row, error and Retry share one group item; dividers
+separate sources, never a source from its own error.
+Retry shows an inline loading spinner and label, prevents duplicate taps, and
+briefly retains feedback even when the provider refuses the request immediately.
+During a source Retry, that inline indicator replaces the source's loading
+subtitle and page-wide loading indicators instead of showing duplicate spinners.
+Source Retry refreshes only that playlist and its guides, or that server; it
+preserves other sources' channels, errors and in-flight server-guide requests.
+The source detail page offers the same error and Retry. Page-wide storage,
+configuration, enrollment and profile-access failures appear above the source
+list rather than in a duplicate generic footer. Provider access errors are
+reported as received, not interpreted as proof that an IPTV trial expired.
 When embedded in a native List, the iPhone/iPad Sources pane clears its row's
 background, separator, and extra insets, so the shared settings gradient and
 group keylines continue through the whole page rather than an opaque inner panel.
@@ -497,6 +587,22 @@ not the Cloud sync checkpoint stored alongside them. A checkpoint-only write mus
 not revoke an open Sources page, discard a pending channel refresh, or stop channel
 checks. Checkpoints remain intact in secure storage; real source edits, account
 changes, profile locks and parental-approval revocations still invalidate old work.
+An open Sources page also observes profile-scoped local and synced source changes.
+If a real configuration change invalidates its snapshot, it cancels the old work
+and restores the newly authorized cached catalogue without requiring Retry or
+reopening. Changes while inactive wait for normal presentation admission; they
+never bypass a profile lock or re-enable a deliberately disabled source.
+App and Sources admission use the same provider-aware identity check: only an
+active, locally present Plex account can owe a server-user choice. Sync can
+record pending questions before an account's provider is known; a marker that
+later resolves to IPTV, Jellyfin, Emby, Silo or a network share must not block
+Live TV. These markers remain stored, and genuine Plex questions still gate
+access until answered; no identity or PIN requirement is cleared by this check.
+Diagnostic builds record Sources admission transitions and rejection stages in
+the bounded `HandoffDiagnostics` journal under `SOURCES`. These distinguish app
+entry gates, runtime invalidation and changed catalogue authority without logging
+profile/account names, identifiers, credentials or source addresses. The mobile
+Settings host also records which app-entry conditions are pending.
 Earlier prototype builds did not store Favorites or Recents on disk, so there
 is no prior in-memory history to migrate on the first updated launch.
 
@@ -1287,6 +1393,14 @@ Generated completion never writes resume position or sends a legacy
 playback-stop event. Pending completions retain runtime consent and account
 authorization checks; restoring an outbox cannot recreate an expired grant.
 
+IPTV provider catalogues retain their indexed metadata, including on-demand
+movies/shows where supplied, rather than downloaded video. SQLite retains at
+most a 4 MiB reusable WAL after a completed reset/checkpoint. The client also
+attempts a non-waiting checkpoint of oversized legacy journals on first use and
+after imports. Active readers defer truncation; their snapshots and committed
+catalogue are never removed to meet a space target. No database sidecars are
+deleted manually, and these limits do not cap the underlying catalogue itself.
+
 Live TV follows the main iCloud Sync switch for each profile. The existing
 portable channel covers channel preferences, matching hints and generated
 definitions/snapshots. A separate encrypted source channel carries playlist
@@ -1295,6 +1409,41 @@ Both use the same existing CloudKit engine. Source records reuse deployed
 encrypted fields in an isolated zone; old clients cannot erase them.
 Parental approvals, history grants and channel health remain device-local.
 Server sign-in credentials retain their existing authorization flow.
+
+Server-source enablement and enrollment suppression travel through the
+non-secret portable channel. Incoming state cannot overwrite a local re-add,
+removal, or enablement change that has not been captured. A captured server
+change remains protected across restarts until the ledger acknowledges its
+exact digest; delayed cloud state and fallback hydration cannot bypass that
+receipt. Both app shells pass the incoming delta and capture receipts together.
+Confirmed hard deletions retain the removed ledger entry's receipt for that
+apply, so unchanged sources still follow legitimate deletions on other devices.
+This does not delete or replace the authenticated server account.
+The local observation also records suppression caused by accepted remote source
+changes. Split source/enrollment delivery can then re-enable a source without
+mistaking the earlier remote disable for a new local decision. Only the applied
+accounts advance that observation; unrelated local changes stay protected.
+Suppression also keeps its remote origin in the same atomic local document as
+the decision itself, so a failed journal/observation commit cannot lose that
+provenance. Explicit local decisions clear it; saving an already-suppressed
+unrelated source remotely cannot relabel a local restriction.
+Source tombstones retain their account association locally. Enrollment updates
+must also respect that account's uncaptured or unacknowledged source removal,
+including removal of a source that was already disabled.
+Exact remote server records and resulting local-state digests (including
+deletions) are saved atomically with the source configuration, scoped to the
+profile and iCloud account epoch. A
+failed source-record journal write can then be retried or captured without
+mistaking the already-applied remote state for new local intent. Local server
+edits invalidate the affected receipts, including edit-away-and-back sequences.
+Accepted descriptors awaiting native enrollment replace older deletion receipts
+even without a configuration change. Enrollment also protects new, uncaptured
+source IDs for the same account. The encrypted playlist channel retains its
+separate checkpoint.
+`IPTVCloudOverwriteHostedTests` exercises these races on iPhone/iPad through
+the separate presentation test host, isolated Keychain/defaults storage, and
+controlled incoming payloads. It does not mutate the normal app's sources or
+claim to reproduce CloudKit network delivery timing.
 
 These generated-channel snapshots are different from IPTV catalogue/guide
 downloads: they carry immutable library-item inputs so devices agree on the
@@ -1331,6 +1480,16 @@ state commits before engine cursors advance; failed persistence stops delivery
 and retries from the last durable state. Source transfer retains a 256 MiB
 aggregate record budget rather than silently dropping
 files when an account exceeds the device's supported working set.
+
+The non-secret Live TV state channel also uses an incremental local record
+ledger, not a whole-library JSON rewrite on every acknowledgement. Matching
+local/server payloads are stored once while edit clocks, server fields, pending
+changes and deletions retain their exact semantics. Legacy whole-ledger JSON
+(including files above 256 MiB) is validated and migrated before replacement.
+Unchanged entry files are reused; failed saves retain the committed index.
+Startup validates that index before reclaiming unreferenced entry files and
+abandoned atomic writes for this channel. Credential channels remain encrypted;
+CloudKit record formats and schedules are unchanged.
 
 Incomplete transfers remain pending. Identity changes are deferred while
 playback holds their identities, while authorization revocation takes effect
@@ -1400,6 +1559,13 @@ The journal enforces its **128 MiB serialized-storage bound** before writing.
 Each export and incoming preparation has a separate 128 MiB staging quota and
 50,000-record bound, not a 64 MiB whole-library memory limit. Encoded records
 above a **4 MiB working buffer** spill to invocation-owned, memory-mapped files.
+Their file names are unlinked before payload bytes are written. Each returned
+`Data` owns its mapping, so releasing the export owner cannot invalidate a
+retained value, and process termination reclaims the backing without requiring
+`deinit`. Startup removes only recognized old numbered-record staging folders
+from this app's temporary directory, off-main, even when sync is disabled.
+These are per-operation working limits, not a claim that all simultaneously
+retained exports together occupy only 128 MiB.
 Journal reopening validates one wrapper at a time with the same bounded backing;
 prepared snapshot entries retain only validated identity and encoded bytes, not
 a second decoded copy of every item. Opt-in replay and failed-apply hydration use
@@ -1420,9 +1586,10 @@ Journal commits stage record descriptors rather than another fully serialized
 collection. The worker encodes and writes one bounded wrapper at a time; exact
 serialized sizes are checked before any new records are written. Storage quota,
 record-size and record-count failures remain explicit and never authorize a
-partial schedule. Retired temporary backing is removed off-main; failed/cancelled
+partial schedule. Retired temporary backing is reclaimed with its mappings; failed/cancelled
 operations retain no reusable authority. A fresh device can receive more than
 64 MiB of valid parts in one preparation or progressively across deliveries.
+
 Replacing or deleting a known library definition retires snapshot parts only
 when no remaining definition revision references that generation. Current,
 future, retained and pending revisions all count. Retirement uses explicit
@@ -1478,6 +1645,54 @@ tests, separate from the real catalog used by the app. Without supplied channels
 the Release model is empty; imported listings never receive synthetic gap fillers.
 
 ## Live activity and diagnostics
+
+Account-backed IPTV guide batches write `IPTV_GUIDE` events to Recent Activity
+on both platforms. A random batch ID links the source mode, requested channel
+count, Xtream-to-XMLTV fallback counts (empty, malformed, or unavailable), and
+completion outcome. Up to six operation samples retain the first four, first
+failure, and last operation, with the omitted count reported explicitly.
+Samples identify `get_simple_data_table` or XMLTV, lookup/request/download/parse
+stage, observed HTTP status and allowlisted response type, bytes, cache use,
+returned listing count, elapsed time, and a classified failure/network code.
+Cached XMLTV does not invent an HTTP response; cancellation is not a failure
+or success. These diagnostics add no requests or retries and do not change
+fallback selection. They contain no hosts, URLs, account/channel/program
+identities, credentials, raw headers/bodies, or error descriptions.
+
+Guide-only endpoint failures show **Guide unavailable**, not a claim that the
+server's channel API is unsupported. Working channels and previously loaded
+listings remain available. After reproducing, use **Settings > Help & Diagnostics
+> Recent Activity** to copy the log, or enable **Share Crash Reports** and use
+**Send Diagnostics > Send to Developer** with a short identifying note.
+Guide events are local recent activity, not new automatic telemetry; a reporter
+must run a build containing this instrumentation to supply the missing evidence.
+
+Copied playback reports use `plozz-live-tv-2`; `stream_format` is separate from
+the report-format identifier. Both the local report and opt-in failure telemetry
+retain the engine route, first-frame state, up to eight nested native error
+domain/code pairs, and the last four native error-log domain/code pairs. Native
+logs are read off the UI actor with a 500 ms deadline and at most two outstanding
+readers process-wide. Missing items, busy readers, and timed-out captures are
+explicit, not interpreted as an absence of native errors. A replaced or stopped
+playback cannot publish a late capture into its successor.
+
+The authenticated IPTV proxy keeps a bounded, playback-local delivery history:
+the latest completed root GET (or the current attempt until one completes),
+first failed upstream attempt, and eight recent attempts,
+including successful responses. Facts include root/child role, GET/HEAD, relative
+timing, HTTP status, observed format, redirects/cross-origin delivery, range
+presence/validity, expected/received bytes, and network error codes. HLS facts
+include target and maximum segment durations, media sequence, segment count,
+master/end-list flags, byte ranges, initialization maps, and encryption presence.
+They are observations, not a playlist validator or a new retry policy. A child
+404 remains available even if AVFoundation replaces it with a generic failure;
+an earlier recovered request does not become the terminal error.
+
+These reports never include URLs, hosts, IPs, channel names, response bodies,
+raw headers, native descriptions, or native error-log comments. Local copying
+does not enable telemetry; the existing consent-generation, report-count, and
+deduplication gates still apply. Diagnostics make a subsequent failure more
+actionable but cannot reconstruct the missing evidence in an older report.
 
 The centered activity indicator is owned by `LiveChannelPlayerModel` and driven
 by AetherEngine's typed `playbackPhase`, gated on

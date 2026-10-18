@@ -30,7 +30,7 @@ final class NativeLibraryCardHostedTests: XCTestCase {
         try await checkNativeBrowseArtwork(onlineDelay: 0)
     }
 
-    func testSharedPosterMeasurementDoesNotChangeCommittedArtwork() throws {
+    func testSharedPosterMeasurementDoesNotChangeCommittedArtwork() async throws {
         let image = try XCTUnwrap(UIImage(data: artworkData(.red)))
         let host = UIHostingController(rootView: SharedZoomFixture(image: image, aspect: 2 / 3))
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
@@ -53,6 +53,12 @@ final class NativeLibraryCardHostedTests: XCTestCase {
         host.view.layoutIfNeeded()
         let poster = try XCTUnwrap(descendant(NativePosterButton.self, in: host.view))
         poster.layoutIfNeeded()
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !(try poster.image.map {
+            try isRed($0, at: CGPoint(x: $0.size.width * $0.scale / 2, y: $0.size.height * $0.scale / 2))
+        } ?? false), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         let rendered = try XCTUnwrap(poster.image)
         XCTAssertEqual(rendered.size, CGSize(width: 260, height: 390))
         XCTAssertTrue(try isRed(rendered, at: CGPoint(
@@ -400,7 +406,19 @@ final class NativeLibraryCardHostedTests: XCTestCase {
             window.makeKeyAndVisible()
             window.layoutIfNeeded()
             let poster = try XCTUnwrap(descendant(NativePosterButton.self, in: host.view))
+            let artworkDeadline = ContinuousClock.now + .seconds(5)
+            while ContinuousClock.now < artworkDeadline {
+                let bitmap = try XCTUnwrap(poster.image)
+                let marker = try pixel(bitmap, at: CGPoint(
+                    x: bitmap.size.width * bitmap.scale * 0.15, y: bitmap.size.height * bitmap.scale * 0.4
+                ))
+                if marker[0] > 180 && marker[1] < 100 { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
             let before = try XCTUnwrap(poster.image)
+            XCTAssertGreaterThan(try pixel(before, at: CGPoint(
+                x: before.size.width * before.scale * 0.15, y: before.size.height * before.scale * 0.4
+            ))[0], 180)
             XCTAssertEqual(before.size, poster.artworkView.bounds.size,
                            "The native alpha-mask contract must hold at 2x, including fractional layout heights.")
             if aspect < 1 {
@@ -716,6 +734,12 @@ final class NativeLibraryCardHostedTests: XCTestCase {
             }
             window.layoutIfNeeded()
             let poster = try XCTUnwrap(descendant(NativePosterButton.self, in: host.view))
+            let artworkDeadline = ContinuousClock.now + .seconds(5)
+            while ContinuousClock.now < artworkDeadline {
+                let image = try XCTUnwrap(poster.image)
+                if try pixel(image, at: CGPoint(x: image.size.width / 2, y: image.size.height / 2))[2] > 180 { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
             let bitmap = try XCTUnwrap(poster.image)
             XCTAssertEqual(try pixel(bitmap, at: .zero)[3], 255)
             XCTAssertFalse(poster.artworkView.masksFocusEffectToContents)

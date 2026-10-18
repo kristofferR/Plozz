@@ -11,33 +11,34 @@ import Observation
 import SwiftUI
 import UIKit
 
-/// Mirrors HeroPresentation's placement order while keeping provider candidates behind live routing.
+/// Portrait selection is independent of when the separate title logo resolves.
 enum PlozziOSHeroArtworkFallback {
+    static func cacheIdentity(_ identity: String, style: HeroArtworkStyle) -> String {
+        style == .compactPortrait ? "\(identity)|portrait-hero-v1" : identity
+    }
+
     static func resolve(
         for item: MediaItem,
-        presentation: HeroPresentation,
         style: HeroArtworkStyle,
         surfaceRole: HeroTrailerSurfaceRole,
         router: ArtworkRouter = .shared
     ) async -> URL? {
-        await router.artworkURL(
-            for: item,
-            placements: placements(
-                style: style, surfaceRole: surfaceRole,
-                drawsLogoOverArtwork: !presentation.logoReferences.isEmpty
+        if style == .compactPortrait {
+            return await router.portraitHeroArtworkURL(
+                for: item, placement: surfaceRole == .home ? .homeHero : .detailBackdrop
             )
+        }
+        return await router.artworkURL(
+            for: item,
+            placements: placements(surfaceRole: surfaceRole)
         )
     }
 
     static func placements(
-        style: HeroArtworkStyle,
-        surfaceRole: HeroTrailerSurfaceRole,
-        drawsLogoOverArtwork: Bool
+        surfaceRole: HeroTrailerSurfaceRole
     ) -> [ArtworkPlacement] {
         let backdrop: ArtworkPlacement = surfaceRole == .home ? .homeHero : .detailBackdrop
-        return style == .compactPortrait && !drawsLogoOverArtwork
-            ? [.poster, backdrop]
-            : [backdrop, .poster]
+        return [backdrop, .poster]
     }
 }
 
@@ -610,9 +611,9 @@ struct PlozziOSHeroStage<Foreground: View>: View {
             + (pullDistance > 0 ? 2 : 0)
         let artworkItem = item
         let artworkPlacement: ArtworkPlacement = surfaceRole == .home ? .homeHero : .detailBackdrop
-        let onlineArtworkFallback: @Sendable () async -> URL? = { [presentation, style, surfaceRole] in
+        let onlineArtworkFallback: @Sendable () async -> URL? = { [style, surfaceRole] in
             await PlozziOSHeroArtworkFallback.resolve(
-                for: artworkItem, presentation: presentation, style: style, surfaceRole: surfaceRole
+                for: artworkItem, style: style, surfaceRole: surfaceRole
             )
         }
         let background = Group {
@@ -634,6 +635,7 @@ struct PlozziOSHeroStage<Foreground: View>: View {
                 } reflection: { reflectionWidth, contentWidth in
                     PlozziOSHeroReflection(
                         presentation: presentation,
+                        style: style,
                         asyncFallbackURL: onlineArtworkFallback,
                         sharedResolutionIdentity: artworkAppearanceID,
                         itemID: item.id,
@@ -1037,8 +1039,12 @@ private struct PlozziOSHeroBackdrop: View {
             previewVariant: .heroPreview,
             artworkPolicy: artworkPolicy.forPlacement(.detailBackdrop),
             asyncFallbackURL: asyncFallbackURL,
-            pinIdentity: "\(surfaceRole == .home ? "home" : "detail"):\(presentation.itemID)",
-            sharedResolutionIdentity: sharedResolutionIdentity
+            pinIdentity: PlozziOSHeroArtworkFallback.cacheIdentity(
+                "\(surfaceRole == .home ? "home" : "detail"):\(presentation.itemID)", style: style
+            ),
+            sharedResolutionIdentity: sharedResolutionIdentity.map {
+                PlozziOSHeroArtworkFallback.cacheIdentity($0, style: style)
+            }
         ) {
             palette.backgroundBase
         }
@@ -1301,7 +1307,7 @@ struct PlozziOSHomeWipeBackdrop: View {
         let artworkItem = item
         let onlineArtworkFallback: @Sendable () async -> URL? = { [style] in
             await PlozziOSHeroArtworkFallback.resolve(
-                for: artworkItem, presentation: presentation, style: style, surfaceRole: .home
+                for: artworkItem, style: style, surfaceRole: .home
             )
         }
         PlozziOSReflectedHeroStage(height: height) { usableWidth in
@@ -1314,6 +1320,7 @@ struct PlozziOSHomeWipeBackdrop: View {
         } reflection: { reflectionWidth, contentWidth in
             PlozziOSHeroReflection(
                 presentation: presentation,
+                style: style,
                 asyncFallbackURL: onlineArtworkFallback,
                 sharedResolutionIdentity: artworkAppearanceID,
                 itemID: item.id,
@@ -1346,8 +1353,11 @@ struct PlozziOSHomeWipeBackdrop: View {
                 && trailerController.isPlaying,
             ignoresHorizontalSafeArea: false,
             scrimOpacity: 0,
-            sharedResolutionIdentity: sharedResolutionIdentity
+            sharedResolutionIdentity: PlozziOSHeroArtworkFallback.cacheIdentity(
+                sharedResolutionIdentity, style: style
+            )
         )
+        .id(style == .compactPortrait)
     }
 
 }
@@ -1386,7 +1396,7 @@ struct PlozziOSHomeStaticBackdrop: View {
         let artworkItem = item
         let onlineArtworkFallback: @Sendable () async -> URL? = { [style] in
             await PlozziOSHeroArtworkFallback.resolve(
-                for: artworkItem, presentation: presentation, style: style, surfaceRole: .home
+                for: artworkItem, style: style, surfaceRole: .home
             )
         }
         PlozziOSReflectedHeroStage(
@@ -1420,6 +1430,7 @@ struct PlozziOSHomeStaticBackdrop: View {
         } reflection: { reflectionWidth, contentWidth in
             PlozziOSHeroReflection(
                 presentation: presentation,
+                style: style,
                 asyncFallbackURL: onlineArtworkFallback,
                 sharedResolutionIdentity: artworkAppearanceID,
                 itemID: item.id,
@@ -1448,6 +1459,7 @@ struct PlozziOSHomeStaticBackdrop: View {
             PlozziOSExtendedHeroArtwork(height: height) { layout in
                 PlozziOSSlidingHeroArtwork(
                     presentation: presentation,
+                    style: style,
                     asyncFallbackURL: asyncFallbackURL,
                     sharedResolutionIdentity: sharedResolutionIdentity,
                     width: layout.width,
@@ -1458,6 +1470,7 @@ struct PlozziOSHomeStaticBackdrop: View {
         } else {
             PlozziOSSlidingHeroArtwork(
                 presentation: presentation,
+                style: style,
                 asyncFallbackURL: asyncFallbackURL,
                 sharedResolutionIdentity: sharedResolutionIdentity,
                 width: width,
@@ -1473,6 +1486,7 @@ private struct PlozziOSSlidingHeroArtwork: View {
     @Environment(\.plozzArtworkPolicy) private var artworkPolicy
 
     let presentation: HeroPresentation
+    let style: HeroArtworkStyle
     let asyncFallbackURL: (@Sendable () async -> URL?)?
     let sharedResolutionIdentity: String?
     let width: CGFloat
@@ -1506,8 +1520,10 @@ private struct PlozziOSSlidingHeroArtwork: View {
             previewVariant: .heroPreview,
             artworkPolicy: artworkPolicy.forPlacement(.detailBackdrop),
             asyncFallbackURL: asyncFallbackURL,
-            pinIdentity: "home:\(presentation.itemID)",
-            sharedResolutionIdentity: sharedResolutionIdentity
+            pinIdentity: PlozziOSHeroArtworkFallback.cacheIdentity("home:\(presentation.itemID)", style: style),
+            sharedResolutionIdentity: sharedResolutionIdentity.map {
+                PlozziOSHeroArtworkFallback.cacheIdentity($0, style: style)
+            }
         ) {
             palette.backgroundBase
         }
@@ -1524,8 +1540,10 @@ private struct PlozziOSSlidingHeroArtwork: View {
             previewVariant: .heroPreview,
             artworkPolicy: artworkPolicy.forPlacement(.detailBackdrop),
             asyncFallbackURL: asyncFallbackURL,
-            pinIdentity: "home:\(presentation.itemID)",
-            sharedResolutionIdentity: sharedResolutionIdentity
+            pinIdentity: PlozziOSHeroArtworkFallback.cacheIdentity("home:\(presentation.itemID)", style: style),
+            sharedResolutionIdentity: sharedResolutionIdentity.map {
+                PlozziOSHeroArtworkFallback.cacheIdentity($0, style: style)
+            }
         ) {
             palette.backgroundBase
         }
@@ -1541,6 +1559,7 @@ private struct PlozziOSHeroReflection: View {
     @Environment(\.plozzArtworkPolicy) private var artworkPolicy
 
     let presentation: HeroPresentation
+    let style: HeroArtworkStyle
     let asyncFallbackURL: (@Sendable () async -> URL?)?
     let sharedResolutionIdentity: String?
     let itemID: String
@@ -1559,8 +1578,10 @@ private struct PlozziOSHeroReflection: View {
                 previewVariant: .heroPreview,
                 artworkPolicy: artworkPolicy.forPlacement(.detailBackdrop),
                 asyncFallbackURL: asyncFallbackURL,
-                pinIdentity: artworkPinIdentity,
-                sharedResolutionIdentity: sharedResolutionIdentity
+                pinIdentity: PlozziOSHeroArtworkFallback.cacheIdentity(artworkPinIdentity, style: style),
+                sharedResolutionIdentity: sharedResolutionIdentity.map {
+                    PlozziOSHeroArtworkFallback.cacheIdentity($0, style: style)
+                }
             ) {
                 Color.clear
             }
@@ -2039,13 +2060,7 @@ struct PlozziOSDetailHeroForeground: View {
                     labelledTrailer: false,
                     resume: .hidden
                 )
-                actionRow(
-                    actions: entries,
-                    collapsing: extras.count,
-                    labelledTrailer: false,
-                    resume: .full,
-                    stacksVertically: true
-                )
+                stackedActionRows(actions: entries)
             }
             .controlSize(.large)
             .padding(.top, style == .compactPortrait ? PlozziOSHeroMetrics.compactDetailActionSpacing : 0)
@@ -2131,8 +2146,7 @@ struct PlozziOSDetailHeroForeground: View {
         actions: [ActionEntry],
         collapsing collapseCount: Int,
         labelledTrailer: Bool,
-        resume: PlayResumeButtonLabel.ResumeTrailingStyle,
-        stacksVertically: Bool = false
+        resume: PlayResumeButtonLabel.ResumeTrailingStyle
     ) -> some View {
         let extras = orderedInlineExtras(from: actions)
         // Fold by priority, then render what survives in display order, so the
@@ -2152,16 +2166,37 @@ struct PlozziOSDetailHeroForeground: View {
         let menu = menuActions(collapsing: collapsed, from: actions)
         let fileBrowserAction = actions.first { $0.action == .browseFiles }
         return HeroActionRow(
-            stacksVertically: stacksVertically,
             alignment: style == .compactPortrait ? .center : .leading
         ) {
-            playActionButton(resume: resume, wrapsText: stacksVertically)
+            playActionButton(resume: resume)
             heroRequestButton
             ForEach(inline) { extra in
                 inlineExtraButton(extra, labelled: labelledTrailer)
             }
             if hasSourceVersionOptions || !menu.isEmpty || fileBrowserAction != nil {
                 sourceVersionMenuButton(actions: menu, fileBrowserAction: fileBrowserAction)
+            }
+        }
+    }
+
+    private func stackedActionRows(actions: [ActionEntry]) -> some View {
+        let extras = orderedInlineExtras(from: actions)
+        let fileBrowserAction = actions.first { $0.action == .browseFiles }
+        return HeroActionRow(
+            stacksVertically: true,
+            alignment: style == .compactPortrait ? .center : .leading
+        ) {
+            playActionButton(wrapsText: true)
+            heroRequestButton
+            if !extras.isEmpty || hasSourceVersionOptions || fileBrowserAction != nil {
+                WrappingHStackLayout(alignment: style == .compactPortrait ? .center : .leading) {
+                    ForEach(extras) { extra in
+                        inlineExtraButton(extra, labelled: false)
+                    }
+                    if hasSourceVersionOptions || fileBrowserAction != nil {
+                        sourceVersionMenuButton(actions: [], fileBrowserAction: fileBrowserAction)
+                    }
+                }
             }
         }
     }

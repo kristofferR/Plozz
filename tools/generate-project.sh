@@ -209,6 +209,25 @@ else
   echo "warning: $proj not found; skipping release-id bake"
 fi
 
+# A worktree-local display label, never part of Apple's numeric build identity.
+dev_feature=""
+if [ -z "$release_id" ] && [ -z "$release_channel" ]; then
+  if [ "${PLOZZ_DEV_FEATURE+x}" = "x" ]; then
+    dev_feature="$PLOZZ_DEV_FEATURE"
+  elif [ -f ".plozz-dev-feature" ]; then
+    dev_feature="$(cat .plozz-dev-feature)"
+  fi
+  if [ -n "$dev_feature" ] && ! printf '%s' "$dev_feature" \
+    | python3 -c 'import re,sys; sys.exit(0 if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,31}", sys.stdin.read()) else 1)'; then
+    echo "error: development feature label must be 1-32 letters, digits, spaces, dots, underscores or hyphens" >&2
+    exit 1
+  fi
+fi
+if [ -f "$proj" ]; then
+  /usr/bin/sed -i '' -E \
+    "s|PLOZZ_DEV_FEATURE_LABEL = [^;]*;|PLOZZ_DEV_FEATURE_LABEL = \"${dev_feature}\";|g" "$proj"
+fi
+
 if [ -n "${PLOZZ_BUILD_NUMBER:-}" ]; then
   build="${PLOZZ_BUILD_NUMBER}"
   src="PLOZZ_BUILD_NUMBER override"
@@ -250,6 +269,9 @@ fi
 
 /usr/bin/sed -i '' -E "s/CURRENT_PROJECT_VERSION = [^;]*;/CURRENT_PROJECT_VERSION = ${build};/g" "$proj"
 echo "Baked CFBundleVersion (CURRENT_PROJECT_VERSION) = ${build} (from ${src}) into ${proj}"
+if [ -n "$dev_feature" ]; then
+  echo "Development display: build ${build} ${dev_feature}"
+fi
 
 # --- Apple version and independently displayed Plozz release ------------------
 # The catalog owns the stable Apple version. A selected release additionally

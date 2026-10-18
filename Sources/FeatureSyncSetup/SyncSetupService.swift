@@ -147,10 +147,11 @@ public final class SyncSetupService {
         public let invite: SyncPairingInvite
         public let identity: SyncPairingIdentity
         public let displayName: String
+        public let sourceRequestID: UUID?
     }
 
     /// Create a fresh code + QR invite + identity this device shows to be set up.
-    public func makeHostPairing(ttlSeconds: Int = 180) -> HostPairing {
+    public func makeHostPairing(ttlSeconds: Int = 180, sourceRequestID: UUID? = nil) -> HostPairing {
         let code = SyncPairingCode.generate()
         let identity = SyncPairingIdentity()
         let invite = SyncPairingInvite(
@@ -158,7 +159,10 @@ public final class SyncSetupService {
             publicKeyData: identity.publicKeyData,
             context: SyncPairingContext(ttlSeconds: ttlSeconds)
         )
-        return HostPairing(code: code, invite: invite, identity: identity, displayName: deviceName())
+        return HostPairing(
+            code: code, invite: invite, identity: identity,
+            displayName: deviceName(), sourceRequestID: sourceRequestID
+        )
     }
 
     // MARK: Same-Apple-ID rendezvous (zero-typing credential auto-skip)

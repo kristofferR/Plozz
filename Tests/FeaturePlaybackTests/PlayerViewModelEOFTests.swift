@@ -3,6 +3,7 @@ import XCTest
 import CoreModels
 import CoreUI
 import MediaPlayer
+import MetadataKit
 @testable import FeaturePlayback
 #if canImport(UIKit)
 import UIKit
@@ -10,6 +11,91 @@ import UIKit
 
 @MainActor
 final class PlayerViewModelEOFTests: XCTestCase {
+    func testCommunityMarkersResolveSeriesOrderAndTVDBEvenWithExistingTMDB() async throws {
+        let item = MediaItem(id: "episode", title: "Episode", kind: .episode,
+                             seasonNumber: 1, episodeNumber: 2, seriesID: "series",
+                             providerIDs: ["SeriesTmdb": "1396", "Tvdb": "349232"])
+        let series = MediaItem(id: "series", title: "Series", kind: .series, episodeOrdering: .dvd,
+                               providerIDs: ["Tvdb": "81189", "Tmdb": "999"])
+        let provider = RecordingPlaybackProvider(request: .init(
+            item: series, streamURL: URL(string: "https://fixture.invalid/video.mp4")!
+        ))
+        let service = RecordingCommunityMarkers()
+        _ = await PlayerViewModel.communitySegments(
+            for: item, sources: [.introDB, .theIntroDB], duration: 3000, provider: provider,
+            seriesIDResolver: { XCTFail("Do not fetch the same series twice"); return nil }, service: service
+        )
+        let queries = await service.queries
+        let query = try XCTUnwrap(queries.first)
+        XCTAssertEqual(query.tvdbID, "81189")
+        XCTAssertEqual(query.tvdbEpisodeID, "349232")
+        XCTAssertEqual(query.tmdbID, "1396")
+        XCTAssertEqual(query.episodeOrdering, .dvd)
+        XCTAssertEqual(query.duration, 3000)
+        let requests = await provider.itemCallCount
+        XCTAssertEqual(requests, 1)
+    }
+
+    func testCommunityResolverFillsTVDBWithoutReplacingKnownSeriesIDs() async throws {
+        let item = MediaItem(id: "episode", title: "Episode", kind: .episode,
+                             seasonNumber: 1, episodeNumber: 2, providerIDs: ["SeriesTmdb": "1396"])
+        let provider = RecordingPlaybackProvider(request: .init(
+            item: item, streamURL: URL(string: "https://fixture.invalid/video.mp4")!
+        ))
+        let service = RecordingCommunityMarkers()
+        _ = await PlayerViewModel.communitySegments(
+            for: item, sources: [.theIntroDB], duration: nil, provider: provider,
+            seriesIDResolver: { ["Tvdb": "81189", "Tmdb": "999"] }, service: service
+        )
+        let query = await service.queries.first
+        XCTAssertEqual(query?.tvdbID, "81189")
+        XCTAssertEqual(query?.tmdbID, "1396")
+        let requests = await provider.itemCallCount
+        XCTAssertEqual(requests, 0)
+    }
+
+    func testCombinedEpisodesAndDisabledCommunityDoNotFetchMetadata() async {
+        var item = MediaItem(id: "episode", title: "Episode", kind: .episode,
+                             seasonNumber: 1, episodeNumber: 2, episodeNumberEnd: 3, seriesID: "series")
+        let provider = RecordingPlaybackProvider(request: .init(
+            item: item, streamURL: URL(string: "https://fixture.invalid/video.mp4")!
+        ))
+        let service = RecordingCommunityMarkers()
+        _ = await PlayerViewModel.communitySegments(
+            for: item, sources: [.theIntroDB], duration: 3000, provider: provider,
+            seriesIDResolver: nil, service: service
+        )
+        item.episodeNumberEnd = nil
+        _ = await PlayerViewModel.communitySegments(
+            for: item, sources: [], duration: 3000, provider: provider,
+            seriesIDResolver: nil, service: service
+        )
+        let queries = await service.queries
+        let requests = await provider.itemCallCount
+        XCTAssertTrue(queries.isEmpty)
+        XCTAssertEqual(requests, 0)
+    }
+
+    func testCancelledCommunityLookupDoesNotPublishOrCallService() async {
+        let item = MediaItem(id: "episode", title: "Episode", kind: .episode,
+                             seasonNumber: 1, episodeNumber: 2)
+        let provider = RecordingPlaybackProvider(request: .init(
+            item: item, streamURL: URL(string: "https://fixture.invalid/video.mp4")!
+        ))
+        let service = RecordingCommunityMarkers()
+        let lookup = Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await PlayerViewModel.communitySegments(
+                for: item, sources: [.theIntroDB], duration: 3000, provider: provider,
+                seriesIDResolver: nil, service: service
+            )
+        }
+        let segments = await lookup.value
+        let queries = await service.queries
+        XCTAssertTrue(segments.isEmpty)
+        XCTAssertTrue(queries.isEmpty)
+    }
+
     func testCenterSpinnerDisappearsForDisplayedVideoWhileScrubSeekRemainsPending() async {
         let request = PlaybackRequest(
             item: .init(id: "movie", title: "Movie", kind: .movie),
@@ -2143,6 +2229,14 @@ private final class PreCommitYieldGate {
     func releaseNext() {
         guard !continuations.isEmpty else { return }
         continuations.removeFirst().resume()
+    }
+}
+
+private actor RecordingCommunityMarkers: CommunitySkipMarkerFetching {
+    private(set) var queries: [CommunitySkipMarkerQuery] = []
+    func segments(for query: CommunitySkipMarkerQuery, sources: CommunitySkipMarkerSources) async -> [MediaSegment] {
+        queries.append(query)
+        return []
     }
 }
 

@@ -661,7 +661,11 @@ public struct HomeAggregator: Sendable {
                 let items: [MediaItem]
                 switch feed {
                 case .continueWatching:
-                    if let row = visibility.rowCustomization?.availableServerRows.first(where: {
+                    if visibility.mergesNextUpRows {
+                        items = try await provider.continueWatching(
+                            limit: continueWatchingLimit, inLibraries: libraryIDs
+                        )
+                    } else if let row = visibility.rowCustomization?.availableServerRows.first(where: {
                         $0.accountID == resolved.account.id && $0.section.kind == .continueWatching
                     }) {
                         items = try await provider.serverHomeItems(

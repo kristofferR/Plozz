@@ -1,10 +1,128 @@
 import CoreModels
 import CoreNetworking
 import Foundation
+import os
 @testable import ProviderIPTV
 import XCTest
 
 final class IPTVPlaybackRedirectTests: XCTestCase {
+    func testLiveRefreshesKeepTheRedirectedSessionWithoutForwardingAccountHeaders() async throws {
+        let delivery = try IPTVTestHTTPServer { request in
+            for name in ["authorization:", "cookie:", "x-provider-key:"] {
+                XCTAssertFalse(request.lowercased().contains(name))
+            }
+            return .init(data: Data("""
+            #EXTM3U
+            #EXT-X-TARGETDURATION:6
+            #EXT-X-MEDIA-SEQUENCE:100
+            #EXTINF:6,
+            100.ts
+            #EXTINF:6,
+            101.ts
+            """.utf8), headers: ["Content-Type": "application/vnd.apple.mpegurl"])
+        }
+        let deliveryURL = try await delivery.start()
+        addTeardownBlock { await delivery.stop() }
+        let source = try IPTVTestHTTPServer { request in
+            XCTAssertTrue(request.lowercased().contains("x-provider-key: fixture-key"))
+            return .init(status: 302, headers: [
+                "Location": deliveryURL.appendingPathComponent("\(UUID())/live.m3u8").absoluteString
+            ])
+        }
+        let origin = try await source.start().appendingPathComponent("live.m3u8")
+        addTeardownBlock { await source.stop() }
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        for content in [PlaybackFailureDiagnostic.Content.live, .onDemand] {
+            let proxy = try IPTVPlaybackProxy(
+                origin: origin,
+                headers: ["Authorization": "fixture-auth", "Cookie": "session=fixture",
+                          "X-Provider-Key": "fixture-key"], content: content
+            )
+            addTeardownBlock { await proxy.stop() }
+            let url = try await proxy.start()
+            let before = await source.requestCount
+            let (first, _) = try await session.data(from: url)
+            for _ in 0..<3 {
+                let (next, response) = try await session.data(from: url)
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+                if content == .live {
+                    XCTAssertEqual(first, next, "A refresh must not open a new provider session.")
+                } else {
+                    XCTAssertNotEqual(first, next, "This live-session policy must not change VOD requests.")
+                }
+            }
+            var head = URLRequest(url: url)
+            head.httpMethod = "HEAD"
+            let (body, response) = try await session.data(for: head)
+            XCTAssertTrue(body.isEmpty)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+            let after = await source.requestCount
+            XCTAssertEqual(after - before, content == .live ? 1 : 5)
+            await proxy.stop()
+        }
+    }
+
+    func testExpiredLiveRedirectRenewsOnceAndDoesNotHideAnActualRefusal() async throws {
+        for status in [401, 403, 404, 410, 503] {
+            for allowsRenewal in [true, false] {
+                let expired = OSAllocatedUnfairLock(initialState: false)
+                let opens = OSAllocatedUnfairLock(initialState: 0)
+                let delivery = try IPTVTestHTTPServer { request in
+                    XCTAssertFalse(request.lowercased().contains("x-provider-key:"))
+                    if request.contains("/session-1/"), expired.withLock({ $0 }) {
+                        return .init(status: status)
+                    }
+                    return .init(data: Data("""
+                    #EXTM3U
+                    #EXT-X-TARGETDURATION:6
+                    #EXTINF:6,
+                    segment.ts
+                    """.utf8), headers: ["Content-Type": "application/vnd.apple.mpegurl"])
+                }
+                let deliveryURL = try await delivery.start()
+                addTeardownBlock { await delivery.stop() }
+                let source = try IPTVTestHTTPServer { request in
+                    XCTAssertTrue(request.lowercased().contains("x-provider-key: fixture-key"))
+                    let number = opens.withLock { $0 += 1; return $0 }
+                    if number > 1, !allowsRenewal { return .init(status: 403) }
+                    return .init(status: 302, headers: [
+                        "Location": deliveryURL.appendingPathComponent("session-\(number)/live.m3u8").absoluteString
+                    ])
+                }
+                let origin = try await source.start().appendingPathComponent("live.m3u8")
+                addTeardownBlock { await source.stop() }
+                let proxy = try IPTVPlaybackProxy(origin: origin, headers: ["X-Provider-Key": "fixture-key"])
+                addTeardownBlock { await proxy.stop() }
+                let url = try await proxy.start()
+                let session = URLSession(configuration: .ephemeral)
+                defer { session.invalidateAndCancel() }
+                _ = try await session.data(from: url)
+                expired.withLock { $0 = true }
+                let (_, response) = try await session.data(from: url)
+                let shouldRenew = status != 503
+                XCTAssertEqual(
+                    (response as? HTTPURLResponse)?.statusCode,
+                    shouldRenew ? (allowsRenewal ? 200 : 403) : 503
+                )
+                XCTAssertEqual(opens.withLock { $0 }, shouldRenew ? 2 : 1)
+                let failure = PlaybackDeliveryFailure.state(for: url)
+                if shouldRenew, !allowsRenewal {
+                    XCTAssertEqual(failure?.error, .unauthorized)
+                    XCTAssertEqual(failure?.diagnostic?.httpStatus, 403)
+                    _ = try await session.data(from: url)
+                    XCTAssertEqual(opens.withLock { $0 }, 2, "A genuine refusal must not cause a renewal loop.")
+                } else {
+                    XCTAssertNil(failure?.error)
+                    XCTAssertNil(failure?.diagnostic)
+                }
+                await proxy.stop()
+                await source.stop()
+                await delivery.stop()
+            }
+        }
+    }
+
     func testPlaybackRedirectsPreserveProviderURLsButNeverCrossOriginAccountHeaders() throws {
         let source = try XCTUnwrap(URL(string: "https://provider.example/live/viewer/fixture-password/10.m3u8"))
         var original = URLRequest(url: source)

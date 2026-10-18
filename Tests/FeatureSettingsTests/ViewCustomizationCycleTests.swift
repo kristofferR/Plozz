@@ -88,20 +88,23 @@ final class ViewCustomizationCycleTests: XCTestCase {
         let labels = CardCaptionSettings.default
         XCTAssertEqual(String(localized: labels.customizationValue(in: .home)), "Mixed")
         XCTAssertEqual(String(localized: labels.customizationValue(in: .recommended)), "Mixed")
-        XCTAssertNotNil(labels.customizationDetail(in: .home))
+        XCTAssertEqual(String(localized: labels.customizationDetail(in: .home)),
+                       "Labels are visible except in Showcase and on series artwork.")
         for view in CardCaptionView.allCases where view != .home && view != .recommended {
             XCTAssertEqual(String(localized: labels.customizationValue(in: view)), "On")
         }
         var customized = labels
         customized.toggleCustomization(in: .home)
         XCTAssertEqual(String(localized: customized.customizationValue(in: .home)), "On")
-        XCTAssertNil(customized.customizationDetail(in: .home))
+        XCTAssertEqual(String(localized: customized.customizationDetail(in: .home)), "Labels are visible in this view.")
         XCTAssertTrue(customized.showsLabels(in: .home, isShowcase: true, hasArtworkTitle: true))
         customized.toggleCustomization(in: .home)
         XCTAssertEqual(String(localized: customized.customizationValue(in: .home)), "Off")
+        XCTAssertEqual(String(localized: customized.customizationDetail(in: .home)), "Labels are hidden in this view.")
         customized.toggleCustomization(in: .home)
         XCTAssertEqual(String(localized: customized.customizationValue(in: .home)), "Mixed")
-        XCTAssertNotNil(customized.customizationDetail(in: .home))
+        XCTAssertEqual(String(localized: customized.customizationDetail(in: .home)),
+                       "Labels are visible except in Showcase and on series artwork.")
         XCTAssertFalse(customized.showsLabels(in: .home, isShowcase: true))
     }
 
@@ -218,10 +221,13 @@ final class ViewCustomizationCycleTests: XCTestCase {
                 var settings = CardCaptionSettings(preference: preference)
                 for _ in 0..<3 {
                     let help = settings.customizationHelp(in: view, style: .framed)
-                    XCTAssertFalse(String(localized: help.detail).isEmpty)
+                    let expected = settings.customization(in: view) == .mixed
+                        ? "Labels are visible except in Showcase and on series artwork."
+                        : settings.showsLabels(in: view) ? "Labels are visible in this view." : "Labels are hidden in this view."
+                    XCTAssertEqual(String(localized: help.detail), expected)
                     XCTAssertEqual(help.illustration, .captions(
                         style: .framed, showsCaptions: settings.showsLabels(in: view),
-                        showsMixedCaptions: settings.customizationDetail(in: view) != nil
+                        showsMixedCaptions: settings.customization(in: view) == .mixed
                     ))
                     settings.toggleCustomization(in: view)
                 }

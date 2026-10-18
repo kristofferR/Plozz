@@ -31,14 +31,19 @@ public struct HomeLiveTVChannel: Codable, Identifiable, Equatable, Sendable {
     public let sourceName: String
     public let number: Int
     public let logoURL: URL?
+    public let organizationMetadata: LiveTVChannelOrganizationMetadata?
     public var id: HomeLiveTVRoute { route }
 
-    public init(route: HomeLiveTVRoute, name: String, sourceName: String, number: Int, logoURL: URL? = nil) {
+    public init(
+        route: HomeLiveTVRoute, name: String, sourceName: String, number: Int, logoURL: URL? = nil,
+        organizationMetadata: LiveTVChannelOrganizationMetadata? = nil
+    ) {
         self.route = route
         self.name = String(name.prefix(160))
         self.sourceName = String(sourceName.prefix(160))
         self.number = number
         self.logoURL = logoURL
+        self.organizationMetadata = organizationMetadata
     }
 }
 

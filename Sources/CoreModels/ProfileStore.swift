@@ -88,6 +88,7 @@ public protocol ProfilePersisting: Sendable {
     /// selection, household preference overrides, and the first-run flag) so
     /// the next launch behaves like a brand-new install.
     func resetForDebugging()
+    func resetForSyncErasure() throws
 }
 
 extension ProfilePersisting {
@@ -98,6 +99,7 @@ extension ProfilePersisting {
     public func parentalPIN() -> ParentalPIN? { nil }
     public func setParentalPIN(_ value: ParentalPIN?) {}
     public func resetForDebugging() {}
+    public func resetForSyncErasure() throws { resetForDebugging() }
     public func clearActiveAccountIDs(forProfile profileID: String) {}
     public func rootNamespaceOwnerID() -> String? { nil }
     public func setRootNamespaceOwnerID(_ id: String?) {}
@@ -289,6 +291,20 @@ public final class ProfileStore: ProfilePersisting, @unchecked Sendable {
         didMigrateShared = false
     }
 
+    public func resetForSyncErasure() throws {
+        lock.lock(); defer { lock.unlock() }
+        let keys = loadProfilesLocked().map { accountsKey($0.id) }
+            + [profilesKey, legacyAskOnStartupKey, legacyProfilesEnabledKey, firstRunSetupKey, parentalPINKey]
+        for key in keys {
+            if let secureStore { try secureStore.removeValue(for: key) }
+            defaults.removeObject(forKey: key)
+        }
+        for key in [activeProfileIDKey, lastUsedKey, rootNamespaceOwnerKey] {
+            defaults.removeObject(forKey: key)
+        }
+        didMigrateShared = false
+    }
+
     private func removeShared(forKey key: String) {
         if let secureStore {
             try? secureStore.removeValue(for: key)
@@ -438,6 +454,12 @@ public final class ProfileStore: ProfilePersisting, @unchecked Sendable {
 @Observable
 public final class ProfilesModel {
     public private(set) var profiles: [Profile]
+    /// A last-known profile held during split cloud delivery must not recreate
+    /// its deleted cloud record while the remaining roster is still arriving.
+    public var profilesForSync: [Profile] { profiles.filter { $0.pendingSyncedDeletion != true } }
+    public var pendingSyncedDeletionProfileIDs: Set<String> {
+        Set(profiles.filter { $0.pendingSyncedDeletion == true }.map(\.id))
+    }
     private var accountSelections: [String: [String]] = [:]
     public private(set) var unconfirmedAccountSelectionProfileIDs: Set<String> = []
 
@@ -512,7 +534,7 @@ public final class ProfilesModel {
         // was already reading. No keys move; only the question "who owns them"
         // stops being recomputed from list position.
         if let stored = store.rootNamespaceOwnerID(),
-           migrated.contains(where: { $0.id == stored }) {
+           migrated.contains(where: { $0.id == stored && $0.pendingSyncedDeletion != true }) {
             self.rootNamespaceOwnerID = stored
         } else if store.rootNamespaceOwnerID() == nil {
             let inherited = migrated.first(where: { $0.id == ProfileStore.defaultProfileID })
@@ -742,11 +764,14 @@ public final class ProfilesModel {
         profile.replaceKidsProfile(with: isKidsProfile)
         profiles.append(profile)
         profiles.sort { $0.createdAt < $1.createdAt }
+        if profiles.contains(where: { $0.pendingSyncedDeletion == true }) {
+            applySyncedProfileDTOs([:], deletions: [])
+        }
         store.saveProfiles(profiles)
         if !activeAccountIDs.isEmpty {
             setActiveAccountIDs(activeAccountIDs, for: profile.id)
         }
-        return profile
+        return profiles.first(where: { $0.id == profile.id }) ?? profile
     }
 
     /// Merge in profiles received from another device (by pairing/sync), preserving
@@ -840,11 +865,13 @@ public final class ProfilesModel {
     /// deletions, in one pass. Merging preserves every DEVICE-LOCAL field (Plex Home /
     /// Seerr / bindings) — only name/avatar/color/createdAt travel — so a re-capture
     /// reproduces the exact same canonical bytes (the round-trip invariant). The
-    /// default profile is never deleted.
+    /// original/default profile follows the same deletion rules as every other
+    /// profile. A last-known deletion waits for the rest of a split cloud roster.
     public func applySyncedProfileDTOs(_ upserts: [String: ProfileSyncDTO], deletions: Set<String>) {
         // Captured before the apply, so the fall-through below can tell whether
         // the profile leaving was a restricted one.
         let outgoingActive = activeProfile
+        let deletions = deletions.union(profiles.filter { $0.pendingSyncedDeletion == true }.map(\.id))
         var byID: [String: Profile] = [:]
         var order: [String] = []
         for p in profiles {
@@ -853,6 +880,7 @@ public final class ProfilesModel {
         }
         var changed = false
         for (id, dto) in upserts {
+            guard !deletions.contains(id) else { continue }
             if let existing = byID[id] {
                 let merged = dto.merged(into: existing)
                 if merged != existing { byID[id] = merged; changed = true }
@@ -860,14 +888,34 @@ public final class ProfilesModel {
                 byID[id] = dto.makeProfile(); order.append(id); changed = true
             }
         }
-        for id in deletions where id != ProfileStore.defaultProfileID {
+        for id in deletions {
             if byID[id] != nil { byID[id] = nil; changed = true }
         }
         guard changed else { return }
         var next = order.compactMap { byID[$0] }
         next.sort { $0.createdAt < $1.createdAt }
+        if next.isEmpty {
+            next = profiles.map {
+                var profile = $0
+                profile.pendingSyncedDeletion = true
+                return profile
+            }
+            LiveTVSourceDiagnostics.shared.record(
+                .profileDeletionDeferred, counts: [.profiles: next.count]
+            )
+        } else {
+            preserveHouseholdPIN(in: &next)
+        }
         profiles = next
+        if let owner = rootNamespaceOwnerID, deletions.contains(owner) {
+            rootNamespaceOwnerID = nil
+        }
         store.saveProfiles(profiles)
+        for id in deletions {
+            LiveTVSourceDiagnostics.shared.record(
+                .profileRemoved, identities: [.profile: id], flags: [.capture: false]
+            )
+        }
         refreshAccountSelections()
         if !profiles.contains(where: { $0.id == activeProfileID }) {
             activeProfileID = fallbackProfile(leaving: outgoingActive)?.id
@@ -925,6 +973,15 @@ public final class ProfilesModel {
     /// interfere.
     public func resetToPristineDefaultForDebugging() {
         store.resetForDebugging()
+        reloadPristineDefault()
+    }
+
+    public func resetToPristineDefaultAfterSyncErasure() throws {
+        try store.resetForSyncErasure()
+        reloadPristineDefault()
+    }
+
+    private func reloadPristineDefault() {
         let migrated = store.migrateLegacyIfNeeded(defaultName: "Me", defaultActiveAccountIDs: [])
         profiles = migrated
         refreshAccountSelections()
@@ -950,7 +1007,7 @@ public final class ProfilesModel {
         return profiles.first
     }
 
-    /// Removes a profile. The default profile can't be removed; removing the
+    /// Removes a profile while keeping at least one. Removing the
     /// active profile falls selection back to the first remaining profile.
     public func remove(_ id: String) {
         // The only thing that must never happen is a household with no profiles.
@@ -961,20 +1018,33 @@ public final class ProfilesModel {
         // ordinary profile is no longer undeletable for being first in a list.
         guard profiles.count > 1, profiles.contains(where: { $0.id == id }) else { return }
         let outgoing = profiles.first { $0.id == id }
-        profiles.removeAll { $0.id == id }
+        var next = profiles.filter { $0.id != id }
+        preserveHouseholdPIN(in: &next)
+        profiles = next
         accountSelections[id] = nil
         unconfirmedAccountSelectionProfileIDs.remove(id)
         store.saveProfiles(profiles)
-        // Deleting the owner abandons the bare keys rather than bequeathing
-        // them: every surviving profile keeps reading its own `base.<id>`.
+        // Keep the persisted former owner's ID as an abandonment marker. Clearing
+        // it would rerun ownership migration on restart and hand its keys to a survivor.
         if rootNamespaceOwnerID == id {
             rootNamespaceOwnerID = nil
-            store.setRootNamespaceOwnerID(nil)
         }
+        LiveTVSourceDiagnostics.shared.record(
+            .profileRemoved, identities: [.profile: id], flags: [.capture: true]
+        )
         if activeProfileID == id {
             activeProfileID = fallbackProfile(leaving: outgoing)?.id ?? ProfileStore.defaultProfileID
             store.setActiveProfileID(activeProfileID)
         }
+    }
+
+    private func preserveHouseholdPIN(in survivors: inout [Profile]) {
+        guard let anchor = profiles.first, !survivors.isEmpty,
+              !survivors.contains(where: { $0.id == anchor.id }),
+              let revision = anchor.effectiveParentalPINRevision else { return }
+        if let survivorRevision = survivors[0].effectiveParentalPINRevision, survivorRevision >= revision { return }
+        survivors[0].parentalPIN = anchor.parentalPIN
+        survivors[0].parentalPINRevision = revision
     }
 
     // MARK: Per-profile active accounts

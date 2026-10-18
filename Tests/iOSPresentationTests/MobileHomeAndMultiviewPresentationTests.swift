@@ -11,9 +11,75 @@ import Vision
 import XCTest
 @testable import AppShelliOS
 @testable import FeatureLiveTV
+@testable import FeaturePlayback
 
 @MainActor
 final class MobileHomeAndMultiviewPresentationTests: XCTestCase {
+    func testInPlayerGuideAlignsItsHeaderAndUsesAnOpaqueInsetSurface() async throws {
+        let model = LiveTVPrototypeModel(now: Date(), channels: Array(LiveTVPrototypeModel().channels.prefix(4)))
+        let imports = LiveTVPrototypeImportModel()
+        try await withWindow { window, host in
+            host.safeAreaRegions = []
+            for (width, height, typeSize) in [
+                (CGFloat(844), CGFloat(280), DynamicTypeSize.large),
+                (1194, 380, .large), (844, 320, .xxxLarge)
+            ] {
+                window.frame.size = CGSize(width: width, height: height)
+                var standaloneHeaderY: CGFloat?
+                for embedded in [false, true] {
+                    for reducedTransparency in [false, true] {
+                        host.rootView = AnyView(
+                            LiveGuideLayoutFixture(model: model, imports: imports, embedded: embedded)
+                                .environment(\.themePalette, reducedTransparency ? .light : .dark)
+                                .environment(\.colorScheme, .dark)
+                                .environment(\.plozzReduceTransparency, reducedTransparency)
+                                .environment(\.dynamicTypeSize, typeSize)
+                        )
+                        try await settle(window)
+                        let image = snapshot(
+                            window,
+                            name: "live-guide-\(Int(width))-\(typeSize)-embedded-\(embedded)-opaque-\(reducedTransparency)"
+                        )
+                        let header = try textFrame(
+                            typeSize == .xxxLarge ? "Chan" : "Channels", observations: text(image), size: image.size
+                        )
+                        if embedded {
+                            XCTAssertEqual(
+                                try XCTUnwrap(standaloneHeaderY) - header.minY, PrototypeLayout.guideInset,
+                                accuracy: 2, "Only the redundant standalone top inset should be removed."
+                            )
+                            XCTAssertLessThan(
+                                header.minY - LiveGuideLayoutFixture.inset,
+                                UIFontMetrics(forTextStyle: .caption1).scaledValue(
+                                    for: PrototypeLayout.rulerHeight,
+                                    compatibleWith: UITraitCollection(
+                                        preferredContentSizeCategory: typeSize == .xxxLarge ? .extraExtraExtraLarge : .large
+                                    )
+                                ) / 2,
+                                "The ruler must start alongside the current-program surface, not a second inset below it."
+                            )
+                        } else {
+                            standaloneHeaderY = header.minY
+                        }
+                        let pixels = try rgbaPixels(image)
+                        let x = Int((LiveGuideLayoutFixture.inset + width * 0.18) * image.scale)
+                        let y = Int((height - LiveGuideLayoutFixture.inset - 12) * image.scale)
+                        let imageWidth = try XCTUnwrap(image.cgImage).width
+                        let offset = (y * imageWidth + x) * 4
+                        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+                        XCTAssertTrue(UIColor(ThemePalette.dark.raised.fill).getRed(&red, green: &green, blue: &blue, alpha: &alpha))
+                        for (component, expected) in [red, green, blue].enumerated() {
+                            XCTAssertEqual(
+                                Double(pixels[offset + component]), Double(expected * 255), accuracy: 3,
+                                "The inset is a shared opaque content surface, not glass sampling the colored backdrop."
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     func testArtworkPresetGroupsFitPhoneTabletAndAccessibleLayouts() async throws {
         let app = PlozziOSAppModel()
         let original = app.settings.cardStyle.artwork
@@ -1397,6 +1463,46 @@ final class MobileHomeAndMultiviewPresentationTests: XCTestCase {
             _ = try XCTUnwrap(decoded)
         }
         return url
+    }
+}
+
+private struct LiveGuideLayoutFixture: View {
+    static let inset: CGFloat = 16
+    let model: LiveTVPrototypeModel
+    let imports: LiveTVPrototypeImportModel
+    let embedded: Bool
+
+    var body: some View {
+        GeometryReader { geometry in
+            HStack(alignment: .top, spacing: 12) {
+                LiveChannelGuideInfoColumn(title: "Current channel", logoURL: nil, plozzChannelID: nil, program: nil)
+                    .frame(width: geometry.size.width * 0.36)
+                if embedded {
+                    LiveTVPlayerGuideOverlay(
+                        model: model, imports: imports, playingChannelID: model.channels.first?.id ?? "",
+                        libraryCatalog: nil, loadLibraryGuide: nil,
+                        embedding: .init(back: {}, didTune: {}, focusesPlayingChannel: false), tune: { _ in }
+                    )
+                } else {
+                    PrototypeBrowser(
+                        model: model, imports: imports,
+                        selectedID: .constant(nil), selectedRowID: .constant(nil),
+                        railActive: .constant(false), focusedProgram: .constant(nil), hasFocus: .constant(false),
+                        topRequest: 0, nowRequest: 0, guideOffset: .constant(0), timeAnchor: .constant(Date()),
+                        timelineOffset: .constant(0), restoreFocusRequest: 0, isPresented: true,
+                        isRestoringFocus: false, restoresPlaybackFocus: false, watchOrigin: nil,
+                        focusRestored: { _ in }, tune: { _ in }, details: { _ in },
+                        openControls: {}, openSources: {}, openGuideTime: {}, openToolbar: nil,
+                        isLoading: false, loadFailed: false, reload: {}
+                    )
+                }
+            }
+            .environment(\.playerCardMetrics, PlayerCardMetrics.liveTouch(
+                forWidth: geometry.size.width, height: geometry.size.height
+            ))
+        }
+        .padding(Self.inset)
+        .background(Color.red)
     }
 }
 

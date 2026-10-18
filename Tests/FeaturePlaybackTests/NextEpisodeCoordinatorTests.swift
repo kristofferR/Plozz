@@ -120,6 +120,28 @@ final class NextEpisodeCoordinatorTests: XCTestCase {
         XCTAssertEqual(host.resolveCallCount, 0, "window closed → no prefetch")
     }
 
+    func testSiloNeverOpensAnIdleSessionBeforeHandoff() async {
+        let (sut, host, engine, provider) = makeSUT(providerKind: .silo)
+        host.currentEngineKind = .plozzigen
+        host.authoritativeRange = .dolbyVision
+        host.resolveResult = prefetched(itemID: "next-1", engineKind: .plozzigen)
+        engine.duration = 1_000
+        for position in [900.0, 910, 955, 966, 999] {
+            engine._currentTime = position
+            sut.startNextEpisodePrefetch(trigger: "eager")
+            sut.maybeStartWindowedNextPrefetch()
+            await Task.yield()
+        }
+        let prepared = await sut.prepareHandoff(to: host.nextEpisodeCandidate!)
+        XCTAssertNil(prepared, "Even HDR must resolve in the incoming player, not retain an idle Silo grant.")
+        XCTAssertNil(sut.consumePrefetchedNext(matching: "next-1"))
+        XCTAssertEqual(host.resolveCallCount, 0)
+        XCTAssertEqual(engine.stopCount, 0)
+        await sut.releaseOrphanedPrefetchIfNeeded()
+        let stops = await provider.stopReports
+        XCTAssertTrue(stops.isEmpty, "No speculative session was opened or orphaned.")
+    }
+
     // MARK: - consume / release
 
     func testConsumePrefetchHitClearsAndReturns() async {

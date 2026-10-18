@@ -19,6 +19,13 @@ actor IPTVClient {
     private var cachedGuide: (url: URL, data: Data, expires: Date)?
     private let progress: @Sendable (IPTVImportProgress) -> Void
     var pendingCatalogRequestCount: Int { refreshWaiters.count }
+    private var didReclaimJournal = false
+
+    private func reclaimJournalOnce() {
+        guard !didReclaimJournal else { return }
+        didReclaimJournal = true
+        catalog.reclaimJournal()
+    }
 
     init(
         credential: IPTVCredential, directory: URL? = nil, configuration: URLSessionConfiguration? = nil,
@@ -39,6 +46,7 @@ actor IPTVClient {
     }
 
     func authenticate() async throws {
+        reclaimJournalOnce()
         let diagnostic = IPTVSetupDiagnostics.current
         diagnostic?.advance(to: .authentication)
         if credential.mode == .file {
@@ -84,6 +92,7 @@ actor IPTVClient {
     }
 
     func ensureCatalog(_ library: String, force: Bool = false) async throws {
+        reclaimJournalOnce()
         if credential.mode == .file {
             try await authenticate()
             return
@@ -117,8 +126,14 @@ actor IPTVClient {
         refreshHasBackgroundOwner = background
         refresh = Task {
             let started = ContinuousClock.now
+            let diagnosticIDs: [LiveTVSourceDiagnostics.Identity: String] = [
+                .catalog: credential.identity.uuidString, .request: UUID().uuidString
+            ]
+            LiveTVSourceDiagnostics.shared.record(
+                .catalogRefreshStarted, identities: diagnosticIDs, flags: [.background: background]
+            )
             let performance = PerformanceDiagnostics.shared.begin(.playlistImport, provider: .iptv)
-            let metrics = performance == nil ? nil : IPTVPerformanceMetrics()
+            let metrics = IPTVPerformanceMetrics()
             HandoffDiagnostics.emit("IPTV catalogRefresh begin background=\(background)")
             let result: Result<Void, Error>
             do {
@@ -127,14 +142,16 @@ actor IPTVClient {
                 }
                 self.refreshRetryAfter[scope] = nil
                 result = .success(())
-                performance?.finish(.succeeded, metrics: metrics?.snapshot ?? .init())
+                performance?.finish(.succeeded, metrics: metrics.snapshot)
+                recordCatalogRefresh(diagnosticIDs, metrics: metrics, started: started, error: nil)
                 HandoffDiagnostics.emit("IPTV catalogRefresh complete elapsed=\(started.duration(to: .now))")
             } catch {
                 self.refreshRetryAfter[scope] = Date().addingTimeInterval(60)
                 performance?.finish(
-                    IPTVPerformanceMetrics.outcome(for: error), metrics: metrics?.snapshot ?? .init()
+                    IPTVPerformanceMetrics.outcome(for: error), metrics: metrics.snapshot
                 )
                 let reason = IPTVSetupDiagnostic.Failure.sanitized(error).reason.rawValue
+                recordCatalogRefresh(diagnosticIDs, metrics: metrics, started: started, error: error)
                 PlozzLog.networking.error("IPTV catalogue refresh failed reason=\(reason)")
                 HandoffDiagnostics.emit("IPTV catalogRefresh failed reason=\(reason) elapsed=\(started.duration(to: .now))")
                 result = .failure(error)
@@ -146,6 +163,23 @@ actor IPTVClient {
             self.refreshWaiters.removeAll()
             for waiter in waiters { waiter.resume(with: result) }
         }
+    }
+
+    private func recordCatalogRefresh(
+        _ identities: [LiveTVSourceDiagnostics.Identity: String], metrics: IPTVPerformanceMetrics,
+        started: ContinuousClock.Instant, error: (any Error)?
+    ) {
+        let snapshot = metrics.snapshot
+        let elapsed = started.duration(to: .now).components
+        LiveTVSourceDiagnostics.shared.record(
+            .catalogRefreshFinished, identities: identities,
+            counts: [
+                .entries: snapshot.items ?? 0, .bytes: snapshot.bytes ?? 0, .requests: snapshot.requests ?? 0,
+                .elapsedMilliseconds: Int(elapsed.seconds * 1_000 + elapsed.attoseconds / 1_000_000_000_000_000),
+                .waiters: refreshWaiters.count
+            ],
+            flags: [.failed: error != nil, .cancelled: Task.isCancelled], error: error
+        )
     }
 
     private func catalogCommittedAt(_ scope: String) throws -> Date? {
@@ -302,6 +336,12 @@ actor IPTVClient {
                     try store(record, overwrite: record.item.kind != .series && record.item.kind != .season, into: .incoming)
                 }
                 count += 1
+                if count.isMultiple(of: 10_000) {
+                    LiveTVSourceDiagnostics.shared.record(
+                        .catalogProgress, identities: [.catalog: credential.identity.uuidString],
+                        counts: [.entries: count, .bytes: parser.byteCount]
+                    )
+                }
                 if count.isMultiple(of: 1_000) { progress(IPTVImportProgress(stage: .playlist, entries: count)) }
             }
         }
@@ -490,6 +530,10 @@ actor IPTVClient {
         let scope = credential.mode == .xtream ? "live" : Self.playlistCatalogScope
         let committed = credential.mode == .file
             ? try catalog.state("playlist") != nil : try catalogCommittedAt(scope) != nil
+        LiveTVSourceDiagnostics.shared.record(
+            .catalogRead, identities: [.catalog: credential.identity.uuidString],
+            flags: [.committed: committed], deduplicate: true
+        )
         guard committed else { return nil }
         let supportsGuide = try credential.mode == .xtream || !credential.explicitGuideURLs.isEmpty
             || catalog.count(where: "kind = ?", values: [MediaItemKind.unknown.rawValue]) > 0
@@ -587,13 +631,19 @@ actor IPTVClient {
     }
 
     func guideData(from url: URL) async throws -> Data {
-        if let cachedGuide, cachedGuide.url == url, cachedGuide.expires > Date() { return cachedGuide.data }
+        if let cachedGuide, cachedGuide.url == url, cachedGuide.expires > Date() {
+            IPTVGuideDiagnostics.request?.cacheHit(bytes: cachedGuide.data.count)
+            return cachedGuide.data
+        }
         let (bytes, response) = try await http.bytes(url: url, headers: credential.guideHeaders(for: url))
         defer { bytes.task.cancel() }
         let limit = 256 * 1_024 * 1_024
         guard response.expectedContentLength <= limit else { throw LiveTVSourceImportError.guideTooLarge }
         var data = Data()
-        defer { IPTVHTTP.performanceMetrics?.record(bytes: data.count) }
+        defer {
+            IPTVHTTP.performanceMetrics?.record(bytes: data.count)
+            IPTVGuideDiagnostics.request?.consumed(data.count)
+        }
         for try await byte in bytes {
             guard data.count < limit else { throw LiveTVSourceImportError.guideTooLarge }
             data.append(byte)
@@ -670,6 +720,7 @@ actor IPTVClient {
             guard data.count + bytes.count <= 16 * 1_024 * 1_024 else { throw IPTVError.oversizedRecord }
             data.append(bytes)
         }
+        IPTVGuideDiagnostics.request?.parsing()
         do { return try JSONDecoder().decode(IPTVObject.self, from: data) }
         catch { throw IPTVError.malformed }
     }
@@ -679,7 +730,10 @@ actor IPTVClient {
         defer { bytes.task.cancel() }
         var chunk = Data()
         var consumedBytes = 0
-        defer { IPTVHTTP.performanceMetrics?.record(bytes: consumedBytes + chunk.count) }
+        defer {
+            IPTVHTTP.performanceMetrics?.record(bytes: consumedBytes + chunk.count)
+            IPTVGuideDiagnostics.request?.consumed(consumedBytes + chunk.count)
+        }
         for try await byte in bytes {
             chunk.append(byte)
             if chunk.count == 65_536 {

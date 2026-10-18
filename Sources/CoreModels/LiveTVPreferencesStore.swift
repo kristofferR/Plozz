@@ -76,6 +76,7 @@ public struct LiveTVPreferences: Codable, Equatable, Sendable {
     public let channelOverrides: [String: LiveTVChannelMetadataOverride]
     public let browse: LiveTVBrowsePreferences
     public let favoriteMultiviews: [LiveTVMultiviewFavorite]
+    public var organization: LiveTVChannelOrganization
     public var hiddenChannelIDs: Set<String> { Set(hiddenChannels.map(\.id)) }
 
     public init(
@@ -86,7 +87,8 @@ public struct LiveTVPreferences: Codable, Equatable, Sendable {
         favoriteChannels: [LiveTVHiddenChannel] = [],
         channelOverrides: [String: LiveTVChannelMetadataOverride] = [:],
         browse: LiveTVBrowsePreferences = .init(),
-        favoriteMultiviews: [LiveTVMultiviewFavorite] = []
+        favoriteMultiviews: [LiveTVMultiviewFavorite] = [],
+        organization: LiveTVChannelOrganization = .init()
     ) {
         self.favoriteIDs = favoriteIDs
         var ordered = Set<String>()
@@ -97,6 +99,7 @@ public struct LiveTVPreferences: Codable, Equatable, Sendable {
         self.channelOverrides = channelOverrides
         self.browse = browse
         self.favoriteMultiviews = favoriteMultiviews
+        self.organization = organization
 
         var seen = Set<String>()
         self.recentChannelIDs = Array(
@@ -117,6 +120,7 @@ public struct LiveTVPreferences: Codable, Equatable, Sendable {
         case hiddenChannels
         case favoriteOrder, favoriteChannels, channelOverrides, browse
         case favoriteMultiviews
+        case organization
     }
 
     public init(from decoder: any Decoder) throws {
@@ -143,7 +147,8 @@ public struct LiveTVPreferences: Codable, Equatable, Sendable {
             favoriteChannels: try container.decodeIfPresent([LiveTVHiddenChannel].self, forKey: .favoriteChannels) ?? [],
             channelOverrides: try container.decodeIfPresent([String: LiveTVChannelMetadataOverride].self, forKey: .channelOverrides) ?? [:],
             browse: try container.decodeIfPresent(LiveTVBrowsePreferences.self, forKey: .browse) ?? .init(),
-            favoriteMultiviews: multiviews
+            favoriteMultiviews: multiviews,
+            organization: try container.decodeIfPresent(LiveTVChannelOrganization.self, forKey: .organization) ?? .init()
         )
     }
 
@@ -154,27 +159,33 @@ public struct LiveTVPreferences: Codable, Equatable, Sendable {
             recentChannelIDs: recentChannelIDs,
             hiddenChannels: hiddenChannels + [LiveTVHiddenChannel(id: id, name: name)],
             favoriteOrder: favoriteOrder, favoriteChannels: favoriteChannels, channelOverrides: channelOverrides,
-            browse: browse, favoriteMultiviews: favoriteMultiviews
+            browse: browse, favoriteMultiviews: favoriteMultiviews, organization: organization
         )
     }
 
     public func restoringChannel(id: String) -> LiveTVPreferences {
-        LiveTVPreferences(
+        var restored = LiveTVPreferences(
             favoriteIDs: favoriteIDs,
             recentChannelIDs: recentChannelIDs,
             hiddenChannels: hiddenChannels.filter { $0.id != id },
             favoriteOrder: favoriteOrder, favoriteChannels: favoriteChannels, channelOverrides: channelOverrides,
-            browse: browse, favoriteMultiviews: favoriteMultiviews
+            browse: browse, favoriteMultiviews: favoriteMultiviews, organization: organization
         )
+        if organization.hasVisibilityRules && hiddenChannelIDs.contains(id) {
+            restored.organization.shownChannelIDs.insert(id)
+        }
+        return restored
     }
 
     public func restoringAllChannels() -> LiveTVPreferences {
-        LiveTVPreferences(
+        var restored = LiveTVPreferences(
             favoriteIDs: favoriteIDs,
             recentChannelIDs: recentChannelIDs,
             favoriteOrder: favoriteOrder, favoriteChannels: favoriteChannels, channelOverrides: channelOverrides,
-            browse: browse, favoriteMultiviews: favoriteMultiviews
+            browse: browse, favoriteMultiviews: favoriteMultiviews, organization: organization
         )
+        if organization.hasVisibilityRules { restored.organization.shownChannelIDs.formUnion(hiddenChannelIDs) }
+        return restored
     }
 
     public func migratingChannelIDs(_ migration: [String: String]) -> Self {
@@ -190,7 +201,8 @@ public struct LiveTVPreferences: Codable, Equatable, Sendable {
             favoriteOrder: favoriteOrder.map(identifier),
             favoriteChannels: favoriteChannels.map { .init(id: identifier($0.id), name: $0.name) },
             channelOverrides: overrides, browse: browse,
-            favoriteMultiviews: favoriteMultiviews.map { $0.migratingChannelIDs(migration) }
+            favoriteMultiviews: favoriteMultiviews.map { $0.migratingChannelIDs(migration) },
+            organization: organization.migratingChannelIDs(migration)
         )
     }
 }

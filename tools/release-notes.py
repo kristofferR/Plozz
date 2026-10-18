@@ -76,6 +76,12 @@ def load_catalog(path: Path) -> dict[str, Any]:
     except json.JSONDecodeError as error:
         fail(f"invalid JSON in {path}: {error}")
 
+    return validate_catalog(catalog)
+
+
+def validate_catalog(catalog: Any) -> dict[str, Any]:
+    if not isinstance(catalog, dict):
+        fail("release-notes catalog must be an object")
     if catalog.get("schemaVersion") != 1:
         fail("schemaVersion must be 1")
     releases = catalog.get("releases")

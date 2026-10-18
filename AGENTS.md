@@ -12,6 +12,8 @@ configuration and credentials out of committed guidance.
 
 - Read the relevant code and module README before editing. Check the working
   tree and preserve unrelated or uncommitted work.
+- For Live TV changes, consult the [IPTV history](docs/iptv-history.md) for
+  historical context, not a specification.
 - Keep changes focused on the requested behavior. Reuse existing helpers,
   ownership boundaries, naming, and error handling instead of creating a
   parallel implementation.

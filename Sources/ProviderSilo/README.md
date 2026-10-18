@@ -48,6 +48,26 @@ categories and an HTTP status only. No server address, response body, profile
 identity, PIN, pairing code, token, or error description is included. Opt-out
 invalidates retained attempts, including across later opt-in.
 
+## Alternate connection addresses
+
+Settings can approve another address through native device pairing, matching the
+authenticated installation/account/profile before saving the alias. Only the
+temporary verification login is revoked; the original rotating credential and
+account identity stay intact. This does not depend on newer Silo pinned-LAN
+discovery, and does not infer trust from a self-asserted public server ID.
+
+API requests choose among explicitly approved routes with credential-free v2
+reachability probes. A refresh whose route selection fails before transmission
+retains its original token; an ambiguous transmitted refresh is never replayed.
+Relative resource URLs use the selected API base. Server-issued signed media
+URLs remain byte-for-byte on their issued origin, with the bearer added only for
+approved server/session URLs. Foreign media nodes do not receive that bearer.
+If Silo issues a public absolute media URL, selecting a local API address does
+not silently rewrite it or move an already-playing stream.
+Address-only edits preserve the existing provider's login-revision-bound playback
+and subtitle grants while updating its API routes. They do not invalidate other
+accounts' providers; a new credential revision still receives a new session store.
+
 ## Server Home
 
 Match Server imports Silo's profile-scoped native Home row IDs, headings, order
@@ -119,12 +139,41 @@ These Home and device-login contracts were checked at upstream revision
   bytes are preserved and foreign origins never receive the account bearer.
   Original-file delivery advertises Plozzigen's software codecs (including VP9),
   separately from hardware decode and native remote-HLS capabilities.
+  Its delivery-scoped claims let the local player manage HDR presentation and
+  select source audio tracks without requesting server conversion. They do not
+  claim native HDR10+ output or apply to server-packaged streams. HLS delivery
+  includes Silo's `hls` stream-container token, not only segment containers.
   The provider accepts original HTTP or HLS
   plans with a source-aligned seekable timeline; incompatible plans are released,
-  not played with an incorrect clock. Progress samples are sequenced and stop
+  not played with an incorrect clock. Refusals explain the rejected timeline,
+  missing seek support, source mismatch, or unsupported delivery/authentication,
+  including ordinary TV playback without explicit quality options. Raw server
+  text and signed addresses are never user-facing explanations.
+  Next-episode playback resolves on demand, not during the previous episode:
+  protocol-3 sessions without playback activity can expire independently of
+  their signed URL's expiry. Progress samples are sequenced and stop
   requests carry an idempotent stop identifier.
 - Watched state and the native Silo watchlist write back to Silo. Batched resume
   synchronization checks each result, not only HTTP success.
+
+## Collections
+
+Library collections and personal collections have separate native contracts.
+`collections(in:page:)` retains `/library/{id}/collections` and
+`source=library_collection`. `personalCollections(page:)` reads `/collections`,
+including the acting viewer's own collections and collections shared with them,
+even when they are not published in a library's Collections tab. It slices the
+native unpaginated list without discarding the server's viewer order.
+
+Personal IDs use a distinct provider-local namespace. Item lookup, children and
+paged members route consistently to that namespace, with members fetched through
+`/catalog?source=user_collection&collection_id=...`; no arbitrary library or sort
+is imposed. Server profile authorization applies to every request. Missing
+artwork is valid; unsupported endpoints and revoked credentials remain errors.
+Personal catalog cards do not declare library ownership, so the provider leaves
+it unknown rather than mislabeling the whole collection as one library.
+These contracts were checked against native v2 revision
+`bbef279723ddc17cd3798b22decf58e5791765c7`.
 
 ## Detail ratings
 
@@ -158,6 +207,10 @@ resume position.
 The quality contract was verified against Silo server revision
 `8e5ae2f469d36109e28cab3959693236cb503833`; unsupported growing/non-source-aligned
 timelines remain an explicit refusal rather than an incorrect resume clock.
+Original-player claims and HLS container matching were checked against
+`c78d233918ec7297d519fb2702f5473f5109eb9d`. An unspecified negotiation refusal
+does not imply transcoding was requested; diagnostics retain the requested
+quality, encoding requirement, and server refusal code.
 
 ## Subtitle search and download
 

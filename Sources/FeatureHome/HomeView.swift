@@ -152,7 +152,7 @@ public struct HomeView: View {
     /// That includes a hero that follows focus: its titles are the rows, so none
     /// of the carousel's curation, caching or refresh has anything to do.
     private var carouselSettings: HeroSettings? {
-        guard let settings = heroSettings?.settings else { return nil }
+        guard let settings = heroSettings?.effectiveSettings else { return nil }
         #if os(tvOS)
         if settings.followsFocus { return nil }
         #endif
@@ -164,7 +164,7 @@ public struct HomeView: View {
     /// so the row holds exactly the discovery picks the Fullscreen Hero would. `nil`
     /// when nothing on screen needs curating.
     private var curationSettings: HeroSettings? {
-        Self.curationSettings(for: heroSettings?.settings)
+        Self.curationSettings(for: heroSettings?.effectiveSettings)
     }
 
     static func curationSettings(for settings: HeroSettings?) -> HeroSettings? {
@@ -358,7 +358,7 @@ public struct HomeView: View {
         self.enabledServerCount = enabledServerCount
         if !heroRuntime.hasHydratedCache {
             heroRuntime.hasHydratedCache = true
-            if let settings = Self.curationSettings(for: heroSettings?.settings),
+            if let settings = Self.curationSettings(for: heroSettings?.effectiveSettings),
                let cached = viewModel.cachedHeroItems(for: settings) {
                 heroRuntime.cachedKey = HeroConfigurationKey(settings: settings)
                 heroRuntime.cachedDisabledLibraryKeys = visibility.visibility.disabledKeys
@@ -521,7 +521,7 @@ public struct HomeView: View {
                                 if heroActive, let heroSettings {
                                     HomeHeroView(
                                         items: displayHeroItems,
-                                        settings: heroSettings.settings,
+                                        settings: heroSettings.effectiveSettings,
                                         backgroundSettings: heroBackground.settings,
                                         trailerController: heroTrailerController,
                                         trailerResolver: heroTrailerResolver,
@@ -591,7 +591,7 @@ public struct HomeView: View {
                                         .focusable(true)
                                         .prefersDefaultFocus(true, in: heroFocusScope)
                                         .focusEffectDisabled()
-                                        .accessibilityLabel("Loading featured content")
+                                        .accessibilityLabel("Loading Home content")
                                 }
                                 LazyVStack(alignment: .leading, spacing: metrics.rowSpacing) {
                                     // Shown ABOVE the rows, not instead of them. A
@@ -829,6 +829,7 @@ public struct HomeView: View {
             HomeShareScanRefreshObserver(
                 onRefresh: { Task { await viewModel.load(showLoadingState: false) } },
                 isTrailerPlaying: heroTrailerController.isPlaying,
+                isFrontmost: heroIsFrontmost,
                 onPollShares: onPollShares,
                 navigationActivity: navigationActivity
             )
@@ -1116,6 +1117,9 @@ public struct HomeView: View {
                         await retainedRandomProvider(libraries, limit)
                     }
                 },
+                collectionProvider: { selection, limit in
+                    try await viewModel.heroCollectionContent(selection, limit: limit, hideWatched: settings.hideWatched)
+                },
                 artworkProvider: heroArtworkProvider,
                 artworkValidator: heroArtworkValidator
             )
@@ -1134,7 +1138,8 @@ public struct HomeView: View {
             randomLibraries: randomLibraries,
             seerConnected: heroSeerConnected,
             featuredDiscoveryEnabled: heroDiscoveryProvider == nil
-                ? nil : !settings.discoverySources.isEmpty
+                ? nil : !settings.discoverySources.isEmpty,
+            collectionState: result.collectionState
         )
         let fallbackEligibility = heroSourceEligibility(
             content: content, randomLibraries: randomLibraries,
@@ -1384,7 +1389,7 @@ public struct HomeView: View {
     /// The hero settings when Apple TV's Home follows focus, otherwise `nil`.
     private var focusHeroSettings: HeroSettings? {
         #if os(tvOS)
-        guard let settings = heroSettings?.settings, settings.followsFocus else { return nil }
+        guard let settings = heroSettings?.effectiveSettings, settings.followsFocus else { return nil }
         return settings
         #else
         return nil
@@ -1511,8 +1516,8 @@ public struct HomeView: View {
                 } else {
                     MediaRowView(
                         title: settings.showsDiscoverRow ? Text(LocalizedStringResource(
-                            "home.row.discover",
-                            defaultValue: "Discover",
+                            "home.row.discovery",
+                            defaultValue: "Discovery",
                             comment: "Name of a Home row of recommended titles from outside the user's libraries."
                         )) : Text(verbatim: "Recently Added"),
                         items: [],
@@ -1653,8 +1658,8 @@ public struct HomeView: View {
         case .discover(let items, let isLoading):
             MediaRowView(
                 title: Text(LocalizedStringResource(
-                    "home.row.discover",
-                    defaultValue: "Discover",
+                    "home.row.discovery",
+                    defaultValue: "Discovery",
                     comment: "Name of a Home row of recommended titles from outside the user's libraries."
                 )),
                 items: items,
@@ -1801,6 +1806,7 @@ struct HeroRecomputeKey: Equatable {
     let watchlist: [HeroCandidateSignature]
     let recentlyAdded: [HeroCandidateSignature]
     let randomLibraries: [HeroRandomLibrary]
+    let collectionLibraries: [AggregatedLibrary]
     let sources: [HeroSourceKind]
     let maxItems: Int
     let hideWatched: Bool
@@ -1849,6 +1855,13 @@ struct HeroRecomputeKey: Equatable {
         self.randomLibraries = activeSources.contains(.randomFromLibrary)
             ? randomLibraries
             : []
+        self.collectionLibraries = activeSources.contains(.collection)
+            ? content.libraries.filter { library in
+                settings?.collections.contains { collection in
+                    library.accountID == collection.accountID
+                        && (collection.libraryID == nil || library.library.id == collection.libraryID)
+                } == true
+            } : []
         self.externalRefreshRevision = settings?.requiresExternalWatchHistory == true
             ? externalRefreshRevision : 0
         self.freshnessRevision = activeSources.isEmpty ? 0 : freshnessRevision
@@ -1868,6 +1881,7 @@ struct HeroRecomputeKey: Equatable {
             && watchlist == other.watchlist
             && recentlyAdded == other.recentlyAdded
             && randomLibraries == other.randomLibraries
+            && collectionLibraries == other.collectionLibraries
             && sources == other.sources
             && maxItems == other.maxItems
             && hideWatched == other.hideWatched
@@ -1917,26 +1931,6 @@ enum HeroRecomputePolicy {
         completedKey: HeroRecomputeKey?
     ) -> Bool {
         completedKey != key
-    }
-}
-
-/// Resolves the Home hero's structural slot independently from its item details.
-/// Loaded rows may be available from disk while async-only hero sources are still
-/// curating; that state must reserve the hero geometry with a placeholder rather
-/// than briefly rendering the classic rows-only layout.
-enum HomeHeroSlotState: Equatable {
-    case hidden
-    case placeholder
-    case content
-
-    static func resolve(
-        isConfigured: Bool,
-        hasItems: Bool,
-        recomputeComplete: Bool
-    ) -> HomeHeroSlotState {
-        guard isConfigured else { return .hidden }
-        if hasItems { return .content }
-        return recomputeComplete ? .hidden : .placeholder
     }
 }
 
@@ -2042,7 +2036,7 @@ enum HomeHeroDisplayResolver {
 ///
 /// Keyed on the newest completion across all shares rather than one id, since
 /// Home aggregates every account.
-private struct HomeShareScanRefreshObserver: View {
+struct HomeShareScanRefreshObserver: View {
     /// Silent — the loaded rows stay on screen while fresher ones swap in, so a
     /// background poll never flashes a skeleton or moves focus.
     let onRefresh: () -> Void
@@ -2051,6 +2045,7 @@ private struct HomeShareScanRefreshObserver: View {
     /// so the idle window would elapse mid-playback and the reload would tear the
     /// trailer down under them.
     let isTrailerPlaying: Bool
+    let isFrontmost: Bool
     /// Gives the shares a chance to notice new files. Deliberately separate from
     /// `onRefresh`: polling must cost no UI work, so this pokes the scanner and
     /// nothing else. A reload happens only if that pass reports a real change.
@@ -2061,7 +2056,7 @@ private struct HomeShareScanRefreshObserver: View {
 
     /// Slightly under the scanner's own throttle, so a poll is never the reason a
     /// walk is declined for being too soon.
-    private static let pollInterval: Duration = .seconds(120)
+    var pollInterval: Duration = .seconds(120)
 
     /// Updated by the ancestor's move handler, read only when deciding to refresh.
     /// A background view cannot receive the focused rails' move commands itself.
@@ -2086,12 +2081,16 @@ private struct HomeShareScanRefreshObserver: View {
     /// arrival at `.active` reloaded Home moments after it had loaded. Only a
     /// genuine return from background is the "expected reshuffle" moment.
     @State private var hasBeenBackgrounded = false
+    @State private var hasPendingForegroundRefresh = false
+    @State private var nextPollAt: ContinuousClock.Instant?
 
     /// Show a pending change once nothing is in the way. Called both when a change
     /// arrives and on every poll tick, so a viewer who is mid-browse when new
     /// content lands still sees it as soon as they stop.
     private func refreshIfSafe() {
-        guard hasPendingChange, isSafeToRefresh else { return }
+        guard isFrontmost, scenePhase == .active else { return }
+        guard hasPendingForegroundRefresh || (hasPendingChange && isSafeToRefresh) else { return }
+        hasPendingForegroundRefresh = false
         hasPendingChange = false
         onRefresh()
     }
@@ -2109,6 +2108,12 @@ private struct HomeShareScanRefreshObserver: View {
     /// Only poll where there is something to poll. A viewer with no media share
     /// gets no timer at all — server-backed accounts report their own changes.
     private var hasShares: Bool { !(status?.byShare.isEmpty ?? true) }
+    private var pollingEnabled: Bool { hasShares && isFrontmost && scenePhase == .active }
+
+    private struct PollingState: Hashable {
+        let enabled: Bool
+        let trailerPlaying: Bool
+    }
 
     /// How long the viewer must have been still before a poll may swap content in.
     ///
@@ -2146,14 +2151,23 @@ private struct HomeShareScanRefreshObserver: View {
                     hasBeenBackgrounded = true
                 } else if phase == .active, hasBeenBackgrounded {
                     hasBeenBackgrounded = false
-                    onRefresh()
+                    hasPendingForegroundRefresh = true
+                    refreshIfSafe()
                 }
             }
-            .task(id: hasShares) {
-                guard hasShares else { return }
+            .onChange(of: isFrontmost) { _, frontmost in
+                if frontmost { refreshIfSafe() }
+            }
+            .task(id: PollingState(enabled: pollingEnabled, trailerPlaying: isTrailerPlaying)) {
+                guard pollingEnabled else { return }
                 while !Task.isCancelled {
-                    try? await Task.sleep(for: Self.pollInterval)
-                    guard !Task.isCancelled, scenePhase == .active else { continue }
+                    // Retain the due time while covered: an overdue poll runs
+                    // once on return, not repeatedly behind playback or 2m later.
+                    let deadline = nextPollAt ?? .now.advanced(by: pollInterval)
+                    nextPollAt = deadline
+                    try? await Task.sleep(until: deadline, clock: .continuous)
+                    guard !Task.isCancelled, pollingEnabled else { return }
+                    nextPollAt = .now.advanced(by: pollInterval)
                     // Never swap content in under an active viewer: wait for the
                     // remote to be still. Re-querying the catalog is what spawns a
                     // scan; the reload then picks up whatever that pass found.

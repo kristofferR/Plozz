@@ -97,6 +97,11 @@ public final class NativeVideoEngine: VideoEngine {
 
     @ObservationIgnored private var player: AVPlayer?
     @ObservationIgnored private var backgroundAudioEnabled = false
+    #if os(iOS)
+    @ObservationIgnored private var pictureInPictureActive = false
+    @ObservationIgnored private var wantsNativeSubtitles = false
+    @ObservationIgnored public var onPresentationLayerChanged: (() -> Void)?
+    #endif
     @ObservationIgnored private var request: PlaybackRequest?
     @ObservationIgnored private let authenticatedHTTPResolver:
         (any AuthenticatedHTTPResourceResolving)?
@@ -183,7 +188,7 @@ public final class NativeVideoEngine: VideoEngine {
     public func setBackgroundAudioEnabled(_ enabled: Bool) {
         #if os(iOS)
         backgroundAudioEnabled = enabled
-        player?.audiovisualBackgroundPlaybackPolicy = enabled ? .continuesIfPossible : .automatic
+        updateBackgroundPlaybackPolicy()
         #endif
     }
 
@@ -209,6 +214,14 @@ public final class NativeVideoEngine: VideoEngine {
         guard !Task.isCancelled else { return }
         loadGeneration &+= 1
         let generation = loadGeneration
+        #if os(iOS)
+        defer {
+            if generation == loadGeneration, player == nil {
+                videoOutputView?.player = nil
+                onPresentationLayerChanged?()
+            }
+        }
+        #endif
         status = .loading
         configureAudioSession()
         // Tear down any previous player (e.g. a failed direct-play attempt being
@@ -315,7 +328,7 @@ public final class NativeVideoEngine: VideoEngine {
             item = AVPlayerItem(asset: asset)
         }
         // Apply in-app subtitle styling overrides if the user set any.
-        item.textStyleRules = style.textStyleRules()
+        item.textStyleRules = style.textStyleRules() ?? []
         // Drive the tvOS display into the right dynamic range (true Dolby
         // Vision / HDR10 / HLG) for this source before playback begins.
         configureDynamicRange(for: request, item: item)
@@ -323,11 +336,11 @@ public final class NativeVideoEngine: VideoEngine {
         let player = AVPlayer(playerItem: item)
         player.isMuted = startsMuted
         player.appliesMediaSelectionCriteriaAutomatically = false
-        #if os(iOS)
-        player.audiovisualBackgroundPlaybackPolicy = backgroundAudioEnabled ? .continuesIfPossible : .automatic
-        #endif
         player.allowsExternalPlayback = true
         self.player = player
+        #if os(iOS)
+        updateBackgroundPlaybackPolicy()
+        #endif
         nativeSubtitleOutput = NativeSubtitleCueOutput(player: player, item: item, style: style) { [weak self, weak player] cues in
             guard let self, let player, self.loadGeneration == generation, self.player === player else { return }
             self.onSubtitleCues?(cues)
@@ -338,6 +351,11 @@ public final class NativeVideoEngine: VideoEngine {
         #if canImport(UIKit)
         videoOutputView?.player = player
         #endif
+        #if os(iOS)
+        nativeSubtitleOutput?.setSystemPresentation(wantsNativeSubtitles)
+        onPresentationLayerChanged?()
+        #endif
+        guard generation == loadGeneration, !Task.isCancelled else { return }
 
         let inspectsConvertedFormat = request.isTranscoding && request.streamingOptions != nil
         if inspectsConvertedFormat { inspectVideoFormat(asset: asset, item: item, request: request) }
@@ -392,7 +410,7 @@ public final class NativeVideoEngine: VideoEngine {
         installTimeObserver(on: player)
         status = .ready
         isPaused = false
-        player.playImmediately(atRate: Float(currentPlaybackRate))
+        startPlayback(player)
 
         // The model owns selection; the suppressed native output supplies cues.
         // Resolve the group off the startup path and retain only a selection
@@ -653,8 +671,18 @@ public final class NativeVideoEngine: VideoEngine {
 
     public func play() {
         guard let player else { return }
-        player.playImmediately(atRate: Float(currentPlaybackRate))
+        startPlayback(player)
         isPaused = false
+    }
+
+    private func startPlayback(_ player: AVPlayer) {
+        if request?.isTranscoding == true, request?.isManifestStream == true {
+            // A cold server encoder may not have the next segment ready yet.
+            // Normal rate-based playback honors AVPlayer's automatic buffering.
+            player.rate = Float(currentPlaybackRate)
+        } else {
+            player.playImmediately(atRate: Float(currentPlaybackRate))
+        }
     }
 
     public func pause() {
@@ -702,6 +730,11 @@ public final class NativeVideoEngine: VideoEngine {
         #if canImport(UIKit)
         videoOutputView?.player = nil
         videoOutputView = nil
+        #endif
+        #if os(iOS)
+        pictureInPictureActive = false
+        wantsNativeSubtitles = false
+        onPresentationLayerChanged?()
         #endif
         status = .idle
     }
@@ -1209,24 +1242,36 @@ public final class NativeVideoEngine: VideoEngine {
     /// Finds the legible option AVPlayer exposes for a provider track. An
     /// injected sidecar rendition carries the track's display title as its HLS
     /// `NAME`, so match that first; otherwise fall back to canonicalised language
-    /// matching (`eng` ⇄ `en`), preferring the same forced-ness.
+    /// matching (`eng` ⇄ `en`) with the same forced and SDH classification.
     private static func legibleOption(
         for track: MediaTrack, in group: AVMediaSelectionGroup
     ) async -> AVMediaSelectionOption? {
         // HLS displayName is localized from LANGUAGE, not the playlist NAME.
         // Preserve same-language rendition identity before language fallback.
         let nameIdentifier = AVMetadataIdentifier(rawValue: "m3u8/NAME")
+        var namedOptions: [AVMediaSelectionOption] = []
         for option in group.options {
             for metadata in option.commonMetadata where metadata.identifier == nameIdentifier {
                 do {
-                    if try await metadata.load(.stringValue) == track.displayTitle { return option }
+                    if try await metadata.load(.stringValue) == track.displayTitle {
+                        namedOptions.append(option)
+                        break
+                    }
                 } catch {
                     if Task.isCancelled { return nil }
                     PlozzLog.playback.debug("Native subtitle rendition name could not be read.")
                 }
             }
         }
-        if let named = group.options.first(where: { $0.displayName == track.displayTitle }) {
+        if namedOptions.count == 1 { return namedOptions[0] }
+        func sameKind(_ option: AVMediaSelectionOption) -> Bool {
+            option.hasMediaCharacteristic(.containsOnlyForcedSubtitles) == track.isForced
+                && Self.isSDHOption(option) == track.isSDHSubtitle
+        }
+        if let named = namedOptions.first(where: sameKind) { return named }
+        if let named = group.options.first(where: {
+            $0.displayName == track.displayTitle && sameKind($0)
+        }) {
             return named
         }
         if group.options.count == 1 { return group.options[0] }
@@ -1234,9 +1279,13 @@ public final class NativeVideoEngine: VideoEngine {
         let candidates = AVMediaSelectionGroup.mediaSelectionOptions(
             from: group.options, filteredAndSortedAccordingToPreferredLanguages: [language]
         )
-        return candidates.first {
-            $0.hasMediaCharacteristic(.containsOnlyForcedSubtitles) == track.isForced
-        } ?? candidates.first
+        return candidates.first(where: sameKind)
+    }
+
+    private static func isSDHOption(_ option: AVMediaSelectionOption) -> Bool {
+        option.hasMediaCharacteristic(.transcribesSpokenDialogForAccessibility)
+            || option.hasMediaCharacteristic(.describesMusicAndSoundForAccessibility)
+            || TrackLabeling.isHearingImpaired(option.displayName)
     }
 
     /// Selects the audible track best matching an ordered list of preferred
@@ -1323,10 +1372,49 @@ public final class NativeVideoEngine: VideoEngine {
         }
         #endif
         videoOutputView = view
+        #if os(iOS)
+        Task { @MainActor [weak self, weak view] in
+            guard let self, let view, self.videoOutputView === view else { return }
+            self.onPresentationLayerChanged?()
+        }
+        #endif
         return view
     }
     #endif
 }
+
+#if os(iOS)
+extension NativeVideoEngine: PictureInPicturePresentingEngine {
+    public func pictureInPicturePlayerLayer() -> AVPlayerLayer? {
+        guard player != nil else { return nil }
+        return videoOutputView?.playerLayer
+    }
+
+    public func setPictureInPictureActive(_ active: Bool) {
+        pictureInPictureActive = active
+        updateBackgroundPlaybackPolicy()
+    }
+
+    private func updateBackgroundPlaybackPolicy() {
+        player?.audiovisualBackgroundPlaybackPolicy =
+            backgroundAudioEnabled || pictureInPictureActive ? .continuesIfPossible : .automatic
+    }
+
+    public var continuesPlaybackInBackground: Bool {
+        pictureInPictureActive || player?.isExternalPlaybackActive == true
+    }
+
+    public var externalPlaybackRouteName: String? {
+        guard player?.isExternalPlaybackActive == true else { return nil }
+        return AVAudioSession.sharedInstance().currentRoute.outputs.first?.portName
+    }
+
+    public func setNativeSubtitlesActive(_ active: Bool) {
+        wantsNativeSubtitles = active
+        nativeSubtitleOutput?.setSystemPresentation(active)
+    }
+}
+#endif
 
 /// Startup resume is bounded by the owner's startup watchdog, not a timer that
 /// seeks an unready HLS item. All continuation and seek ownership stays on main.

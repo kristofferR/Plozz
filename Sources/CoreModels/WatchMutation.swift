@@ -126,6 +126,9 @@ public struct WatchMutation: Codable, Hashable, Sendable, Identifiable {
     public var traktPending: Bool
     /// Whether the Simkl mirror still needs writing (cleared on success).
     public var simklPending: Bool
+    public var wetrakrPending: Bool
+    public var wetrakrAccountIdentity: String?
+    public var wetrakrCapturedAt: Date?
     /// Whether the AniList mirror still needs writing (cleared on success).
     public var anilistPending: Bool
     /// Whether the MAL mirror still needs writing (cleared on success).
@@ -213,6 +216,7 @@ public struct WatchMutation: Codable, Hashable, Sendable, Identifiable {
         anchorTitle: String? = nil,
         anchorYear: Int? = nil,
         simklPending: Bool? = nil,
+        wetrakrPending: Bool? = nil,
         anilistPending: Bool? = nil,
         malPending: Bool? = nil,
         rejectedSourceIDs: Set<String> = []
@@ -232,6 +236,9 @@ public struct WatchMutation: Codable, Hashable, Sendable, Identifiable {
         self.trakt = trakt
         self.traktPending = trakt != nil
         self.simklPending = simklPending ?? (trakt != nil)
+        self.wetrakrPending = wetrakrPending ?? false
+        self.wetrakrAccountIdentity = nil
+        self.wetrakrCapturedAt = nil
         self.anilistPending = anilistPending ?? (trakt != nil)
         self.malPending = malPending ?? (trakt != nil)
         self.attempts = attempts
@@ -251,6 +258,7 @@ public struct WatchMutation: Codable, Hashable, Sendable, Identifiable {
         case id, capturedAt, canonicalMediaID, seasonNumber, episodeNumber
         case resumePosition, played, clearResume, targets, optimisticTargets, trakt, traktPending
         case simklPending, anilistPending, malPending
+        case wetrakrPending, wetrakrAccountIdentity, wetrakrCapturedAt
         case attempts, episodeOrigin, expansionPending, appliedTargetIDs, expansionStartedAt, identities, kind
         case anchorTitle, anchorYear, authorization, serverScope, rejectedSourceIDs
     }
@@ -336,6 +344,9 @@ public struct WatchMutation: Codable, Hashable, Sendable, Identifiable {
         trakt = try container.decodeIfPresent(TraktScrobbleIntent.self, forKey: .trakt)
         traktPending = try container.decodeIfPresent(Bool.self, forKey: .traktPending) ?? (trakt != nil)
         simklPending = try container.decodeIfPresent(Bool.self, forKey: .simklPending) ?? false
+        wetrakrPending = try container.decodeIfPresent(Bool.self, forKey: .wetrakrPending) ?? false
+        wetrakrAccountIdentity = try container.decodeIfPresent(String.self, forKey: .wetrakrAccountIdentity)
+        wetrakrCapturedAt = try container.decodeIfPresent(Date.self, forKey: .wetrakrCapturedAt)
         anilistPending = try container.decodeIfPresent(Bool.self, forKey: .anilistPending) ?? false
         malPending = try container.decodeIfPresent(Bool.self, forKey: .malPending) ?? false
         attempts = try container.decodeIfPresent(Int.self, forKey: .attempts) ?? 0
@@ -398,6 +409,9 @@ public struct WatchMutation: Codable, Hashable, Sendable, Identifiable {
         try container.encodeIfPresent(trakt, forKey: .trakt)
         try container.encode(traktPending, forKey: .traktPending)
         try container.encode(simklPending, forKey: .simklPending)
+        try container.encode(wetrakrPending, forKey: .wetrakrPending)
+        try container.encodeIfPresent(wetrakrAccountIdentity, forKey: .wetrakrAccountIdentity)
+        try container.encodeIfPresent(wetrakrCapturedAt, forKey: .wetrakrCapturedAt)
         try container.encode(anilistPending, forKey: .anilistPending)
         try container.encode(malPending, forKey: .malPending)
         try container.encode(attempts, forKey: .attempts)
@@ -498,7 +512,7 @@ public struct WatchMutation: Codable, Hashable, Sendable, Identifiable {
     /// Whether every server target AND all tracker mirrors are done **and** no
     /// cross-server twin expansion is still owed — safe to prune.
     public var isFullyApplied: Bool {
-        targets.isEmpty && !traktPending && !simklPending && !anilistPending && !malPending && !expansionPending
+        targets.isEmpty && !traktPending && !simklPending && !wetrakrPending && !anilistPending && !malPending && !expansionPending
     }
 
     // MARK: - Canonical id

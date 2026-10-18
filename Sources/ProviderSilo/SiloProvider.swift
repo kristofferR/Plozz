@@ -2,7 +2,7 @@ import Foundation
 import CoreModels
 import CoreNetworking
 
-public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFieldProviding, Sendable {
+public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFieldProviding, ServerAddressUpdating, Sendable {
     public let kind: ProviderKind = .silo
     public let session: UserSession
     public let accountID: String
@@ -13,20 +13,25 @@ public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFi
     let artwork = SiloArtworkStore()
     let libraryRatings = SiloLibraryRatings()
 
+    public func updateServerAddresses(_ alternatives: [URL]) {
+        client.addressResolver.updateAlternatives(alternatives)
+    }
+
     public init(
         context: ProviderResolutionContext, credentials: any RotatingCredentialStoring,
         http: any HTTPClient = URLSessionHTTPClient(),
-        capabilities: MediaCapabilities = .detected()
+        capabilities: MediaCapabilities = .detected(),
+        addressProbe: any HTTPClient = URLSessionHTTPClient(session: .plozzDiscovery)
     ) throws {
         session = context.session
         accountID = context.accountID
         credentialRevision = context.credentialRevision
-        client = try SiloClient(context: context, store: credentials, http: http)
+        client = try SiloClient(context: context, store: credentials, http: http, addressProbe: addressProbe)
         playback = SiloPlaybackSessions()
         capabilitiesSnapshot = capabilities
     }
 
-    public var capabilities: ProviderCapability { [.video, .libraryCollections, .remoteSubtitles] }
+    public var capabilities: ProviderCapability { [.video, .libraryCollections, .personalCollections, .remoteSubtitles] }
     public var catalogIdentityRequiresEnrichment: Bool { true }
 
     public func libraries() async throws -> [MediaLibrary] {
@@ -54,7 +59,12 @@ public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFi
 
     public func item(id: String) async throws -> MediaItem {
         if let collection = Self.collectionIdentity(id) {
-            let page = try await collections(in: collection.libraryID, page: .init(limit: Int.max))
+            let page: MediaPage
+            if let libraryID = collection.libraryID {
+                page = try await collections(in: libraryID, page: .init(limit: Int.max))
+            } else {
+                page = try await personalCollections(page: .init(limit: Int.max))
+            }
             guard let item = page.items.first(where: { $0.id == id }) else { throw AppError.notFound }
             return item
         }
@@ -298,7 +308,7 @@ public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFi
 
     func resourceURL(_ value: String?) -> URL? {
         guard let value, !value.isEmpty,
-              let url = URL(string: value, relativeTo: session.server.baseURL)?.absoluteURL,
+              let url = URL(string: value, relativeTo: client.baseURL)?.absoluteURL,
               ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
               url.user == nil, url.password == nil else { return nil }
         return url
@@ -442,10 +452,13 @@ public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFi
             audioInfo.profile = audio.profile
             audioInfo.channels = audio.channels
             audioInfo.channelLayout = audio.layout
+            audioInfo.language = audio.language
         }
         return MediaSourceMetadata(
             container: file.container, fileSizeBytes: file.file_size,
-            video: videoInfo, audio: audioInfo)
+            fileName: file.file_name,
+            video: videoInfo, audio: audioInfo,
+            audioLanguages: file.audio_tracks?.compactMap(\.language))
     }
 }
 

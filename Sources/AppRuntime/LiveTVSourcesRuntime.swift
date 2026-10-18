@@ -62,7 +62,7 @@ public final class LiveTVSourcesRuntime {
                     await enrollment.refresh(
                         choices: choices, resolver: serverProviderResolver, store: store,
                         suppressedAccountIDs: suppressedAccountIDs,
-                        isAuthorized: { admission.isCurrent }
+                        isAuthorized: { admission.isCurrent }, diagnosticProfileID: profileID
                     )
                     return enrollment.statuses.compactMap(\.failure).first
                 } catch {
@@ -104,6 +104,11 @@ public final class LiveTVSourcesRuntime {
     public func activate() {
         let identity = admission.currentIdentity
         guard !admission.isActive || identity != admission.acceptedIdentity else { return }
+        LiveTVSourceDiagnostics.shared.record(
+            .sourcesActivate, identities: [.profile: catalog.profileID],
+            flags: [.authorized: identity != nil, .sameAuthority: identity == admission.acceptedIdentity]
+        )
+        HandoffDiagnostics.emit("SOURCES event=activate authorityPresent=\(identity != nil)")
         invalidate()
         admission.isActive = true
         admission.acceptedIdentity = identity
@@ -111,12 +116,25 @@ public final class LiveTVSourcesRuntime {
     }
 
     public func restore() async {
+        LiveTVSourceDiagnostics.shared.record(.sourcesRestore, identities: [.profile: catalog.profileID])
         activate()
         await catalog.restore()
         await scanBinding.waitUntilPrepared()
+        LiveTVSourceDiagnostics.shared.record(
+            .sourcesRestored, identities: [.profile: catalog.profileID],
+            counts: [.channels: catalog.catalog.channels.count],
+            flags: [.current: isCurrent, .failed: catalog.issue != nil, .cancelled: Task.isCancelled]
+        )
     }
 
     public func invalidate() {
+        LiveTVSourceDiagnostics.shared.record(
+            .sourcesInvalidate, identities: [.profile: catalog.profileID],
+            flags: [.active: admission.isActive, .hasSnapshot: admission.acceptedIdentity != nil]
+        )
+        HandoffDiagnostics.emit(
+            "SOURCES event=invalidate active=\(admission.isActive) accepted=\(admission.acceptedIdentity != nil)"
+        )
         admission.isActive = false
         admission.acceptedIdentity = nil
         enrollment.invalidate()

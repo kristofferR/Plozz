@@ -13,6 +13,7 @@ import SwiftUI
 struct PlozziOSLiveTVDestination: View {
     let isActive: Bool
     let profileID: String
+    private let playbackOrientation: PlaybackOrientation
 
     @Environment(ProfilesModel.self) private var profiles
     @Environment(\.mediaItemNavigator) private var navigateToItem
@@ -39,6 +40,7 @@ struct PlozziOSLiveTVDestination: View {
         isActive: Bool,
         profileID: String,
         preferencesNamespace: String?,
+        playbackOrientation: PlaybackOrientation,
         importModel: LiveTVPrototypeImportModel? = nil,
         accountsProviders: AccountsProvidersModel? = nil,
         authenticatedHTTPResolver: (any AuthenticatedHTTPResourceResolving)? = nil,
@@ -52,6 +54,7 @@ struct PlozziOSLiveTVDestination: View {
         self.isActive = isActive
         self.profileID = profileID
         self.preferencesNamespace = preferencesNamespace
+        self.playbackOrientation = playbackOrientation
         self.importModel = importModel
         self._sessionProfileScope = State(initialValue: ProfileScope(id: profileID, namespace: preferencesNamespace))
         self.preferencesStore = LiveTVPreferencesStore(namespace: preferencesNamespace)
@@ -157,6 +160,13 @@ struct PlozziOSLiveTVDestination: View {
                 countsAsWatching: playback.countsAsWatching,
                 isMultiview: playback.isMultiview,
                 trackPreferences: runtime.trackPreferences,
+                touchSkipIntervals: {
+                    let settings = PlaybackSettingsStore(namespace: preferencesNamespace).load()
+                    return (settings.skipBackwardInterval, settings.skipForwardInterval)
+                },
+                touchLevelsEnabled: {
+                    PlaybackSettingsStore(namespace: preferencesNamespace).load().volumeBrightnessGestures
+                },
                 networkBlock: effectiveNetworkBlock,
                 isAuthorized: playback.isAuthorized && isCurrentProfileScope,
                 presentationControls: { AnyView(PlozziOSLivePresentationControls(context: $0)) },
@@ -198,6 +208,10 @@ struct PlozziOSLiveTVDestination: View {
             }
         }
         .id(profileScope)
+        .plozziOSLivePlayerOrientation(
+            isPresented: isActive && isExpanded && isCurrentProfileScope,
+            orientation: playbackOrientation
+        )
         .toolbar(isExpanded ? .hidden : .visible, for: .tabBar)
         .toolbar(.hidden, for: .navigationBar)
         .onAppear {

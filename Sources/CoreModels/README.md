@@ -10,6 +10,9 @@ language every other module speaks.
 - The dual-provider abstraction: `MediaProvider` protocol, `ProviderKind`,
   `ProviderRegistry` / `ProviderResolving`, `ResolvedAccount`.
 - Cross-cutting UI state: `LoadState`, `AppError`.
+- `PlaybackDiagnosticReport` supplies privacy-safe failure Details for on-demand
+  playback, Live TV and IPTV setup. Preserve typed reasons and numeric causes,
+  distinguish preparation/opening/playback, and never export raw error text.
 - Shared decode/encode helpers: `JSONDecoder.plozz`, `JSONEncoder.plozz`.
 - Subtitle behaviour + appearance model: `SubtitleBehavior`, `SubtitleStyle`,
   plus the neutral `SubtitleColor` / `SubtitleEdgeStyle` / `SubtitleMode` primitives.
@@ -41,6 +44,96 @@ language every other module speaks.
 | Profiles | `Profile`, `ProfileStore`, `ProfilesModel`, `PlexHomeUser` |
 | UI state | `LoadState`, `AppError` |
 | Subtitles | `SubtitleBehavior`, `SubtitleStyle` (rendered by `FeaturePlayback`) |
+
+## Home section editing
+
+`HomeSectionCatalog` adapts the existing `HomeRowChoice` inventory into section
+editing without creating a second identity or storage format. Global, native
+server, and library row IDs remain account/library qualified; provider-authored
+titles are display content, never identifiers. `LibraryHomeRowKind.available`
+and `MediaProvider` retain Jellyfin, Emby, Plex, Silo and share capability
+differences. Live TV remains its existing typed channel-shortcut section,
+with tuning and authorization owned by the Live TV runtime.
+
+Add/remove/reorder validate against the current editable catalog, then use
+`HomeLibraryVisibility.applyRows`. This preserves unavailable IDs, merged-away
+Next Up rows and their saved positions. Remove means hidden, not deleted;
+re-adding appends the section and retains its other settings. No-op actions
+do not turn a preset into a custom arrangement. Writes use the existing
+profile-scoped store and never mutate whole-library availability.
+
+Next Up merges into Continue Watching by default for every preset and for stored
+settings without a merge preference. An explicit opt-out remains profile-scoped
+and survives preset changes and reloads. Merging preserves separate rows' saved
+order and visibility; hiding Continue Watching suspends the merge.
+
+`HomeSectionCatalogModel` discovers native layout metadata and optional
+recommendations with at most three concurrent catalog requests. Accounts,
+credential revisions, effective server/Plex viewers, enabled libraries and the
+profile model fence publications. Same-scope failures retain known choices
+and expose typed errors; cancellation and stale tasks cannot publish into a
+newer catalog. There is no timer, full-feed loader, playback resolution or
+new provider-specific API in the editor.
+
+The root (including its inline preset selector), section and Add section pages
+participate in the same identity- and preset-keyed load. Concurrent pages share its work; leaving the
+last consumer cancels it. A pushed page can restart a cancelled load, and preset
+selections refresh both resolved native sections and discovery errors; freezing
+a preset during a row edit does not restart discovery. Library metadata changes
+also invalidate the catalog even when account/library keys remain stable. Section
+mutations wait for discovery so an incomplete catalog cannot freeze a preset
+without its newly discovered rows.
+
+Hero stays in `HeroSettings`, fixed above `HomePresentationRow`; Showcase remains
+a page layout. Future custom source scopes, mixed feeds, duplicate instances,
+curated sections and new appearances need explicit configuration and capability
+contracts before they can become templates in this editor. Do not overload an
+existing `HomeRowID` to represent independent instances or change provider IDs
+to make them unique in the UI.
+
+## Profile deletion and namespace ownership
+
+Any profile may be deleted while at least one remains. Both cloud adapters apply
+the original/default profile's deletion and omit deleted profiles, membership and
+settings from capture, allowing the existing durable sync ledger to delete their
+CloudKit records. A deletion arriving before the remaining profile records holds
+a persisted, non-publishing placeholder until a replacement arrives or is added;
+`profilesForSync` excludes it so a restart cannot recreate the deleted record.
+Live TV and media-state captures also exclude `pendingSyncedDeletionProfileIDs`,
+including preserved fallback records, without erasing the temporary local data.
+The revisioned household Parental PIN moves to the first surviving profile rather
+than disappearing with its former anchor.
+
+Legacy unnamespaced settings have a recorded owner. Retain that former owner's
+stored ID after deletion, even though the live `rootNamespaceOwnerID` is nil.
+Erasing this marker reruns migration on launch and hands the deleted profile's
+settings and Live TV source storage to another profile. Survivor namespaces never
+change because the roster is reordered or its first entry is deleted.
+
+The shared CloudKit inventory repair also heals deletions missed by an older
+incremental cursor. Inventory absence alone never authorizes removal: only an
+explicit per-record `unknownItem` can remove an unchanged, previously synced
+entry. New uploads, dirty edits, pending local deletions, and changes made during
+verification are retained. Repair is fenced by engine, iCloud account, and
+channel authority; it uses the normal persisted ledger and profile apply path.
+Startup and foreground checks are throttled only after a complete repair, while
+manual Sync Now checks the inventory without that throttle.
+
+## Version picker facts
+
+`MediaVersion.PickerPresentation` is the shared detail/player summary on TV and
+mobile: edition/quality/size, video format, available audio languages, primary
+audio codec/profile/layout, bitrate, runtime, and a separate release filename.
+Language names use the caller's effective locale. Provider metadata stays scoped
+to that physical file; subtitle languages never become audio languages. Unknown
+facts remain absent, and these source facts do not claim a playback mode or
+active output format. Optional `MediaSourceMetadata.audioLanguages` keeps older
+cached payloads readable and also survives synthesized edition versions.
+`MediaSourceDisplayName` extracts a readable `torrent_name` from URL/query-backed
+sources (including percent-encoded names) before taking a basename. It also
+cleans cached locator-like names at presentation time. Only the decoded name,
+not unrelated query parameters, supplies release text or edition/quality hints;
+playback locators and source IDs remain unchanged.
 
 ## Artwork and profile presentation
 
@@ -85,6 +178,30 @@ survive reload, profile switching, and transfer.
 Synced artwork/label-setting deletions consume their one-time legacy import
 even for profiles not yet loaded on this device. The separate `.migrated` store
 markers remain device-local and never enter profile transfer snapshots.
+
+## Device-local playback buffering
+
+`PlaybackReadAheadStore` keeps the on-demand buffering preference on the current
+device, outside `PlaybackSettings` and `ProfileSettingsTransfer`. Profile changes,
+sync and transfer must not overwrite this local storage/network choice.
+Missing or invalid values use `PlaybackReadAhead.default` (Automatic); invalid
+persisted values are logged without their contents.
+
+## Season request status
+
+Season request labels distinguish approved requests awaiting a known future
+season premiere from Seerr's generic processing state. `SeasonRequestPresentation`
+and per-season statuses share the calendar-day policy, independent of the release
+badge. Pending approval, missing dates, release-day/past premieres, failures,
+declines, library coverage, and download-queue evidence never claim that release
+is the only remaining wait. Seerr's existing TV detail response supplies the
+premiere date; this presentation needs no additional metadata requests.
+TV and touch heroes use "S1 Requested · Unreleased" to keep the confirmation and
+release state in one label. Mobile detail heroes move secondary actions into
+the existing overflow menu before falling back to primary buttons above a
+wrapping row of the secondary icons.
+That stacked layout restores direct access to the icons, keeping a menu only
+for source/version selection or file browsing; the status does not gain a subtitle.
 
 ## Watch-state replay identity
 

@@ -33,8 +33,21 @@ final class VideoZoomPresentationTests: XCTestCase {
         try await verify(engine: engine, fixture: "four-three.mp4", expectedAspect: 4 / 3)
     }
 
+    #if os(iOS)
+    func testNativeSafeAreaFittingKeepsPlaybackAndOrdinarySubtitleLayoutStable() async throws {
+        try await verify(engine: NativeVideoEngine(), fitsInsideSafeArea: true)
+    }
+
+    func testPlozzigenSafeAreaFittingKeepsPlaybackAndOrdinarySubtitleLayoutStable() async throws {
+        let engine = try PlozzigenVideoEngine()
+        engine.configureLiveOutput(.init(isAudible: false, sharesAudioSession: true, suppressesDisplayMatching: true))
+        try await verify(engine: engine, fixture: "anamorphic.mp4", expectedAspect: 16 / 9, fitsInsideSafeArea: true)
+    }
+    #endif
+
     private func verify(
-        engine: any VideoEngine, fixture: String = "embedded.mp4", expectedAspect: Double? = nil
+        engine: any VideoEngine, fixture: String = "embedded.mp4", expectedAspect: Double? = nil,
+        fitsInsideSafeArea: Bool = false
     ) async throws {
         try await waitUntil {
             UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive }
@@ -52,7 +65,12 @@ final class VideoZoomPresentationTests: XCTestCase {
             "WEBVTT\n\n00:00:00.000 --> 00:01:00.000\nUnchanged caption size.\n", id: 1
         ))
         let originalStyle = subtitles.style
-        let controller = PlayerInputViewController(engine: engine, model: controls, actions: PlayerActions())
+        let controller = PlayerInputViewController(
+            engine: engine, model: controls, actions: PlayerActions(), fitsInsideSafeArea: fitsInsideSafeArea
+        )
+        if fitsInsideSafeArea {
+            controller.additionalSafeAreaInsets = UIEdgeInsets(top: 13, left: 61, bottom: 17, right: 7)
+        }
         controller.loadViewIfNeeded()
         controller.attachVideoSurface()
         controller.attachSubtitleOverlay(subtitles)
@@ -95,7 +113,9 @@ final class VideoZoomPresentationTests: XCTestCase {
                      PlayerVideoZoom(mode: .custom, customPercent: 150),
                      PlayerVideoZoom(mode: .custom, customPercent: 90), PlayerVideoZoom()] {
             controls.videoZoom.settings = zoom
-            let expected = zoom.surfaceFrame(in: viewport.bounds, aspectRatio: engine.videoAspectRatio)
+            let expected = zoom.surfaceFrame(
+                in: viewport.bounds, aspectRatio: engine.videoAspectRatio, fitBounds: viewport.fitBounds
+            )
             try await waitUntil {
                 window.layoutIfNeeded()
                 return abs(surface.frame.minX - expected.minX) < 0.001
@@ -128,6 +148,17 @@ final class VideoZoomPresentationTests: XCTestCase {
                 XCTAssertEqual(mappedPicture.height, viewport.bounds.height, accuracy: 0.001)
             } else {
                 XCTAssertNil(subtitles.sourceVideoAspectRatio)
+            }
+            if fitsInsideSafeArea, zoom.mode == .fit {
+                let safe = try XCTUnwrap(viewport.fitBounds)
+                XCTAssertTrue(safe.insetBy(dx: -0.001, dy: -0.001).contains(mappedPicture))
+                let safePicture = try XCTUnwrap(SubtitleOverlayGeometry.aspectFitRect(
+                    in: safe, aspectRatio: engine.videoAspectRatio.map { CGFloat($0) }
+                ))
+                XCTAssertEqual(mappedPicture.minX, safePicture.minX, accuracy: 0.001)
+                XCTAssertEqual(mappedPicture.minY, safePicture.minY, accuracy: 0.001)
+                XCTAssertEqual(mappedPicture.width, safePicture.width, accuracy: 0.001)
+                XCTAssertEqual(mappedPicture.height, safePicture.height, accuracy: 0.001)
             }
             for layer in [surface.layer] + layers {
                 if let native = layer as? AVPlayerLayer { XCTAssertEqual(native.videoGravity, .resizeAspect) }

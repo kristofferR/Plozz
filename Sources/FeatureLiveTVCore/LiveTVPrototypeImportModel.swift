@@ -221,6 +221,16 @@ public final class LiveTVPrototypeImportModel {
         playlistPhase == .loading || guidePhase == .loading
             || serverSources.contains { $0.phase == .loading || $0.guidePhase == .loading }
     }
+    public var unattributedFailure: LiveTVSourceImportError? {
+        if let cacheFailure { return cacheFailure }
+        if let playlistFailure, !playlistSources.contains(where: { $0.failure == playlistFailure }) {
+            return playlistFailure
+        }
+        if let guideFailure, !guideSources.contains(where: { $0.failure == guideFailure }) {
+            return guideFailure
+        }
+        return nil
+    }
     public var catalogPhase: LiveTVImportPhase {
         let phases = playlistSources.filter(\.source.isEnabled).map(\.phase)
             + serverSources.filter(\.source.isEnabled).map(\.phase)
@@ -460,32 +470,55 @@ public final class LiveTVPrototypeImportModel {
     }
 
     public func reload(into model: LiveTVPrototypeModel, forceServerRefresh: Bool = true) async {
+        _ = await reload(into: model, forceServerRefresh: forceServerRefresh, sourceID: nil)
+    }
+
+    public func reloadSource(_ sourceID: String, into model: LiveTVPrototypeModel) async throws {
+        guard ensureCatalogAuthorization(into: model), !Task.isCancelled else { throw CancellationError() }
+        guard configuration.playlists.contains(where: { $0.id == sourceID && $0.isEnabled })
+            || configuration.servers.contains(where: { $0.id == sourceID && $0.isEnabled }) else {
+            throw LiveTVSourcesValidationError.invalidSourceID
+        }
+        let result = await reload(into: model, forceServerRefresh: true, sourceID: sourceID)
+        guard ensureCatalogAuthorization(into: model), result != .cancelled, !Task.isCancelled else {
+            throw CancellationError()
+        }
+    }
+
+    private func reload(
+        into model: LiveTVPrototypeModel, forceServerRefresh: Bool, sourceID: String?
+    ) async -> ReloadResult {
         publishedModel = model
-        guard ensureCatalogAuthorization(into: model) else { return }
+        guard ensureCatalogAuthorization(into: model) else { return .cancelled }
         let performance = PerformanceDiagnostics.shared.begin(.liveTVRefresh)
         var outcome = PerformanceDiagnostics.Outcome.cancelled
         defer {
             performance?.finish(outcome, metrics: .init(items: model.channels.count, accounts: configuration.servers.count))
         }
-        beforeSourceRefresh?(Set(
+        let refreshedSources = Set(
             configuration.playlists.filter(\.isEnabled).map(\.id)
                 + configuration.servers.filter(\.isEnabled).map(\.id)
-        ))
+        ).filter { sourceID == nil || $0 == sourceID }
+        beforeSourceRefresh?(Set(refreshedSources))
         reloadGeneration &+= 1
         let request = reloadGeneration
-        await restoreCachedCatalog(into: model, now: model.now)
-        guard request == reloadGeneration, !Task.isCancelled, ensureCatalogAuthorization(into: model) else { return }
-        let playlistResult = await reloadPlaylists(into: model)
-        guard request == reloadGeneration, !Task.isCancelled, ensureCatalogAuthorization(into: model) else { return }
-        let serverResult = await reloadServersResult(into: model, forceRefresh: forceServerRefresh)
-        guard request == reloadGeneration, !Task.isCancelled else { return }
+        if sourceID == nil { await restoreCachedCatalog(into: model, now: model.now) }
+        guard request == reloadGeneration, !Task.isCancelled, ensureCatalogAuthorization(into: model) else { return .cancelled }
+        let playlistResult = sourceID == nil || configuration.playlists.contains(where: { $0.id == sourceID })
+            ? await reloadPlaylists(into: model, sourceID: sourceID) : .completed
+        guard request == reloadGeneration, !Task.isCancelled, ensureCatalogAuthorization(into: model) else { return .cancelled }
+        let serverResult = sourceID == nil || configuration.servers.contains(where: { $0.id == sourceID })
+            ? await reloadServersResult(into: model, forceRefresh: forceServerRefresh, sourceID: sourceID)
+            : .completed
+        guard request == reloadGeneration, !Task.isCancelled else { return .cancelled }
         let result = playlistResult.merging(serverResult)
-        guard result != .cancelled else { return }
+        guard result != .cancelled else { return .cancelled }
         outcome = result == .failed || playlistFailure != nil || guideFailure != nil
             || serverSources.contains { $0.failure != nil || $0.guideFailure != nil } ? .failed : .succeeded
+        return result
     }
 
-    private func reloadPlaylists(into model: LiveTVPrototypeModel) async -> ReloadResult {
+    private func reloadPlaylists(into model: LiveTVPrototypeModel, sourceID: String?) async -> ReloadResult {
         revision &+= 1
         let request = revision
         do {
@@ -514,13 +547,16 @@ public final class LiveTVPrototypeImportModel {
             guideSources[index].phase = .idle
         }
         playlistPhase = .loading
-        playlistFailure = nil
-        guideFailure = nil
-        for index in playlistSources.indices {
+        playlistFailure = sourceID == nil ? nil
+            : playlistSources.first { $0.id != sourceID && $0.failure != nil }?.failure
+        guideFailure = sourceID == nil ? nil
+            : guideSources.first { $0.playlistSourceID != sourceID && $0.failure != nil }?.failure
+        for index in playlistSources.indices where sourceID == nil || playlistSources[index].id == sourceID {
             playlistSources[index].phase = .idle
             playlistSources[index].failure = nil
         }
-        for index in playlistSources.indices where playlistSources[index].source.isEnabled {
+        for index in playlistSources.indices where playlistSources[index].source.isEnabled
+            && (sourceID == nil || playlistSources[index].id == sourceID) {
             guard revision == request, ensureCatalogAuthorization(into: model) else { return .cancelled }
             let source = playlistSources[index].source
             playlistSources[index].phase = .loading
@@ -584,15 +620,17 @@ public final class LiveTVPrototypeImportModel {
         }
         playlistPhase = playlistSources.contains { $0.source.isEnabled && $0.phase == .loaded }
             ? .loaded : .failed
+        playlistFailure = playlistSources.first { $0.source.isEnabled && $0.failure != nil }?.failure
 
         let loadedPlaylists = Set(playlistSources.filter { $0.source.isEnabled && cachedPlaylists[$0.id] != nil }.map(\.id))
-        for index in guideSources.indices {
+        for index in guideSources.indices where sourceID == nil || guideSources[index].playlistSourceID == sourceID {
             guideSources[index].phase = cachedGuides[guideSources[index].id] == nil ? .idle : .loaded
             guideSources[index].failure = nil
         }
         let now = model.now
         for index in guideSources.indices where enabledSourceIDs.contains(guideSources[index].id)
-            && loadedPlaylists.contains(guideSources[index].playlistSourceID) {
+            && loadedPlaylists.contains(guideSources[index].playlistSourceID)
+            && (sourceID == nil || guideSources[index].playlistSourceID == sourceID) {
             guard revision == request, ensureCatalogAuthorization(into: model) else { return .cancelled }
             let source = guideSources[index].source
             let owner = guideSources[index].playlistSourceID
@@ -660,6 +698,7 @@ public final class LiveTVPrototypeImportModel {
                 guideFailure = failure
             }
         }
+        guideFailure = guideSources.first { enabledSourceIDs.contains($0.id) && $0.failure != nil }?.failure
         updateGuidePhase()
         if cache != nil {
             let window = requestedGuideWindow ?? (

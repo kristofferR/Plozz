@@ -219,4 +219,39 @@ final class HomePresentationRowTests: XCTestCase {
             XCTAssertEqual(group.rows.map(\.id), ["nextUp", "recentlyAdded"])
         }
     }
+
+    func testMergeSuppressesCachedNativeAndLibraryNextUpRowsIncludingPlaceholders() {
+        let source = library("a")
+        let native = HomeServerRowDefinition(
+            accountID: source.accountID, serverName: source.serverName, providerKind: .jellyfin,
+            section: .init(id: "native-next", kind: .nextUp)
+        )
+        let item = MediaItem(id: "resume", title: "Resume", kind: .episode, resumePosition: 60)
+        var visibility = HomeLibraryVisibility(
+            rowCustomization: .init(
+                defaults: .provider, shown: [native.id], serverRows: [native]
+            ),
+            mergeNextUpIntoContinueWatching: true
+        )
+        for loading in [false, true] {
+            let content = HomeViewModel.Content(
+                continueWatching: [item], libraries: [source],
+                librarySections: [.init(
+                    library: source,
+                    sections: loading ? [] : [.init(id: "nextUp", title: "Next Up", items: [item])],
+                    loadingRows: loading ? [.nextUp] : []
+                )],
+                serverRows: [.init(definition: native, items: loading ? [] : [item], isLoading: loading)]
+            )
+            let rows = HomeRow.rows(for: content, isLibraryVisible: visibility.isEnabled)
+            let merged = HomePresentationRow.resolve(rows: rows, content: content, visibility: visibility)
+            XCTAssertTrue(merged.contains { $0.id == .global(.continueWatching) })
+            XCTAssertFalse(merged.contains { $0.id == native.id || $0.id.libraryKind == .nextUp })
+            visibility.mergeNextUpIntoContinueWatching = false
+            let separate = HomePresentationRow.resolve(rows: rows, content: content, visibility: visibility)
+            XCTAssertTrue(separate.contains { $0.id == native.id })
+            XCTAssertTrue(separate.contains { $0.id.libraryKind == .nextUp })
+            visibility.mergeNextUpIntoContinueWatching = true
+        }
+    }
 }

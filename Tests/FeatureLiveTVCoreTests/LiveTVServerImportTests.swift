@@ -7,6 +7,76 @@ import XCTest
 final class LiveTVServerImportTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
+    func testServerRetryPreservesAnUnrelatedInFlightGuide() async throws {
+        let first = source(id: "first", accountID: "one")
+        let second = source(id: "second", accountID: "two")
+        let started = expectation(description: "Other server guide requested")
+        let firstProvider = ServerImportProvider(
+            availability: .init(status: .available, supportsGuide: false), channels: [channel()]
+        )
+        let secondProvider = ServerImportProvider(
+            channels: [channel()], programs: [program()], suspended: .guide, started: started
+        )
+        let contexts = [first.accountID: authorized(first, firstProvider), second.accountID: authorized(second, secondProvider)]
+        let imports = LiveTVPrototypeImportModel(
+            configuration: .init(servers: [first, second]), serverProviderResolver: { contexts[$0] }
+        )
+        let model = LiveTVPrototypeModel(now: now, channels: [])
+        let refresh = Task { await imports.reload(into: model) }
+        await fulfillment(of: [started], timeout: 3)
+
+        try await imports.reloadSource(first.id, into: model)
+        XCTAssertEqual(imports.serverSources.last?.guidePhase, .loading)
+        await secondProvider.resume()
+        await refresh.value
+
+        XCTAssertEqual(imports.serverSources.last?.guidePhase, .loaded)
+        XCTAssertEqual(imports.serverSources.last?.programCount, 1)
+        let calls = await secondProvider.calls
+        XCTAssertEqual(calls.guides, 1)
+    }
+
+    func testServerRetryDoesNotRequestOtherServersOrPlaylists() async throws {
+        let first = source(id: "first", accountID: "one")
+        let second = source(id: "second", accountID: "two")
+        let firstProvider = ServerImportProvider(
+            availability: .init(status: .serviceUnavailable), channels: [channel()]
+        )
+        let secondProvider = ServerImportProvider(channels: [channel()])
+        let contexts = [
+            first.accountID: authorized(first, firstProvider),
+            second.accountID: authorized(second, secondProvider)
+        ]
+        let playlist = LiveTVPlaylistSource(
+            id: "playlist", name: "Playlist", playlistURL: URL(string: "https://example.test/list.m3u")!
+        )
+        let loader = ServerMixPlaylistLoader()
+        let imports = LiveTVPrototypeImportModel(
+            configuration: .init(playlists: [playlist], servers: [first, second]), loader: loader,
+            serverProviderResolver: { contexts[$0] }
+        )
+        let model = LiveTVPrototypeModel(now: now, channels: [])
+        await imports.reload(into: model)
+        XCTAssertEqual(imports.serverSources.first?.failure, .serviceUnavailable)
+        let healthy = imports.serverSources.last
+        let before = await secondProvider.calls
+        let playlistLoads = await loader.playlistLoads
+        await firstProvider.setAvailability(.init(status: .available, channelCount: 1, supportsGuide: false))
+
+        try await imports.reloadSource(first.id, into: model)
+
+        XCTAssertNil(imports.serverSources.first?.failure)
+        XCTAssertEqual(imports.serverSources.first?.channelCount, 1)
+        XCTAssertEqual(imports.serverSources.last, healthy)
+        let after = await secondProvider.calls
+        XCTAssertEqual(after.availability, before.availability)
+        XCTAssertEqual(after.catalogs, before.catalogs)
+        XCTAssertEqual(after.guides, before.guides)
+        let afterPlaylistLoads = await loader.playlistLoads
+        XCTAssertEqual(afterPlaylistLoads, playlistLoads)
+        XCTAssertEqual(model.channels.count, 3)
+    }
+
     func testRuntimeChannelReferenceEqualityIncludesCatalogAuthorization() {
         let original = LiveTVServerChannelReference(
             sourceID: "server", accountID: "account", authorizationID: "profile-one", channelID: "native"

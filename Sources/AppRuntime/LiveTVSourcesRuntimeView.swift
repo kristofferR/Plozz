@@ -67,6 +67,7 @@ struct LiveTVSourcesRuntimeHost<Content: View>: View {
     let isProfileAuthorized: @MainActor () -> Bool
     let content: (LiveTVSourcesRuntime) -> Content
     @State var runtime: LiveTVSourcesRuntime?
+    @State private var sourceRevision = 0
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -77,19 +78,55 @@ struct LiveTVSourcesRuntimeHost<Content: View>: View {
                     .onChange(of: runtime.scanBinding.coordinator.scanHiddenChannelIDs) { _, _ in
                         runtime.scanBinding.synchronizeVisibility()
                     }
-                    .onChange(of: runtime.authorityID) { _, _ in
+                    .onChange(of: runtime.authorityID) { previous, current in
+                        LiveTVSourceDiagnostics.shared.record(
+                            .authorityChanged, identities: [.profile: profileID],
+                            flags: [.present: current != nil, .sameAuthority: previous == current]
+                        )
+                        HandoffDiagnostics.emit(
+                            "SOURCES event=authorityChanged previousPresent=\(previous != nil) currentPresent=\(current != nil)"
+                        )
                         runtime.invalidate()
                     }
                     .task(id: AdmissionRequest(
                         identity: runtime.authorityID,
                         isPresented: isPresented,
-                        isSceneActive: scenePhase == .active
+                        isSceneActive: scenePhase == .active,
+                        sourceRevision: sourceRevision
                     )) {
+                        LiveTVSourceDiagnostics.shared.record(
+                            .sourcesRestore, identities: [
+                                .profile: profileID, .activeProfile: profiles.activeProfileID,
+                                .namespace: namespace ?? "default",
+                                .storageNamespace: LiveTVLibraryStorage.preferencesNamespace(
+                                    profileID: profileID, profiles: profiles
+                                ) ?? "default"
+                            ],
+                            flags: [
+                                .active: isPresented, .sceneActive: scenePhase == .active,
+                                .authorized: isProfileAuthorized(), .profileMatches: profiles.activeProfileID == profileID,
+                                .namespaceMatches: profiles.activeNamespace == namespace,
+                                .identityPending: profiles.activeProfile.awaitsIdentity(amongAccounts: accounts.activeAccountIDs),
+                                .actionableIdentityPending: accounts.activeProfileAwaitsIdentity
+                            ]
+                        )
+                        HandoffDiagnostics.emit(
+                            "SOURCES event=restoreRequested presented=\(isPresented) active=\(scenePhase == .active)"
+                            + " profileAuthorized=\(isProfileAuthorized()) profileMatches=\(profiles.activeProfileID == profileID)"
+                            + " namespaceMatches=\(profiles.activeNamespace == namespace)"
+                            + " storageNamespaceMatches=\(LiveTVLibraryStorage.preferencesNamespace(profileID: profileID, profiles: profiles) == namespace)"
+                            + " identityPending=\(profiles.activeProfile.awaitsIdentity(amongAccounts: accounts.activeAccountIDs))"
+                            + " actionableIdentityPending=\(accounts.activeProfileAwaitsIdentity)"
+                        )
                         guard isPresented, scenePhase == .active else {
                             runtime.invalidate()
                             return
                         }
                         await runtime.restore()
+                        HandoffDiagnostics.emit(
+                            "SOURCES event=restoreFinished cancelled=\(Task.isCancelled) current=\(runtime.isCurrent)"
+                            + " issue=\(runtime.catalog.issue != nil)"
+                        )
                     }
             } else {
                 ProgressView("Loading sources")
@@ -119,7 +156,7 @@ struct LiveTVSourcesRuntimeHost<Content: View>: View {
                           LiveTVLibraryStorage.preferencesNamespace(
                             profileID: profileID, profiles: profiles
                           ) == namespace,
-                          !profiles.activeProfile.awaitsIdentity(amongAccounts: accounts.activeAccountIDs)
+                          !accounts.activeProfileAwaitsIdentity
                     else { return nil }
                     return LiveTVSourceApprovalContext(profiles: profiles)
                 },
@@ -137,12 +174,34 @@ struct LiveTVSourcesRuntimeHost<Content: View>: View {
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { runtime?.invalidate() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .plozzLiveTVPortableStateDidChange)
+            .receive(on: DispatchQueue.main), perform: restoreChangedSources)
+        .onReceive(NotificationCenter.default.publisher(for: .plozzLiveTVPortableStateDidApply)
+            .receive(on: DispatchQueue.main), perform: restoreChangedSources)
+    }
+
+    private func restoreChangedSources(_ notification: Notification) {
+        LiveTVSourceDiagnostics.shared.record(
+            .sourceNotification, identities: [.profile: profileID],
+            flags: [
+                .profileMatches: notification.object as? String == profileID, .active: isPresented,
+                .sceneActive: scenePhase == .active, .current: runtime?.isCurrent == true
+            ]
+        )
+        guard notification.object as? String == profileID,
+              isPresented, scenePhase == .active, let runtime, !runtime.isCurrent else { return }
+        // Saves can arrive during an import. Retire that snapshot and readmit
+        // the current configuration; sync checkpoints alone remain current.
+        runtime.invalidate()
+        HandoffDiagnostics.emit("SOURCES event=sourceConfigurationChanged")
+        sourceRevision &+= 1
     }
 
     private struct AdmissionRequest: Hashable {
         let identity: String?
         let isPresented: Bool
         let isSceneActive: Bool
+        let sourceRevision: Int
     }
 }
 
@@ -156,6 +215,7 @@ private struct LiveTVSourcesLifetime: UIViewRepresentable {
     func updateUIView(_ uiView: UIView, context: Context) {}
 
     static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        HandoffDiagnostics.emit("SOURCES event=presentationRemoved")
         coordinator.runtime?.invalidate()
     }
 

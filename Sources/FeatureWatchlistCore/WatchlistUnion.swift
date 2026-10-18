@@ -14,6 +14,7 @@ public struct WatchlistUnionEntry: Identifiable, Hashable, Sendable {
     /// The viewer's own copy, as answered by the server that holds the list.
     /// See `NativeWatchlistEntry.ownedSource`.
     public let ownedSource: MediaSourceRef?
+    public let attributions: [MetadataAttribution]
 
     public init(
         aliasID: MediaAliasID,
@@ -21,7 +22,8 @@ public struct WatchlistUnionEntry: Identifiable, Hashable, Sendable {
         presentation: MediaAliasPresentation?,
         isExplicit: Bool,
         ownedSource: MediaSourceRef? = nil,
-        artworkSourceAccountID: String? = nil
+        artworkSourceAccountID: String? = nil,
+        attributions: [MetadataAttribution] = []
     ) {
         self.aliasID = aliasID
         self.kind = kind
@@ -29,6 +31,7 @@ public struct WatchlistUnionEntry: Identifiable, Hashable, Sendable {
         self.artworkSourceAccountID = artworkSourceAccountID
         self.isExplicit = isExplicit
         self.ownedSource = ownedSource
+        self.attributions = attributions
     }
 }
 
@@ -104,6 +107,15 @@ public struct WatchlistUnion: Sendable, Equatable {
         // Canonical identity controls both deduplication and ownership. Keep the
         // chosen source and its presentation together, in stable destination order.
         var ownedByAlias: [MediaAliasID: NativeWatchlistEntry] = [:]
+        var attributionsByAlias: [MediaAliasID: [MetadataAttribution]] = [:]
+        for (_, entry) in native {
+            guard let attribution = entry.attribution else { continue }
+            let aliasID = aliasSnapshot.resolvedAliasID(for: entry.aliasID)
+                ?? snapshot.resolvedAliasID(for: entry.aliasID)
+            if !attributionsByAlias[aliasID, default: []].contains(attribution) {
+                attributionsByAlias[aliasID, default: []].append(attribution)
+            }
+        }
         for (_, entry) in native where entry.ownedSource != nil {
             let aliasID = aliasSnapshot.resolvedAliasID(for: entry.aliasID)
                 ?? snapshot.resolvedAliasID(for: entry.aliasID)
@@ -133,7 +145,8 @@ public struct WatchlistUnion: Sendable, Equatable {
                 isExplicit: true,
                 ownedSource: owned?.ownedSource,
                 artworkSourceAccountID: owned?.ownedPresentation != nil
-                    ? owned?.ownedSource?.accountID : nil
+                    ? owned?.ownedSource?.accountID : nil,
+                attributions: attributionsByAlias[aliasID, default: []]
             ))
         }
 
@@ -165,7 +178,8 @@ public struct WatchlistUnion: Sendable, Equatable {
                     : entry.presentationAccountID
                         ?? Self.presentationAccountID(
                             from: destinationID
-                        )
+                        ),
+                attributions: attributionsByAlias[aliasID, default: []]
             ))
         }
 

@@ -27,6 +27,11 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
         client = try IPTVClient(credential: credential, directory: cacheDirectory, configuration: configuration)
         watch = LocalMediaWatchStore(localMediaContext: local, durableStore: durableStore)
         playback = IPTVPlaybackSessions(client: client, configuration: configuration)
+        LiveTVSourceDiagnostics.shared.record(
+            .providerCreated,
+            identities: [.account: context.accountID, .catalog: credential.identity.uuidString],
+            flags: [.xtream: credential.mode == .xtream, .localFile: credential.mode == .file]
+        )
     }
 
     public var capabilities: ProviderCapability { [.video] }
@@ -274,10 +279,12 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
             .guideFetch, provider: .iptv, metrics: .init(items: channelIDs.count)
         )
         let metrics = performance == nil ? nil : IPTVPerformanceMetrics()
+        let diagnostics = IPTVGuideDiagnostics(credential: await client.credential, channels: channelIDs.count)
         do {
             let programmes = try await IPTVHTTP.$performanceMetrics.withValue(metrics) {
-                try await retrieveGuide(channelIDs: channelIDs, from: from, to: to)
+                try await retrieveGuide(channelIDs: channelIDs, from: from, to: to, diagnostics: diagnostics)
             }
+            diagnostics.finish(rows: programmes.count)
             let counts = metrics?.snapshot
             performance?.finish(
                 .succeeded,
@@ -285,6 +292,7 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
             )
             return programmes
         } catch {
+            diagnostics.finish(error: error)
             let counts = metrics?.snapshot
             performance?.finish(
                 IPTVPerformanceMetrics.outcome(for: error),
@@ -294,7 +302,9 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
         }
     }
 
-    private func retrieveGuide(channelIDs: [String], from: Date, to: Date) async throws -> [ServerLiveTVProgramme] {
+    private func retrieveGuide(
+        channelIDs: [String], from: Date, to: Date, diagnostics: IPTVGuideDiagnostics
+    ) async throws -> [ServerLiveTVProgramme] {
         let credential = await client.credential
         if credential.mode == .xtream, credential.explicitGuideURLs.isEmpty {
             var result: [ServerLiveTVProgramme] = []
@@ -303,32 +313,47 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
             for id in channelIDs {
                 try Task.checkCancellation()
                 if endpointUnavailable {
+                    diagnostics.fallback(.unavailable)
                     fallbackIDs.append(id)
                     continue
                 }
                 do {
-                    let programmes = try await client.guide(channelID: id, from: from, to: to)
-                    if programmes.isEmpty { fallbackIDs.append(id) }
+                    let request = IPTVGuideDiagnostics.Request()
+                    let programmes: [ServerLiveTVProgramme]
+                    do {
+                        programmes = try await IPTVGuideDiagnostics.$request.withValue(request) {
+                            try await client.guide(channelID: id, from: from, to: to)
+                        }
+                        diagnostics.record(request, endpoint: .xtream, rows: programmes.count)
+                    } catch {
+                        diagnostics.record(request, endpoint: .xtream, error: error)
+                        throw error
+                    }
+                    if programmes.isEmpty {
+                        diagnostics.fallback(.empty)
+                        fallbackIDs.append(id)
+                    }
                     else { result += programmes }
                 } catch AppError.notFound, IPTVError.unsupported {
-                    PlozzLog.networking.info("IPTV guide endpoint is unavailable; using XMLTV for remaining channels")
+                    diagnostics.fallback(.unavailable)
                     endpointUnavailable = true
                     fallbackIDs.append(id)
                 } catch IPTVError.malformed {
-                    PlozzLog.networking.info("IPTV channel guide API returned malformed listings; trying XMLTV")
+                    diagnostics.fallback(.malformed)
                     fallbackIDs.append(id)
                 }
             }
             if !fallbackIDs.isEmpty {
-                PlozzLog.networking.info("IPTV XMLTV fallback requested for channels without API listings")
-                result += try await xmlTVGuide(channelIDs: fallbackIDs, from: from, to: to)
+                result += try await xmlTVGuide(channelIDs: fallbackIDs, from: from, to: to, diagnostics: diagnostics)
             }
             return result
         }
-        return try await xmlTVGuide(channelIDs: channelIDs, from: from, to: to)
+        return try await xmlTVGuide(channelIDs: channelIDs, from: from, to: to, diagnostics: diagnostics)
     }
 
-    private func xmlTVGuide(channelIDs: [String], from: Date, to: Date) async throws -> [ServerLiveTVProgramme] {
+    private func xmlTVGuide(
+        channelIDs: [String], from: Date, to: Date, diagnostics: IPTVGuideDiagnostics
+    ) async throws -> [ServerLiveTVProgramme] {
         guard !channelIDs.isEmpty else { return [] }
         let urls = try await client.guideURLs()
         guard !urls.isEmpty else { return [] }
@@ -346,9 +371,19 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
         for url in urls {
             let remaining = channels.filter { !covered.contains($0.id) }
             if remaining.isEmpty { break }
-            let programmes = try await guideLoader(
-                client.guideData(from: url), url, remaining, from, to
-            )
+            let request = IPTVGuideDiagnostics.Request()
+            let programmes: [ServerLiveTVProgramme]
+            do {
+                programmes = try await IPTVGuideDiagnostics.$request.withValue(request) {
+                    let data = try await client.guideData(from: url)
+                    request.parsing()
+                    return try await guideLoader(data, url, remaining, from, to)
+                }
+                diagnostics.record(request, endpoint: .xmltv, rows: programmes.count)
+            } catch {
+                diagnostics.record(request, endpoint: .xmltv, error: error)
+                throw error
+            }
             result += programmes
             covered.formUnion(programmes.map(\.channelID))
         }

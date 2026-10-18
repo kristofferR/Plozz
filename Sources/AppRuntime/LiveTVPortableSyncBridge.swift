@@ -276,7 +276,7 @@ public final class LiveTVPortableSyncBridge {
         }
     }
 
-    public func apply(_ changes: SyncLocalChanges) async {
+    public func apply(_ changes: SyncLocalChanges, localCaptureDigests: [SyncRecordID: Data]? = nil) async {
         let epoch = LiveTVPortableSyncPreferenceStore.storageEpoch(defaults: defaults)
         let authority = currentAuthority()
         await beginOperation()
@@ -284,10 +284,12 @@ public final class LiveTVPortableSyncBridge {
         operationAuthority = authority
         guard !Task.isCancelled,
               epoch == LiveTVPortableSyncPreferenceStore.storageEpoch(defaults: defaults) else { return }
-        await applySerially(changes, epoch: epoch)
+        await applySerially(changes, epoch: epoch, localCaptureDigests: localCaptureDigests)
     }
 
-    private func applySerially(_ changes: SyncLocalChanges, epoch: String) async {
+    private func applySerially(
+        _ changes: SyncLocalChanges, epoch: String, localCaptureDigests: [SyncRecordID: Data]?
+    ) async {
         let known = Set(profiles.profiles.map(\.id))
         let removed: Set<String>
         do { removed = try removedProfiles() }
@@ -313,7 +315,8 @@ public final class LiveTVPortableSyncBridge {
                 let pending = try await adapter.committingJournal {
                     guard mayApply(profileID, epoch: epoch) else { throw CancellationError() }
                     return try adapter.apply(
-                        changes, sourceStore: sourceStore(profileID), includeLibrarySnapshots: false
+                        changes, sourceStore: sourceStore(profileID), includeLibrarySnapshots: false,
+                        localCaptureDigests: localCaptureDigests
                     )
                 }
                 guard mayApply(profileID, epoch: epoch) else { continue }
@@ -851,11 +854,12 @@ public final class LiveTVPortableSyncBridge {
     }
 
     private func removedProfiles() throws -> Set<String> {
+        let pending = profiles.pendingSyncedDeletionProfileIDs
         let url = metadataDirectory.appendingPathComponent("removed-profiles.json")
-        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        guard FileManager.default.fileExists(atPath: url.path) else { return pending }
         let data = try Data(contentsOf: url)
         guard data.count <= 1_024 * 1_024 else { throw LiveTVPortableStateError.tooLarge }
-        return Set(try JSONDecoder().decode([String].self, from: data))
+        return Set(try JSONDecoder().decode([String].self, from: data)).union(pending)
     }
 
     private var metadataDirectory: URL {
@@ -873,6 +877,10 @@ public final class LiveTVPortableSyncBridge {
 
     private func finishDiagnostic(_ operation: LiveTVSyncDiagnostic.Operation, profileID: String) {
         guard statuses[profileID] != .unavailable else { return }
+        LiveTVSourceDiagnostics.shared.record(
+            .syncFinished, identities: [.profile: profileID], flags: [.capture: operation == .capture],
+            deduplicate: true
+        )
         clearDiagnosticFailures(operation, profileID: profileID)
         LiveTVSyncDiagnostic(operation: operation, stage: .finish, outcome: .succeeded).publish()
     }
@@ -897,6 +905,10 @@ public final class LiveTVPortableSyncBridge {
             return
         }
         let failure = Self.diagnosticFailure(error)
+        LiveTVSourceDiagnostics.shared.record(
+            .syncFailed, identities: [.profile: profileID], flags: [.capture: operation == .capture],
+            error: error
+        )
         let diagnostic = LiveTVSyncDiagnostic(
             operation: operation, stage: stage, outcome: .failed,
             failure: failure

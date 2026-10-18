@@ -158,7 +158,8 @@ final class ProfilePickerPresentationTests: XCTestCase {
                 name: index == 0 ? (typeSize.isAccessibilitySize ? "Alex with a longer profile name" : "Alex")
                     : "Viewer \(index + 1)",
                 avatarSymbol: ["person.fill", "star.fill", "moon.fill"][index % 3],
-                colorIndex: index % 5
+                colorIndex: index % 5,
+                lock: index.isMultiple(of: 2) ? ProfileLock.make(pin: "2468", iterations: 1) : nil
             )
         }
         try await withWindow(

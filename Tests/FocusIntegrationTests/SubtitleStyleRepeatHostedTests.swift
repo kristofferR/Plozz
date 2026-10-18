@@ -1,4 +1,4 @@
-import CoreUI
+@testable import CoreUI
 @testable import AppShell
 @testable import FeaturePlayback
 import Observation

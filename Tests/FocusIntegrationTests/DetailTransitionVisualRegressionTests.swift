@@ -3,6 +3,7 @@ import CoreModels
 @testable import CoreUI
 @testable import FeatureHome
 import FeatureHomeCore
+@testable import HeroUI
 import MetadataKit
 import Observation
 import SwiftUI
@@ -11,6 +12,113 @@ import XCTest
 
 @MainActor
 final class DetailTransitionVisualRegressionTests: XCTestCase {
+    func testProductionDetailHeroRemainsFullyVisible() async throws {
+        let scene = try await activeScene()
+        let artwork = try await seedArtwork(color: .blue)
+        let logo = try await seedArtwork(color: .red, size: CGSize(width: 500, height: 200), padding: 10)
+        for kind in [MediaItemKind.movie, .series] {
+            do {
+                var provider = TransitionShowProvider(artwork: artwork, logo: logo, episodeCount: 12)
+                var item = provider.show
+                item.kind = kind
+                item.overview = String(repeating: "A longer description with enough text to fill the hero. ", count: 6)
+                provider.detailItem = item
+                let model = TransitionShowModel(provider: provider)
+                let host = TransitionShowController(rootView: TransitionShowRoot(
+                    model: model, artworkSettings: ArtworkSettings(preference: .library)
+                ))
+                let previous = scene.windows.first(where: \.isKeyWindow)
+                let window = UIWindow(windowScene: scene)
+                window.frame = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+                window.rootViewController = host
+                window.makeKeyAndVisible()
+                defer {
+                    model.detail.suspendEnrichment()
+                    window.isHidden = true
+                    window.rootViewController = nil
+                    previous?.makeKeyAndVisible()
+                }
+                model.path.append(1)
+                try await waitUntil {
+                    model.detail.state.value?.childrenLoaded == true
+                        && self.verticalScroll(in: host.view) != nil
+                }
+                try await Task.sleep(for: .seconds(3))
+                let page = try XCTUnwrap(verticalScroll(in: host.view))
+                let system = try XCTUnwrap(UIFocusSystem.focusSystem(for: window))
+                let play = try XCTUnwrap(focusTargets(in: page).first {
+                    (40...100).contains($0.frame.height) && $0.frame.width > 100
+                })
+                host.target = play
+                system.requestFocusUpdate(to: host)
+                system.updateFocusIfNeeded()
+                try await waitUntil {
+                    system.focusedItem.map(ObjectIdentifier.init) == ObjectIdentifier(play)
+                }
+                host.target = nil
+                try await Task.sleep(for: .milliseconds(600))
+                let shot = XCTAttachment(image: DetailTransitionSnapshot.image(of: window))
+                shot.name = "detail-geometry-\(kind)-reduced-\(UIAccessibility.isReduceMotionEnabled)"
+                shot.lifetime = .keepAlways
+                add(shot)
+                XCTAssertEqual(page.contentOffset.y + page.adjustedContentInset.top, 0, accuracy: 1,
+                               "Initial focus must not crop the \(kind) hero.")
+                let bounds = try redArtworkBounds(in: window)
+                XCTAssertGreaterThan(bounds.minY, 300, "The complete title must remain above the lower-third metadata.")
+                XCTAssertGreaterThan(bounds.height, 100)
+                XCTAssertEqual(bounds.width / bounds.height, 2.5, accuracy: 0.03,
+                               "The title artwork must preserve its uncropped aspect ratio.")
+                if kind == .series {
+                    assertEpisodeArtworkSpacing(in: renderedKeylineSnapshot(in: window), y: 1070)
+                }
+            }
+        }
+    }
+
+    func testHomeBackdropUsesOnlyOpacityAnimationWithReduceMotion() async throws {
+        try XCTSkipUnless(UIAccessibility.isReduceMotionEnabled, "Run with system Reduce Motion enabled.")
+        let scene = try await activeScene()
+        let first = try await seedArtwork(color: .blue)
+        let second = try await seedArtwork(color: .red)
+        let model = MotionBackdropFixture(first: first, second: second)
+        let host = UIHostingController(rootView: MotionBackdropView(model: model))
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKeyAndVisible()
+        }
+        func container(in view: UIView) -> HeroWipeContainerView? {
+            if let container = view as? HeroWipeContainerView { return container }
+            return view.subviews.lazy.compactMap { container(in: $0) }.first
+        }
+        try await waitUntil { container(in: host.view)?.frontImage != nil }
+        model.showsSecond = true
+        var paths: [String] = []
+        func sample(_ layer: CALayer) {
+            for key in layer.animationKeys() ?? [] {
+                if let animation = layer.animation(forKey: key) as? CAPropertyAnimation,
+                   let path = animation.keyPath {
+                    paths.append(path)
+                }
+            }
+            layer.sublayers?.forEach(sample)
+        }
+        let deadline = ContinuousClock.now + .milliseconds(650)
+        while ContinuousClock.now < deadline {
+            if let layer = container(in: host.view)?.layer { sample(layer) }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(paths.contains("opacity"), "Changing artwork must use the non-spatial dissolve.")
+        XCTAssertFalse(paths.contains { path in
+            ["position", "bounds", "transform"].contains { path.hasPrefix($0) }
+        }, "No wipe/position/scale animations: \(Set(paths))")
+        XCTAssertEqual(container(in: host.view)?.subviews.count, 1, "Finished artwork must release outgoing pages.")
+    }
+
     func testProductionMovieAndSeriesTintTheirInformationBackgroundFromArtwork() async throws {
         func backgrounds(in view: UIView) -> [NativeGradientCardFill.View] {
             (view as? NativeGradientCardFill.View).map { [$0] } ?? view.subviews.flatMap { backgrounds(in: $0) }
@@ -341,7 +449,8 @@ final class DetailTransitionVisualRegressionTests: XCTestCase {
             let provider = TransitionShowProvider(artwork: artwork, logo: logo, episodeCount: 12)
             let model = TransitionShowModel(provider: provider)
             let host = TransitionShowController(rootView: TransitionShowRoot(
-                model: model, focusStyle: style, directEntry: configuration.directEntry
+                model: model, focusStyle: style, directEntry: configuration.directEntry,
+                artworkSettings: ArtworkSettings(preference: .library)
             ))
             let previous = scene.windows.first(where: \.isKeyWindow)
             let window = UIWindow(windowScene: scene)
@@ -452,6 +561,7 @@ final class DetailTransitionVisualRegressionTests: XCTestCase {
             // Let the row align its remembered entry target; forcing offset zero can hide that target.
             window.layoutIfNeeded()
             let restingSnapshot = try await restingEpisodeSnapshot(in: window)
+            assertEpisodeArtworkSpacing(in: restingSnapshot, y: 510)
             let episodeEdge = try XCTUnwrap(episodeArtworkSpan(in: restingSnapshot)).lowerBound
             let aboutEdge = try leadingPixel(
                 in: restingSnapshot, region: CGRect(x: 0, y: 975, width: 300, height: 60)
@@ -638,6 +748,30 @@ final class DetailTransitionVisualRegressionTests: XCTestCase {
         ) { r, g, b in b > 150 && r < 50 && g < 80 }
         return spans.max {
             $0.upperBound - $0.lowerBound < $1.upperBound - $1.lowerBound
+        }
+    }
+
+    private func assertEpisodeArtworkSpacing(
+        in snapshot: UIImage, y: CGFloat, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        do {
+            let spans = try horizontalPixelSpans(
+                in: snapshot, region: CGRect(x: 0, y: y, width: 1920, height: 2)
+            ) { r, g, b in b > 150 && r < 50 && g < 80 }
+                .filter { $0.lowerBound > 0 && $0.upperBound < 1919 }
+            XCTAssertGreaterThanOrEqual(spans.count, 3, "Expected separate, fully visible episode cards: \(spans)",
+                                       file: file, line: line)
+            for span in spans {
+                XCTAssertEqual(span.upperBound - span.lowerBound + 1, EpisodeColumnCard.artworkSize.width,
+                               accuracy: 2, "Resting artwork must not expand into its neighboring card.",
+                               file: file, line: line)
+            }
+            for (left, right) in zip(spans, spans.dropFirst()) {
+                XCTAssertGreaterThanOrEqual(right.lowerBound - left.upperBound - 1, 38,
+                                            "Episode artwork must retain its 40pt gap.", file: file, line: line)
+            }
+        } catch {
+            XCTFail("Unable to measure episode artwork: \(error)", file: file, line: line)
         }
     }
 
@@ -1316,6 +1450,7 @@ private struct TransitionShowRoot: View {
     @Bindable var model: TransitionShowModel
     var focusStyle: CardFocusStyle = .system
     var directEntry = false
+    var artworkSettings: ArtworkSettings = .default
 
     var body: some View {
         TabView {
@@ -1350,6 +1485,8 @@ private struct TransitionShowRoot: View {
         .tabViewStyle(.tabBarOnly)
         .environment(\.themePalette, .dark)
         .environment(\.gradientBackgroundsEnabled, model.gradientEnabled)
+        .environment(\.plozzArtworkSettings, artworkSettings)
+        .modifier(ReducedMotion())
     }
 }
 
@@ -1373,6 +1510,31 @@ private final class TransitionShowController: UIHostingController<TransitionShow
             guard let self, focusAnimationGeneration == generation else { return }
             settledFocusItemID = focused
         }
+    }
+}
+
+@MainActor @Observable
+private final class MotionBackdropFixture {
+    let first: URL
+    let second: URL
+    var showsSecond = false
+
+    init(first: URL, second: URL) {
+        self.first = first
+        self.second = second
+    }
+}
+
+private struct MotionBackdropView: View {
+    let model: MotionBackdropFixture
+
+    var body: some View {
+        HomeHeroBackdrop(
+            urls: [model.showsSecond ? model.second : model.first],
+            asyncFallbackURL: nil, slideID: model.showsSecond ? "second" : "first",
+            forward: true, width: 1920, height: 1080, scrimTone: .black
+        )
+        .environment(\.plozzArtworkSettings, ArtworkSettings(preference: .library))
     }
 }
 

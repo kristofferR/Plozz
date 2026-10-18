@@ -474,6 +474,11 @@ public protocol AuthenticatedHTTPResourceResolving: Sendable {
 /// differ from the account's persisted primary URL.
 public protocol AuthenticatedHTTPOriginProviding: Sendable {
     var authenticatedHTTPOrigin: URL { get }
+    func resolveAuthenticatedHTTPOrigin() async throws -> URL
+}
+
+public extension AuthenticatedHTTPOriginProviding {
+    func resolveAuthenticatedHTTPOrigin() async throws -> URL { authenticatedHTTPOrigin }
 }
 
 /// Scheme, host, and effective port accepted for one DLNA resource.

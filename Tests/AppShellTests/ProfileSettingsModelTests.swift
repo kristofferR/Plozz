@@ -10,6 +10,19 @@ import CoreModels
 /// as immutable and never rebuilt.
 @MainActor
 final class ProfileSettingsModelTests: XCTestCase {
+    func testRebuildingKeepsTheLiveDiscoveryPolicyIncludingPreviouslyRetainedModels() {
+        var isKids = false
+        let model = ProfileSettingsModel(namespace: "policy-a", allowsDiscovery: { !isKids })
+        let oldHero = model.heroSettingsModel
+        XCTAssertTrue(oldHero.effectiveSettings.allowsDiscovery)
+        isKids = true
+        XCTAssertFalse(oldHero.effectiveSettings.allowsDiscovery)
+        model.rebuild(namespace: "policy-b")
+        XCTAssertFalse(model.heroSettingsModel.effectiveSettings.allowsDiscovery)
+        XCTAssertFalse(oldHero.effectiveSettings.allowsDiscovery)
+        isKids = false
+        XCTAssertTrue(model.heroSettingsModel.effectiveSettings.allowsDiscovery)
+    }
 
     func testDefaultBuildIsNotTreatedAsInjected() {
         let model = ProfileSettingsModel(namespace: "ns-a")

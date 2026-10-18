@@ -238,6 +238,11 @@ public struct MediaItemContextMenu: ViewModifier {
             let main = actions.filter { !$0.isSetApartInMenu }
             content.contextMenu {
                 menuButtons(for: main)
+                #if os(iOS)
+                if let url = item.metadataProvenance.wetrakrWatchlistURL {
+                    WetrakrWatchlistLink(url: url)
+                }
+                #endif
                 // A `Section` is how a menu is told two groups are not the same
                 // kind of thing; platforms that draw a separator draw one, and
                 // those that don't simply keep the grouping. Either way the set-

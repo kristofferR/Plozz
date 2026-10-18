@@ -86,6 +86,14 @@ public struct Account: Codable, Hashable, Identifiable, Sendable {
             accessToken: token
         )
     }
+
+    /// Rebuild retained providers when approved routes change, without replacing
+    /// the account or credential identity used by watch state and playback.
+    public var connectionScopeKey: String {
+        let values = [id, credentialRevision.rawValue.uuidString, server.baseURL.absoluteString]
+            + (server.alternateConnectionURLs ?? []).map(\.absoluteString).sorted()
+        return values.map { "\($0.utf8.count):\($0)" }.joined()
+    }
 }
 
 extension Account: CustomStringConvertible {

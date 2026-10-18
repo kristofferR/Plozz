@@ -88,6 +88,7 @@ extension PlozziOSAppModel {
                 guard let model else { return }
                 await model.traktService.refreshStatus()
                 await model.simklService.refreshStatus()
+                await model.wetrakrService.refreshStatus()
                 await model.anilistService.refreshStatus()
                 await model.malService.refreshStatus()
             }
@@ -151,7 +152,7 @@ extension PlozziOSAppModel {
 
     func captureSyncRecords(fallback: [SyncRecordID: Data]) -> [SyncRecordID: Data] {
         var out: [SyncRecordID: Data] = [:]
-        let localProfileIDs = Set(profiles.profiles.map(\.id))
+        let localProfileIDs = Set(profiles.profilesForSync.map(\.id))
         // Household-removed (tombstoned) accounts are excluded from descriptors and get
         // a `.removal` record instead, so peers sign them out and stop re-publishing.
         let removedStore = RemovedAccountsStore()
@@ -167,7 +168,7 @@ extension PlozziOSAppModel {
                 out[SyncRecordKey(kind: .removal, id: id).recordName] = data
             }
         }
-        for p in profiles.profiles {
+        for p in profiles.profilesForSync {
             if let data = CanonicalJSON.encode(ProfileSyncDTO(profile: p)) {
                 out[SyncRecordKey(kind: .profile, id: p.id).recordName] = data
             }
@@ -316,8 +317,7 @@ extension PlozziOSAppModel {
         // parental gate can only tell that happened if it knows where we were.
         let outgoingProfile = profiles.activeProfile
         if !profileUpserts.isEmpty || !profileDeletes.isEmpty {
-            for profileID in profileDeletes
-            where profileID != ProfileStore.defaultProfileID {
+            for profileID in profileDeletes {
                 removeMediaAliases(forProfileID: profileID)
             }
             profiles.applySyncedProfileDTOs(profileUpserts, deletions: profileDeletes)
@@ -377,9 +377,13 @@ extension PlozziOSAppModel {
             return
         }
 
-        // Rebuild the active profile's settings model so applied preferences take
-        // effect immediately.
-        selectProfile(profiles.activeProfileID)
+        // Cosmetic sync is not a manual selection: reactivating the unchanged
+        // profile would discard its Plex PIN proof, including an in-flight entry.
+        if outgoingProfile.id != profiles.activeProfileID {
+            selectProfile(profiles.activeProfileID)
+        } else {
+            refreshActiveProfileConfiguration()
+        }
 
         // If synced profiles just established an already-set-up household, dismiss any
         // first-run onboarding step that a race queued before they arrived — the user
@@ -568,6 +572,10 @@ extension PlozziOSAppModel {
     /// Turn cross-device Sync & Setup on/off. Enabling activates CloudKit sync;
     /// disabling stops publishing but never deletes the shared cloud config.
     func setSyncSetupEnabled(_ on: Bool) {
+        guard !on || !cloudSyncStatus.isRecovering else {
+            PlozzLog.sync.info("iCloud Sync cannot be enabled during recovery")
+            return
+        }
         syncSetup.setEnabled(on)
         if !on {
             cloudPublishTask?.cancel()
@@ -763,12 +771,13 @@ extension PlozziOSAppModel {
     func captureMediaStateSyncRecords(
         fallback: [SyncRecordID: Data]
     ) async -> [SyncRecordID: Data] {
+        var captured = fallback
         do {
-            var captured = try await mediaAliasLedger.captureAllAliasSyncRecords(
-                profileIDs: profiles.profiles.map(\.id),
+            captured = try await mediaAliasLedger.captureAllAliasSyncRecords(
+                profileIDs: profiles.profilesForSync.map(\.id),
                 fallback: fallback
             )
-            for profile in profiles.profiles {
+            for profile in profiles.profilesForSync {
                 try universalWatchlist.hydrate(profileID: profile.id)
                 captured.merge(
                     try universalWatchlist.captureSyncRecords(
@@ -778,12 +787,17 @@ extension PlozziOSAppModel {
                     uniquingKeysWith: { _, watchlist in watchlist }
                 )
             }
-            return captured
         } catch {
             PlozzLog.sync.error(
                 "Media aliases: capture failed; preserving sync baseline: \(error.localizedDescription)"
             )
-            return fallback
+            captured = fallback
+        }
+        let pending = profiles.pendingSyncedDeletionProfileIDs
+        return captured.filter { name, _ in
+            let profileID = MediaStateRecordKey.parse(name)?.profileID
+                ?? WatchlistMediaStateRecordKey.parse(name)?.profileID
+            return profileID.map { !pending.contains($0) } ?? true
         }
     }
 
@@ -858,41 +872,47 @@ extension PlozziOSAppModel {
         }
     }
 
-    /// DEBUG: nuke the ENTIRE household from iCloud so you can test a true cold start
-    /// (e.g. "set up only on the Apple TV, then fresh-install the iPad"). Unlike
-    /// `resetCloudSync` (which deletes then immediately RE-uploads from this device),
-    /// this deletes and does NOT republish, then takes this device out of sync so it
-    /// can't refill iCloud. It:
-    ///   1. deletes every CloudKit config + removal-tombstone record (flushed to peers
-    ///      as normal deletions, so their synced view empties too);
-    ///   2. removes every synchronizable iCloud-Keychain login (propagates the deletion
-    ///      through iCloud Keychain so no device silently auto-reconnects);
-    ///   3. wipes this device's local roster/profiles/sync bookkeeping (first-run);
-    ///   4. turns iCloud Sync OFF here so this device stays out of the household until
-    ///      you re-enable it — leaving iCloud genuinely empty for the next publisher.
-    func eraseEverythingFromICloudForDebugging() {
-        let config = cloudSync
+    func eraseCloudSyncData() {
+        let profileID = profiles.activeProfileID
         Task { @MainActor in
-            await config?.deleteAllServerData()
-            setSyncSetupEnabled(false)
+            await CloudSyncRecoveryFeedback.run(.erase, status: cloudSyncStatus, presenter: transientStatusPresenter) {
+                await self.performCloudSyncErasure(profileID: profileID)
+            }
+        }
+    }
+
+    private func performCloudSyncErasure(profileID: String) async -> CloudSyncRecoveryResult {
+        let authorized: @Sendable () async -> Bool = { @MainActor [weak self] in
+            guard let self else { return false }
+            return self.profiles.activeProfileID == profileID
+                && !self.profiles.activeProfile.isKids && !self.managementRequiresParentalPIN
+        }
+        guard await authorized(), let config = cloudSync else { return .unavailable }
+        let result = await config.eraseAllServerData(
+            trackerStores: TrackerTokenSyncBridge.erasureStores(profileNamespaces: profiles.profiles.map {
+                $0.settingsNamespace(isDefault: profiles.isDefault($0))
+            }),
+            authorized: authorized,
+            stopSync: { @MainActor in self.setSyncSetupEnabled(false) }
+        )
+        guard result == .completed else { return result }
+        guard await authorized() else { return .interrupted }
+        do {
+            try TrackerTokenSyncBridge.eraseLocalTokens()
+            try await removeAllPortableCredentials()
+            guard await authorized() else { return .interrupted }
+            try LiveTVSourceStorage.eraseAllSources()
+            for id in profiles.profiles.map(\.id) {
+                guard await authorized() else { return .interrupted }
+                try await mediaAliasLedger.removeProfile(id)
+                try universalWatchlist.removeProfile(id)
+            }
+            guard await authorized() else { return .interrupted }
             resetLiveTVPortableSync()
-            for profileID in profiles.profiles.map(\.id) {
-                do {
-                    try await mediaAliasLedger.removeProfile(profileID)
-                    try universalWatchlist.removeProfile(profileID)
-                } catch {
-                    PlozzLog.sync.error(
-                        "Media aliases: debug reset failed for one profile: \(error.localizedDescription)"
-                    )
-                }
-            }
-            do {
-                try await removeAllPortableCredentials()  // step 2
-            } catch {
-                accountError = error.localizedDescription
-                return
-            }
-            resetToFirstRunForDebugging()         // step 3
+            return resetToFirstRunForDebugging(afterSyncErasure: true) ? .completed : .failed
+        } catch {
+            PlozzLog.sync.error("iCloud data erased, but local reset failed (code \((error as NSError).code))")
+            return .failed
         }
     }
 }

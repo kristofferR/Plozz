@@ -238,6 +238,50 @@ final class ShareScannerIncrementalTests: XCTestCase {
         XCTAssertEqual(try fixture.text("SELECT rel_path FROM playable_inventory;"), "Movies/New (2001).mkv")
     }
 
+    func testISOUpgradeRewalksUnchangedLeavesOnceForScheduledAndManualScans() async throws {
+        for scheduled in [true, false] {
+            let fixture = ShareCatalogSQLiteFixture()
+            defer { fixture.cleanup() }
+            let store = fixture.makeStore()
+            var tree: [String: [RemoteFileEntry]] = [
+                "": [try directory("Movies")],
+                "Movies": [try directory("Movies/Discs")],
+                "Movies/Discs": [try video("Movies/Discs/Existing (2000).mkv")]
+            ]
+            let initial = await scanner(store, tree: tree).scan()
+            XCTAssertEqual(initial, .completedClean)
+            // The old classifier never recorded these files, despite unchanged directory mtimes.
+            await store.setMeta("parser_version", "15")
+            await store.setMeta("enrich_version", "keep-enrichment")
+            tree["Movies/Discs", default: []] += [
+                try video("Movies/Discs/Disc (2001).ISO", size: 31_316_770_816),
+                try video("Movies/Discs/Disc (2001).iso.zip")
+            ]
+            let recorder = ListingRecorder()
+            let upgraded = scanner(store, tree: tree, recorder: recorder)
+            let outcome = scheduled
+                ? await upgraded.scanIfStale(minInterval: 86_400)
+                : await upgraded.scan(deep: false)
+            let paths = await recorder.paths
+            XCTAssertEqual(outcome, .completedClean)
+            XCTAssertEqual(paths, ["", "Movies", "Movies/Discs"])
+            XCTAssertEqual(try fixture.integer("SELECT COUNT(*) FROM assets;"), 2)
+            XCTAssertEqual(try fixture.integer("SELECT COUNT(*) FROM playable_inventory;"), 2)
+            XCTAssertEqual(
+                try fixture.integer("SELECT size FROM assets WHERE rel_path='Movies/Discs/Disc (2001).ISO';"),
+                31_316_770_816
+            )
+            let version = await store.meta("parser_version")
+            let enrichment = await store.meta("enrich_version")
+            XCTAssertEqual(version, String(ShareMediaParser.classifierVersion))
+            XCTAssertEqual(enrichment, "keep-enrichment")
+            let repeated = await upgraded.scanIfStale(minInterval: 86_400)
+            let repeatedPaths = await recorder.paths
+            XCTAssertEqual(repeated, .freshNoOp)
+            XCTAssertEqual(repeatedPaths, paths)
+        }
+    }
+
     func testNormalScanFindsNestedAdditionsRenamesAndDeletions() async throws {
         let fixture = ShareCatalogSQLiteFixture()
         defer { fixture.cleanup() }

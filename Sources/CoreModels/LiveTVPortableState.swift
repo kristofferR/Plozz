@@ -76,7 +76,9 @@ public enum LiveTVPortableStateError: Error, Equatable, Sendable {
 }
 
 public struct LiveTVPortableRecordKey: Hashable, Sendable {
-    public enum Kind: String, Codable, Sendable { case channel, source, library, snapshot, serverEnrollment }
+    public enum Kind: String, Codable, Sendable {
+        case channel, source, library, snapshot, serverEnrollment, category, region
+    }
     public let profileID: String
     public let kind: Kind
     public let entityID: String
@@ -126,12 +128,15 @@ public struct LiveTVPortableChannel: Codable, Equatable, Sendable {
     public var metadata: LiveTVChannelMetadataOverride?
     public var guideMapping: LiveTVPortableGuideMapping?
     public var identityHint: LiveTVPortableChannelIdentityHint?
+    public var isAlwaysShown: Bool?
+    public var isExcludedFromCategoryFavorites: Bool?
 
     public init(
         isFavorite: Bool = false, hiddenName: String? = nil, favoriteName: String? = nil,
         favoritePosition: Int? = nil, metadata: LiveTVChannelMetadataOverride? = nil,
         guideMapping: LiveTVPortableGuideMapping? = nil,
-        identityHint: LiveTVPortableChannelIdentityHint? = nil
+        identityHint: LiveTVPortableChannelIdentityHint? = nil,
+        isAlwaysShown: Bool? = nil, isExcludedFromCategoryFavorites: Bool? = nil
     ) {
         self.isFavorite = isFavorite
         self.hiddenName = hiddenName
@@ -140,6 +145,8 @@ public struct LiveTVPortableChannel: Codable, Equatable, Sendable {
         self.metadata = metadata
         self.guideMapping = guideMapping
         self.identityHint = identityHint
+        self.isAlwaysShown = isAlwaysShown
+        self.isExcludedFromCategoryFavorites = isExcludedFromCategoryFavorites
     }
 }
 
@@ -259,11 +266,14 @@ public struct LiveTVPortableRecord: Codable, Equatable, Sendable {
     public let library: LibraryChannelDefinition?
     public let snapshot: LiveTVPortableSnapshotPart?
     public let serverEnrollmentSuppressed: Bool?
+    public let category: LiveTVCategoryRule?
+    public let region: LiveTVRegionalFilter?
 
     public init(
         isDeleted: Bool = false, channel: LiveTVPortableChannel? = nil,
         source: LiveTVPortableSource? = nil, library: LibraryChannelDefinition? = nil,
-        snapshot: LiveTVPortableSnapshotPart? = nil, serverEnrollmentSuppressed: Bool? = nil
+        snapshot: LiveTVPortableSnapshotPart? = nil, serverEnrollmentSuppressed: Bool? = nil,
+        category: LiveTVCategoryRule? = nil, region: LiveTVRegionalFilter? = nil
     ) {
         version = 1
         self.isDeleted = isDeleted
@@ -272,6 +282,8 @@ public struct LiveTVPortableRecord: Codable, Equatable, Sendable {
         self.library = library
         self.snapshot = snapshot
         self.serverEnrollmentSuppressed = serverEnrollmentSuppressed
+        self.category = category
+        self.region = region
     }
 
     public func encoded() throws -> Data {
@@ -304,10 +316,25 @@ public struct LiveTVPortableRecord: Codable, Equatable, Sendable {
         if key.kind == .serverEnrollment, !Self.safeIdentifier(key.entityID) {
             throw LiveTVPortableStateError.invalidRecord
         }
-        let count = [channel != nil, source != nil, library != nil, snapshot != nil, serverEnrollmentSuppressed != nil].filter { $0 }.count
+        if key.kind == .region, key.entityID != "iptv" { throw LiveTVPortableStateError.invalidRecord }
+        let count = [
+            channel != nil, source != nil, library != nil, snapshot != nil,
+            serverEnrollmentSuppressed != nil, category != nil, region != nil
+        ].filter { $0 }.count
         guard count == (isDeleted ? 0 : 1) else { throw LiveTVPortableStateError.invalidRecord }
         guard !isDeleted else { return }
         switch key.kind {
+        case .category:
+            guard let category, category.id == key.entityID,
+                  !category.name.isEmpty, category.name.utf8.count <= 512,
+                  category.sourceID.map({ Self.safeIdentifier($0) }) ?? true else {
+                throw LiveTVPortableStateError.invalidRecord
+            }
+        case .region:
+            guard let region, region.countries.count <= 512, region.languages.count <= 1_024,
+                  region.countries.union(region.languages).allSatisfy({
+                      !$0.isEmpty && $0.utf8.count <= 512
+                  }) else { throw LiveTVPortableStateError.invalidRecord }
         case .serverEnrollment:
             guard serverEnrollmentSuppressed != nil, Self.safeIdentifier(key.entityID) else {
                 throw LiveTVPortableStateError.invalidRecord

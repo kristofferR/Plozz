@@ -29,6 +29,7 @@ import RatingsService
 import TraktService
 import SeerService
 import SimklService
+import WetrakrService
 import LastFmService
 import AniListService
 import MALService
@@ -78,7 +79,6 @@ public final class AppState {
 
     var isActiveProfileAuthorized: Bool {
         guard canEnterApp, case .ready = state else { return false }
-        let profile = profilesModel.activeProfile
         return !profileFlow.isChoosingProfile
             && profileFlow.pendingLockedProfile == nil
             && profileFlow.pendingParentalSwitch == nil
@@ -89,7 +89,7 @@ public final class AppState {
             && !profileFlow.hasResumableSetup
             && plexHomeUsers.pendingPlexPINRequest == nil
             && !profileFlow.activeProfileAwaitsUnlock
-            && !profile.awaitsIdentity(amongAccounts: accountsProviders.activeAccountIDs)
+            && !accountsProviders.activeProfileAwaitsIdentity
     }
     public var allowsStandalonePlayback: Bool { admissionContext.explicitStandaloneChoice }
     public var pendingStandaloneLiveTVEntry: Bool { appAdmission.pendingLiveTVEntry }
@@ -241,6 +241,7 @@ public final class AppState {
 
     /// Simkl sync: device-code OAuth + history scrobble. Mirrors Trakt's pattern.
     public let simklService: SimklService
+    public let wetrakrService: WetrakrService
 
     /// Seerr (Overseerr / Jellyseerr) discovery: backs the Home hero's featured
     /// seam (`trending`) and the Settings connect flow. Inert until the user
@@ -417,6 +418,9 @@ public final class AppState {
         let boundSimklScrobbler = SimklServiceFactory.make(
             namespace: trackerNamespace
         ).scrobbler
+        let boundWetrakrScrobbler = WetrakrServiceFactory.make(
+            namespace: trackerNamespace
+        ).playbackScrobbler()
         let boundAniListScrobbler = AniListServiceFactory.make(
             namespace: trackerNamespace
         ).scrobbler
@@ -494,6 +498,13 @@ public final class AppState {
                     item: intent.makeScrobbleItem(),
                     progress: intent.progress,
                     event: .stop
+                )
+            },
+            wetrakrAccountIdentity: { boundWetrakrScrobbler.accountIdentity },
+            applyWetrakr: { intent, capturedAt, key, identity in
+                try await boundWetrakrScrobbler.recordWatch(
+                    item: intent.makeScrobbleItem(), capturedAt: capturedAt,
+                    idempotencyKey: key, expectedAccountIdentity: identity
                 )
             },
             allAccountIDs: { [weak self] in
@@ -767,9 +778,9 @@ public final class AppState {
     @ObservationIgnored
     var cloudPublishTask: Task<Void, Never>?
 
-    /// Guards against overlapping same-Apple-ID credential auto-adopt attempts.
+    /// Suppresses automatic offers while the user owns a device-setup flow.
     @ObservationIgnored
-    var isAutoAdoptingSyncSetup = false
+    var isPresentingSyncSetup = false
 
     /// Rendezvous offers the user declined this session, so they aren't re-prompted.
     @ObservationIgnored
@@ -1014,6 +1025,7 @@ public final class AppState {
         ratingsProvider: (any ExternalRatingsProviding)? = nil,
         traktService: TraktService? = nil,
         simklService: SimklService? = nil,
+        wetrakrService: WetrakrService? = nil,
         seerService: SeerService? = nil,
         anilistService: AniListService? = nil,
         malService: MALService? = nil,
@@ -1182,6 +1194,7 @@ public final class AppState {
         let ns = (profilesModel ?? self.profilesModel).activeNamespace
         self.profileSettings = ProfileSettingsModel(
             namespace: ns,
+            allowsDiscovery: { !resolvedProfilesModel.activeProfile.isKids },
             subtitleBehaviorModel: subtitleBehaviorModel,
             subtitleStyleModel: subtitleStyleModel,
             spoilerModel: spoilerModel,
@@ -1204,6 +1217,7 @@ public final class AppState {
         self.traktService = traktService ?? TraktServiceFactory.make(namespace: ns)
         // Seed other trackers with the same profile namespace.
         self.simklService = simklService ?? SimklServiceFactory.make(namespace: ns)
+        self.wetrakrService = wetrakrService ?? WetrakrServiceFactory.make(namespace: ns)
         // Seerr uses ONE shared household connection (user-independent Keychain);
         // profiles differ only by which Seerr user they request as (per request).
         self.seerService = seerService ?? Self.makeDefaultSeerService()
@@ -1267,7 +1281,9 @@ public final class AppState {
                 credentialRevision: self.plexHomeUsers.effectiveCredentialRevision(for: account),
                 baseURL: baseURL,
                 token: token,
-                resourceResolver: self.accountsProviders.provider(forAccountID: account.id) as? any ProviderHTTPResourceResolving
+                resourceResolver: self.accountsProviders.provider(forAccountID: account.id) as? any ProviderHTTPResourceResolving,
+                originProvider: self.accountsProviders.provider(forAccountID: account.id) as? any AuthenticatedHTTPOriginProviding,
+                connectionScopeKey: account.connectionScopeKey
             )
         }
 
@@ -1289,6 +1305,7 @@ public final class AppState {
             Task { await self?.prepareUniversalWatchlist() }
         }
         accountsProviders.onActiveAccountsChanged = { [weak self] resolved, accounts in
+            self?.plexHomeUsers.activeAccountsDidChange()
             self?.mediaShare.setActiveShareAccounts(resolved, accounts: accounts)
         }
         mediaShareWorkScope.start()
@@ -1481,6 +1498,12 @@ public final class AppState {
         // on) and start observing local config changes to publish them.
         self.traktService.onConnectionAvailable = { [weak self] in
             Task { await self?.resumeUniversalWatchlistAuthentication() }
+        }
+        self.wetrakrService.onConnectionChanged = { [weak self] in
+            Task {
+                guard let self, let destination = self.wetrakrService.watchlistDestination else { return }
+                await self.trackerWatchlistConnectionChanged(destination: destination)
+            }
         }
         prepareMediaAliasLedger()
         startCloudSyncIfEnabled()
@@ -1853,7 +1876,8 @@ public final class AppState {
                 homeUserID: user.id,
                 name: user.name,
                 avatarURL: user.avatarURL?.absoluteString,
-                requiresPIN: user.requiresPIN
+                requiresPIN: user.requiresPIN,
+                pinRequirementVerified: user.pinRequirementVerified
             )
             // Apply the chosen Home user to every newly-added Plex account in the
             // batch (they belong to the same Plex account and share Home users),
@@ -2508,7 +2532,8 @@ public final class AppState {
     /// accounts, profiles (collapsed to a single pristine default), the
     /// first-run flag, and the recent-servers list — so the next server add
     /// reproduces a genuine first run. Surfaced from a DEBUG-only Settings row.
-    public func resetToFirstRunForDebugging() {
+    @discardableResult
+    public func resetToFirstRunForDebugging(afterSyncErasure: Bool = false) -> Bool {
         let removedAccounts = accountsProviders.accounts
         let shareAccountKeys = mediaShare.accountService.mediaShareAccountKeys(in: removedAccounts)
         do {
@@ -2533,10 +2558,16 @@ public final class AppState {
         }
         guard accountsProviders.accounts.isEmpty else {
             apply(.accountsChanged(accountsProviders.accounts))
-            return
+            return false
         }
         plexHomeUsers.resetAllForDebug()
-        profilesModel.resetToPristineDefaultForDebugging()
+        do {
+            if afterSyncErasure { try profilesModel.resetToPristineDefaultAfterSyncErasure() }
+            else { profilesModel.resetToPristineDefaultForDebugging() }
+        } catch {
+            PlozzLog.sync.error("First-run reset could not remove every profile")
+            return false
+        }
         resetLiveTVPortableSync()
         appAdmission.resetForDebugging()
         var recents = lastServerStore
@@ -2547,6 +2578,7 @@ public final class AppState {
         profileFlow.dismissPicker()
         rebuildSettingsModels()
         apply(.accountsChanged(accountsProviders.accounts))
+        return true
     }
 
     public func retry() {
@@ -2594,21 +2626,20 @@ public final class AppState {
     @ObservationIgnored private var trackerScopedIdentityGeneration: Int?
 
     /// See `UniversalWatchlistHost.ensureTrackersScopedToActiveProfile()`.
-    public func ensureTrackersScopedToActiveProfile() async {
-        let ns = profilesModel.activeNamespace
+    public var trackersAreScopedToActiveProfile: Bool {
         // Scoped by the Plex identity as well as the profile. Switching
         // "watching as" changes who the app is reading for without changing the
         // profile, so a namespace-only check reported "already scoped" and
         // returned — leaving Home, Continue Watching and the watchlist showing
         // the PREVIOUS user's world until the viewer switched profiles away and
         // back, which is the only thing that moved the namespace.
-        let generation = plexHomeUsers.plexIdentityGeneration
-        if let scoped = trackerScopedNamespace,
-           scoped == ns,
-           trackerScopedIdentityGeneration == generation {
-            return
-        }
-        trackerScopedIdentityGeneration = generation
+        guard let scoped = trackerScopedNamespace else { return false }
+        return scoped == profilesModel.activeNamespace
+            && trackerScopedIdentityGeneration == plexHomeUsers.plexIdentityGeneration
+    }
+
+    public func ensureTrackersScopedToActiveProfile() async {
+        guard !trackersAreScopedToActiveProfile else { return }
         await updateTraktForActiveProfile()
     }
 
@@ -2616,6 +2647,8 @@ public final class AppState {
         let ns = profilesModel.activeNamespace
         trackerProfileGeneration &+= 1
         let generation = trackerProfileGeneration
+        let identityGeneration = plexHomeUsers.plexIdentityGeneration
+        trackerScopedNamespace = nil
         // Only a real change of WHO IS WATCHING invalidates the library index.
         // This runs on every profile-flow event and on every watchlist prepare,
         // and flushing the index cancels the library scan that was filling it —
@@ -2654,6 +2687,8 @@ public final class AppState {
         guard generation == trackerProfileGeneration else { return }
         await simklService.setActiveProfile(namespace: ns)
         guard generation == trackerProfileGeneration else { return }
+        await wetrakrService.setActiveProfile(namespace: ns)
+        guard generation == trackerProfileGeneration else { return }
         await seerService.setActiveProfile(namespace: ns)
         guard generation == trackerProfileGeneration else { return }
         await anilistService.setActiveProfile(namespace: ns)
@@ -2663,6 +2698,7 @@ public final class AppState {
         await lastfmService.setActiveProfile(namespace: ns)
         guard generation == trackerProfileGeneration else { return }
         trackerScopedNamespace = .some(ns)
+        trackerScopedIdentityGeneration = identityGeneration
         // Refill what the reset emptied, now that the trackers are actually
         // scoped to this viewer. Last, not inline with the reset: an index warmed
         // before the re-scope finished would be built for whoever was watching a

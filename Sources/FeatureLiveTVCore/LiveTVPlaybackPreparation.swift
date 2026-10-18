@@ -156,6 +156,7 @@ public final class LiveTVPlaybackPreparation {
     public private(set) var current: LiveTVPreparedStream?
     public private(set) var preparingChannelID: String?
     public private(set) var failure: LiveTVPlaybackPreparationError?
+    public private(set) var playbackFailure: LiveChannelFailureReport?
     public var isPreparing: Bool { preparingChannelID != nil }
 
     @ObservationIgnored private var serverProviderResolver: LiveTVServerProviderResolver
@@ -252,6 +253,7 @@ public final class LiveTVPlaybackPreparation {
         guard generation == requestID, !Task.isCancelled else { return false }
         preparingChannelID = channel.id
         failure = nil
+        playbackFailure = nil
         discardUnauthorizedCurrent()
         var candidate: PreparedLiveTVLeaseOwner?
         var resolving = false
@@ -383,6 +385,7 @@ public final class LiveTVPlaybackPreparation {
         cancelPreparation()
         retireCurrent()
         failure = nil
+        playbackFailure = nil
     }
 
     /// Handle a terminal player failure by prepared identity, never channel ID:
@@ -393,7 +396,8 @@ public final class LiveTVPlaybackPreparation {
     @discardableResult
     public func failCurrent(
         id: UUID,
-        reason: LiveTVPlaybackPreparationError = .playbackFailed
+        reason: LiveTVPlaybackPreparationError = .playbackFailed,
+        report: LiveChannelFailureReport? = nil
     ) -> LiveTVPlaybackFailureDisposition {
         guard current?.id == id else { return .ignored }
         retireCurrent()
@@ -401,6 +405,7 @@ public final class LiveTVPlaybackPreparation {
             return .awaitingReplacement(channelID: target)
         }
         failure = reason
+        playbackFailure = report
         return .stopped
     }
 
@@ -608,6 +613,7 @@ public final class LiveTVPlaybackPreparation {
         guard generation == requestID, isPreparing else { return }
         cancelPreparation()
         failure = nil
+        playbackFailure = nil
     }
 
     private func retireCurrent() {

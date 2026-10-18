@@ -520,7 +520,7 @@ public struct MediaPlaybackIndicatorState: Equatable, Sendable {
 }
 
 enum MediaPlaybackIndicatorPresentation {
-    enum Status {
+    enum Status: Equatable {
         case library(MediaLibraryMark), episodeCount(Int), watched, unwatched
     }
 

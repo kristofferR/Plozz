@@ -47,6 +47,9 @@ public final class PlayerViewModel {
     }
 
     public private(set) var phase: Phase = .loading {
+        willSet {
+            if newValue != .ready { endTemporarySpeedBoost() }
+        }
         didSet {
             if case .failed = phase { nowPlaying?.end() }
             else { nowPlaying?.refresh() }
@@ -267,6 +270,7 @@ public final class PlayerViewModel {
     /// Per-profile playback prefs, including the per-kind skip modes and which
     /// community marker sources to consult.
     private let playbackSettings: PlaybackSettings
+    public var volumeBrightnessGesturesEnabled: Bool { playbackSettings.volumeBrightnessGestures }
     private let streamingQuality = StreamingPlaybackState()
     public var streamingOptions: StreamingPlaybackOptions? { streamingQuality.options }
     public var streamingQualitySupport: StreamingQualitySupport {
@@ -279,6 +283,7 @@ public final class PlayerViewModel {
     }
 
     public func continuationForVersionChange() -> PlaybackContinuation {
+        endTemporarySpeedBoost()
         let position = controls.pendingSeekTarget ?? (phase == .ready
             ? currentResumePosition()
             : streamingResumePosition ?? startPositionOverride ?? controls.currentSeconds)
@@ -290,6 +295,7 @@ public final class PlayerViewModel {
         )
     }
     public var streamingQualityError: StreamingQualityError? { streamingQuality.error }
+    public var playbackFailureReport: PlaybackDiagnosticReport? { streamingQuality.failureReport }
     public var streamingPreparation: StreamingPreparationPhase { streamingQuality.preparation }
     public var streamingUsedH264Fallback: Bool { streamingQuality.fallbackCodec == .preferH264 }
     public var streamingUsedHEVCFallback: Bool { streamingQuality.fallbackCodec == .preferHEVC }
@@ -389,6 +395,8 @@ public final class PlayerViewModel {
     /// Fences probe updates when the same engine instance is asked to load a new
     /// request. Engine swaps are additionally fenced by `engineToken`.
     private var dynamicRangeLoadGeneration: UInt = 0
+    // A subtitle-triggered reload can leave phase/engine ready through the pre-commit yield.
+    @ObservationIgnored private var readySpeedBoostLoadGeneration: UInt?
     /// Run-loop yield that lets SwiftUI paint the pre-probe veil before an engine
     /// swap. Internal so lifecycle tests can suspend this exact race window.
     @ObservationIgnored var preEngineCommitYield:
@@ -412,6 +420,7 @@ public final class PlayerViewModel {
         }
     }
     @ObservationIgnored private var nowPlaying: VideoNowPlayingCoordinator?
+    @ObservationIgnored var streamingSessionMaintenance = StreamingSessionMaintenance()
     @ObservationIgnored private var systemResumeTask: Task<Void, Never>?
     @ObservationIgnored private var isInBackground = false
     /// Owns manual + automatic remote-subtitle acquisition (search / download /
@@ -437,6 +446,21 @@ public final class PlayerViewModel {
     /// decisions key off this, not the (mirror-polluted) paused flags. Defaults
     /// true because load auto-plays.
     private var intendsPlayback = true
+
+    private struct TemporarySpeedBoost {
+        let engineToken: UUID
+        let loadGeneration: UInt
+        let rate: Double
+    }
+    private var temporarySpeedBoost: TemporarySpeedBoost?
+
+    /// The effective hold speed, never the selected or persisted preference.
+    public var temporarySpeedBoostRate: Double? {
+        guard let boost = temporarySpeedBoost,
+              boost.engineToken == engineToken,
+              boost.loadGeneration == dynamicRangeLoadGeneration else { return nil }
+        return boost.rate
+    }
 
     /// Keeps the existing full-screen loading indicator visible while a suspended
     /// engine rebuilds its media pipeline at the preserved position. Owned by
@@ -482,7 +506,11 @@ public final class PlayerViewModel {
     /// natural end (auto-advance) or from a manual next/previous jump. The
     /// ``PlayerPresentation`` observes this and swaps the VM in-place so the
     /// full-screen cover never dismisses (no series-page flash).
-    public var pendingNextEpisode: MediaItem?
+    public var pendingNextEpisode: MediaItem? {
+        willSet {
+            if newValue != nil { endTemporarySpeedBoost() }
+        }
+    }
     public let playlistContext: VideoPlaylistPlaybackContext?
     public let episodeBrowser: PlayerEpisodeBrowser?
     /// The member requested for an in-place playlist handoff. Index, not ID,
@@ -491,7 +519,11 @@ public final class PlayerViewModel {
         public let index: Int
         public let item: MediaItem
     }
-    public private(set) var pendingPlaylistSelection: PlaylistSelection?
+    public private(set) var pendingPlaylistSelection: PlaylistSelection? {
+        willSet {
+            if newValue != nil { endTemporarySpeedBoost() }
+        }
+    }
     @ObservationIgnored private var playlistAdvanceTask: Task<Void, Never>?
 
     /// Durable cross-server convergence hook, called once on `stop()` with the final
@@ -741,6 +773,7 @@ public final class PlayerViewModel {
         }
         engine.onFailure = { [weak self] error in
             guard let self, self.engineToken == callbackEngineToken else { return }
+            self.endTemporarySpeedBoost()
             let failureGeneration = self.streamingLoadGeneration
             let failureEvidence = self.engine.streamingFailure
             // Re-weaken for the Task. The enclosing closure is [weak self], but
@@ -758,8 +791,8 @@ public final class PlayerViewModel {
                     let facts = failureEvidence
                     let canRetry = facts?.allowsCodecFallback ?? (error == .invalidResponse)
                     if (canRetry || facts?.kind == .hdrConversion), self.retryStreamingCodecIfNeeded(failure: facts) { return }
-                    self.streamingQuality.error = Self.streamingFailure(error, evidence: facts)
                 }
+                self.streamingQuality.error = Self.streamingFailure(error, evidence: failureEvidence)
                 await self.engineHandoff.handleEngineFailure(
                     error,
                     sourceEngineToken: callbackEngineToken
@@ -850,6 +883,7 @@ public final class PlayerViewModel {
     private func handlePlaybackEnded() {
         PlaybackTrace.note("handlePlaybackEnded curr=\(String(format: "%.2f", engine.currentTime)) furthest=\(String(format: "%.2f", engine.furthestObservedPosition)) dur=\(String(format: "%.2f", engine.duration)) hasNext=\(nextEpisode != nil) autoPlay=\(playbackSettings.autoPlayNextEpisode) isSeeking=\(controls.isSeeking) isScrubbing=\(controls.isScrubbing) intendsPlayback=\(intendsPlayback)")
         didReachNaturalEnd = true
+        endTemporarySpeedBoost()
         nowPlaying?.end()
         guard pendingNextEpisode == nil else { return }
         if let playlistContext {
@@ -1037,6 +1071,7 @@ public final class PlayerViewModel {
     private func startPlayback(forceTranscode: Bool, resumeOverride: TimeInterval?) async {
         let streamingGeneration = streamingLoadGeneration
         streamingQuality.error = nil
+        streamingQuality.failureReport = nil
         streamingQuality.preparation = .requesting
         phase = .loading
         let bringUpStart = Date()
@@ -1082,6 +1117,7 @@ public final class PlayerViewModel {
 
             let request = resolved.request
             self.request = request
+            progressReporter.beginSession()
             HandoffDiagnostics.emit(
                 "session OWNED vm=\(instanceID) provider=\(provider.kind.rawValue)"
                     + " item=\(HandoffDiagnostics.correlationID(request.item.id))"
@@ -1137,15 +1173,15 @@ public final class PlayerViewModel {
             return
         } catch let error as StreamingQualityError {
             guard !didStop, streamingGeneration == streamingLoadGeneration else { return }
-            PlozzLog.playback.error("Selected streaming quality could not be delivered.")
+            PlozzLog.playback.error("Playback negotiation failed: \(error.diagnosticCode ?? "serverRefusal")")
             streamingQuality.error = error
+            capturePlaybackFailure(stage: .preparation)
             nextEpisodeCoordinator.clearFirstFrameWait()
             phase = .failed(.invalidResponse)
         } catch let error as AppError {
             guard !Task.isCancelled, !didStop, streamingGeneration == streamingLoadGeneration else { return }
-            if streamingOptions != nil {
-                streamingQuality.error = Self.streamingFailure(error, streamWasSupplied: false)
-            }
+            streamingQuality.error = Self.streamingFailure(error, streamWasSupplied: false)
+            capturePlaybackFailure(stage: .preparation)
             HandoffDiagnostics.emit(
                 "bringup FAILED item=\(itemID) provider=\(provider.kind.rawValue) "
                     + "error=\(HandoffDiagnostics.errorCode(error))"
@@ -1159,6 +1195,8 @@ public final class PlayerViewModel {
                     + "error=nonAppError"
             )
             nextEpisodeCoordinator.clearFirstFrameWait()
+            streamingQuality.error = .negotiationFailed
+            capturePlaybackFailure(stage: .preparation)
             phase = .failed(.unknown(""))
         }
     }
@@ -1226,6 +1264,9 @@ public final class PlayerViewModel {
         var request: PlaybackRequest
         if var options = streamingOptions, let provider = provider as? any StreamingQualityProviding {
             try options.quality.validate()
+            options.hearingImpairedPreference = behavior.hearingImpairedPreference
+            options.subtitleMode = behavior.subtitleMode
+            options.subtitleLanguage = behavior.resolvedPreferredLanguage
             options.startPosition = itemID == self.itemID ? startPosition : 0
             if itemID == self.itemID, let retry = streamingQuality.fallbackCodec { options.codec = retry }
             let source = itemID == self.itemID ? (streamingMediaSourceID ?? mediaSourceID) : mediaSourceID
@@ -1392,10 +1433,20 @@ public final class PlayerViewModel {
         restartStreamingRendition()
     }
 
+    public func retryPlayback() {
+        guard !didStop, case .failed = phase else { return }
+        streamingQuality.fallbackCodec = nil
+        engineHandoff.resetFallbackState()
+        restartStreamingRendition()
+    }
+
     private func restartStreamingRendition(
         tracks: SubtitleTrackController.StreamSnapshot? = nil,
+        forceTranscode: Bool = false,
+        resumeOverride: TimeInterval? = nil,
         origin: String = #function
     ) {
+        endTemporarySpeedBoost()
         HandoffDiagnostics.emit(
             "session RESTART vm=\(instanceID) origin=\(origin)"
                 + " session=\(HandoffDiagnostics.correlationID(request?.playSessionID)) generation=\(streamingLoadGeneration)"
@@ -1403,6 +1454,7 @@ public final class PlayerViewModel {
         streamingLoadGeneration += 1
         dynamicRangeLoadGeneration &+= 1
         let generation = streamingLoadGeneration
+        let maintenance = streamingSessionMaintenance.cancel()
         let previous = streamingSwitchTask
         previous?.cancel()
         let initialLoad = streamingInitialLoad
@@ -1411,8 +1463,11 @@ public final class PlayerViewModel {
             streamingResumePosition = max(0, controls.pendingSeekTarget ?? currentResumePosition())
             streamingTrackSnapshot = tracks ?? subtitleController.streamSnapshot()
         }
-        let position = streamingResumePosition ?? startPositionOverride ?? controls.currentSeconds
+        let position = resumeOverride ?? streamingResumePosition ?? startPositionOverride ?? controls.currentSeconds
         let outgoing = request
+        let outgoingReport = progressReporter.finishSession(
+            position: position, duration: progressReporter.knownPlaybackDuration(), scrobble: false
+        )
         request = nil
         streamingQuality.currentStream = .init()
         controls.infoCard.badges = []
@@ -1424,9 +1479,9 @@ public final class PlayerViewModel {
         subtitleOverlay.cancelAll()
         // Stop the old byte stream immediately, especially when leaving Wi-Fi.
         engine.stop()
-        streamingSwitchTask = Task { @MainActor [weak self] in
+        streamingSwitchTask = Task { @MainActor [self] in
+            await maintenance?.value
             await previous?.value
-            guard let self else { return }
             await initialLoad?.value
             await self.engine.drainTransport()
             if let outgoing {
@@ -1434,17 +1489,16 @@ public final class PlayerViewModel {
                     "session STOP_INTENT origin=rendition-restart vm=\(self.instanceID)"
                         + " session=\(HandoffDiagnostics.correlationID(outgoing.playSessionID)) generation=\(generation)"
                 )
-                do {
-                    try await self.provider.reportPlayback(.init(
-                        itemID: self.itemID, playSessionID: outgoing.playSessionID,
-                        positionSeconds: position, isPaused: true, durationSeconds: outgoing.item.runtime
-                    ), event: .stop)
-                } catch { PlozzLog.playback.error("Unable to report the ended streaming rendition.") }
+                await outgoingReport?.value
                 await self.releaseStreamingSession(outgoing)
             }
             await self.nextEpisodeCoordinator.releaseOrphanedPrefetchIfNeeded()
             guard !Task.isCancelled, !self.didStop, generation == self.streamingLoadGeneration else { return }
-            await self.startPlayback(forceTranscode: false, resumeOverride: position)
+            // A codec retry must encode the replacement, not stream-copy the
+            // same compatible-looking bitstream that just failed.
+            await self.startPlayback(
+                forceTranscode: forceTranscode || self.streamingQuality.fallbackCodec != nil, resumeOverride: position
+            )
         }
     }
 
@@ -1466,6 +1520,7 @@ public final class PlayerViewModel {
     private func releaseStreamingSession(_ request: PlaybackRequest, origin: String = #function) async {
         guard let sessionID = request.streamingSessionID,
               let provider = provider as? any StreamingQualityProviding else { return }
+        await streamingSessionMaintenance.cancel(sessionID: sessionID)?.value
         if let cleanup = streamingSessionCleanups[sessionID] {
             HandoffDiagnostics.emit("session RELEASE_JOIN vm=\(instanceID) origin=\(origin) session=\(HandoffDiagnostics.correlationID(sessionID))")
             await cleanup.value
@@ -1492,6 +1547,7 @@ public final class PlayerViewModel {
             plozzigenAvailable: engineFactory.plozzigenAvailable,
             capabilities: capabilities,
             subtitleRule: effectiveSubtitleRule(for: request.item),
+            hearingImpairedPreference: behavior.hearingImpairedPreference,
             audioRouteIsAirPlay: AirPlayAudioSession.isActiveRoute
         )
     }
@@ -1643,6 +1699,7 @@ public final class PlayerViewModel {
         engineKind: PlaybackEngineKind,
         startPosition: TimeInterval
     ) async {
+        endTemporarySpeedBoost()
         var request = request
         request.trueHDAtmosEnabled = playbackSettings.trueHDAtmosEnabled
         dynamicRangeLoadGeneration &+= 1
@@ -1720,6 +1777,7 @@ public final class PlayerViewModel {
         controls.isPaused = !intendsPlayback
         controls.intendsPause = !intendsPlayback
         configureTracksAfterLoad(for: request)
+        readySpeedBoostLoadGeneration = rangeLoadGeneration
         phase = .ready
         streamingQuality.preparation = .waitingForVideo
         restoreStreamingTracks()
@@ -1736,6 +1794,7 @@ public final class PlayerViewModel {
         // resumed a position learned from another server, this converges the chosen
         // server to that unified furthest-progress point on entry.
         let startWasPaused = !intendsPlayback
+        streamingSessionMaintenance.start(request: request, provider: provider)
         await progressReporter.reportStart(
             isPaused: startWasPaused,
             positionOverride: startPosition > 0 ? startPosition : nil
@@ -1835,10 +1894,9 @@ public final class PlayerViewModel {
     }
 
     /// Community markers for `item`, or none when no source is enabled or the item
-    /// lacks the ids the databases key on. For an episode without series ids, the
-    /// series' ids are resolved first (the injected resolver, then the provider's
-    /// series item).
-    private static func communitySegments(
+    /// lacks the ids the databases key on. The owning provider's series supplies
+    /// missing identity and numbering context without changing the playable item.
+    static func communitySegments(
         for item: MediaItem?,
         sources: CommunitySkipMarkerSources,
         duration: TimeInterval?,
@@ -1846,18 +1904,37 @@ public final class PlayerViewModel {
         seriesIDResolver: (@Sendable () async -> [String: String]?)?,
         service: any CommunitySkipMarkerFetching
     ) async -> [MediaSegment] {
-        guard !sources.isEmpty, var item else { return [] }
+        guard !sources.isEmpty, !Task.isCancelled, var item else { return [] }
+        if item.kind == .episode, let end = item.episodeNumberEnd, end != item.episodeNumber {
+            PlozzLog.playback.debug("Community markers omitted for a combined or invalid episode range")
+            return []
+        }
         var series: MediaItem?
-        if CommunitySkipMarkerQuery.needsSeriesIDs(item) {
-            if let resolved = await seriesIDResolver?(), !resolved.isEmpty {
-                if let imdb = resolved.providerID(.imdb) { item.providerIDs["SeriesImdb"] = imdb }
-                if let tmdb = resolved.providerID(.tmdb) { item.providerIDs["SeriesTmdb"] = tmdb }
-            }
-            if CommunitySkipMarkerQuery.needsSeriesIDs(item), let seriesID = item.seriesID {
-                series = try? await provider.item(id: seriesID)
+        let needsOrder = item.kind == .episode && sources.contains(.theIntroDB)
+            && item.episodeOrdering == nil
+        let needsTVDB = item.kind == .episode && sources.contains(.theIntroDB)
+            && item.providerID(.seriesTvdb) == nil
+        if CommunitySkipMarkerQuery.needsSeriesIDs(item) || needsOrder || needsTVDB {
+            if let seriesID = item.seriesID {
+                do {
+                    let candidate = try await provider.item(id: seriesID)
+                    guard !Task.isCancelled else { return [] }
+                    if candidate.kind == .series, candidate.id == seriesID {
+                        series = candidate
+                    } else {
+                        PlozzLog.playback.error("Community marker lookup received unrelated series metadata")
+                    }
+                } catch {
+                    guard !Task.isCancelled else { return [] }
+                    PlozzLog.playback.debug("Community marker series lookup failed; retaining known identity")
+                }
+            } else if let resolved = await seriesIDResolver?() {
+                guard !Task.isCancelled else { return [] }
+                item.providerIDs.mergeSeriesProviderIDs(from: resolved)
             }
         }
-        guard let query = CommunitySkipMarkerQuery(item: item, series: series, duration: duration) else { return [] }
+        guard !Task.isCancelled,
+              let query = CommunitySkipMarkerQuery(item: item, series: series, duration: duration) else { return [] }
         return await service.segments(for: query, sources: sources)
     }
 
@@ -1925,6 +2002,7 @@ public final class PlayerViewModel {
     /// paused so the user resumes intentionally, rather than audio springing back
     /// to life on its own.
     public func suspendForBackground() {
+        endTemporarySpeedBoost()
         progressReporter.emitCheckpoint(includingPaused: true)
         #if os(iOS)
         // A PiP window or an AirPlay receiver is still showing this video, so
@@ -1984,6 +2062,7 @@ public final class PlayerViewModel {
     /// coalescing / resume-confirm semantics. `origin` names the caller in the
     /// persistent playback trace, so an unexpected jump (issue #61) is traceable.
     public func requestSeek(to seconds: TimeInterval, origin: String = "transport") {
+        endTemporarySpeedBoost()
         HandoffDiagnostics.emit(
             "session SEEK_INTENT vm=\(instanceID) origin=\(origin)"
                 + " from=\(String(format: "%.1f", controls.currentSeconds))"
@@ -1999,6 +2078,7 @@ public final class PlayerViewModel {
     /// Legacy direct-seek path retained for callers (e.g. resume on load) that
     /// want a one-shot await. New transport input goes through `requestSeek`.
     public func seek(to seconds: TimeInterval) async {
+        endTemporarySpeedBoost()
         foregroundReload.noteUserSeek(to: seconds)
         await seekCoordinator.seek(to: seconds)
         nowPlaying?.refresh()
@@ -2006,7 +2086,50 @@ public final class PlayerViewModel {
 
     // MARK: Live tunables (engine fan-out)
 
+    /// Starts a nonpersisting, at-most-2× hold override only on moving playback.
+    /// Returns the supported effective rate, or nil when no speedup is possible.
+    @discardableResult
+    public func beginTemporarySpeedBoost() -> Double? {
+        guard phase == .ready, intendsPlayback, !didStop, !didReachNaturalEnd,
+              readySpeedBoostLoadGeneration == dynamicRangeLoadGeneration,
+              !isInBackground, !isRecoveringAfterForeground,
+              pendingNextEpisode == nil, pendingPlaylistSelection == nil,
+              !controls.isSeeking, !controls.isScrubbing,
+              engine.status == .ready, !engine.isPaused, engine.preventsDisplaySleep,
+              engine.capabilities.contains(.playbackSpeed) else { return nil }
+        if let rate = temporarySpeedBoostRate { return rate }
+        let maximum = engine.maximumPlaybackSpeed
+        let selected = controls.playbackSpeed
+        guard maximum.isFinite, selected.isFinite, selected >= 0.25 else { return nil }
+        let rate = min(2, maximum)
+        guard rate > selected else { return nil }
+        temporarySpeedBoost = TemporarySpeedBoost(
+            engineToken: engineToken, loadGeneration: dynamicRangeLoadGeneration, rate: rate
+        )
+        engine.setPlaybackSpeed(rate)
+        nowPlaying?.refresh()
+        return rate
+    }
+
+    /// Idempotent cancellation. Never restores a rate onto a replacement load.
+    public func endTemporarySpeedBoost() {
+        guard let boost = temporarySpeedBoost else { return }
+        temporarySpeedBoost = nil
+        defer { nowPlaying?.refresh() }
+        guard boost.engineToken == engineToken,
+              boost.loadGeneration == dynamicRangeLoadGeneration,
+              !didStop, !didReachNaturalEnd,
+              engine.capabilities.contains(.playbackSpeed) else { return }
+        switch engine.status {
+        case .idle, .failed: return
+        case .loading, .ready: break
+        }
+        engine.setPlaybackSpeed(max(0.25, min(engine.maximumPlaybackSpeed, controls.playbackSpeed)))
+    }
+
     public func setPlaybackSpeed(_ rate: Double) {
+        // An explicit selection supersedes the hold; its later release is inert.
+        temporarySpeedBoost = nil
         let clamped = max(0.25, min(engine.maximumPlaybackSpeed, rate))
         controls.playbackSpeed = clamped
         engine.setPlaybackSpeed(clamped)
@@ -2088,6 +2211,7 @@ public final class PlayerViewModel {
         let resuming = !paused && !intendsPlayback
         intendsPlayback = !paused
         controls.intendsPause = paused
+        if paused { endTemporarySpeedBoost() }
         // Pause/play is the way back from an AirPlay speaker that went silent
         // under a still-"playing" AVPlayer: rebuild its stream while paused.
         if resuming { AirPlayAudioSession.rebuildStreamBeforeResume() }
@@ -2116,6 +2240,7 @@ public final class PlayerViewModel {
     /// view's `onDisappear` fires a second `stop()` once it's torn down. Without
     /// this the server would get two `.stop` reports for one playback.
     private var didStop = false
+    private var stopTask: Task<Void, Never>?
     /// Natural EOF can zero an engine's current time before dismissal. Only that
     /// path falls back to the furthest observed point; manual exits save the actual
     /// current position so rewinding intentionally moves the resume point backward.
@@ -2134,7 +2259,12 @@ public final class PlayerViewModel {
     /// Call when leaving playback: report a final stop so the server records the
     /// resume point, then tear the engine down.
     public func stop(preserveDisplayMode: Bool = false) async {
+        if let stopTask {
+            await stopTask.value
+            return
+        }
         guard !didStop else { return }
+        endTemporarySpeedBoost()
         let suspendedPosition = foregroundReload.preservedPosition
         HandoffDiagnostics.emit(
             "session STOP_INTENT origin=player-stop vm=\(instanceID)"
@@ -2147,6 +2277,7 @@ public final class PlayerViewModel {
         // shows happening on iOS.
         PlaybackTrace.note("stop() teardown curr=\(String(format: "%.2f", engine.currentTime)) shouldDismiss=\(shouldDismiss) pendingNext=\(pendingNextEpisode != nil) isSeeking=\(controls.isSeeking)")
         didStop = true
+        let maintenance = streamingSessionMaintenance.cancel()
         episodeBrowser?.stop()
         playlistAdvanceTask?.cancel()
         playlistAdvanceTask = nil
@@ -2182,42 +2313,46 @@ public final class PlayerViewModel {
             ? max(engine.furthestObservedPosition, engine.currentTime)
             : suspendedPosition ?? currentResumePosition()
         let finalDuration = progressReporter.knownPlaybackDuration()
-        let percent = progressReporter.watchedPercent(at: finalPosition)
+        let percent = WatchProgressMath.watchedPercent(
+            position: finalPosition, engineDuration: finalDuration ?? 0, itemRuntime: nil
+        )
         engine.stop(preserveDisplayMode: preserveDisplayMode)
         // Network-file engines retain their resolved source so teardown can await
         // every SMB cursor/session close. Without this, leaving playback releases
         // the source only when the engine deinitializes; a quick second playback
         // can race that asynchronous cleanup and fail until the app restarts.
-        await engine.drainTransport()
-        // Release any prefetched next-episode session that was never adopted, and
-        // an adopted-but-never-committed session (a hand-off torn down before the
-        // incoming player took ownership), so a Jellyfin session isn't orphaned.
-        // A no-op for idempotent providers. Done AFTER engine.stop() so it never
-        // keeps audio playing while the cleanup round-trips.
-        await nextEpisodeCoordinator.releaseOrphanedPrefetchIfNeeded()
-        if let unadopted = adoptedResolved {
-            adoptedResolved = nil
-            await nextEpisodeCoordinator.releaseSession(unadopted.request)
-        }
-        // Let in-flight series-id enrichment finish so a fast playthrough still
-        // scrobbles with the show's ids (anime tagged only AniDB resolve mal/
-        // anilist here). Capped at 2s so a slow server never blocks teardown.
-        if let enrichTask {
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { await enrichTask.value }
-                group.addTask { try? await Task.sleep(nanoseconds: 2_000_000_000) }
-                _ = await group.next()
-                group.cancelAll()
+        // Teardown is owned by the player, not the presentation task that may be
+        // cancelled during an episode handoff. Repeated callers join this task.
+        let task = Task { @MainActor [self] in
+            await engine.drainTransport()
+            await maintenance?.value
+            await streamingSwitchTask?.value
+            // Drain orphaned prefetches after silencing the outgoing engine.
+            await nextEpisodeCoordinator.releaseOrphanedPrefetchIfNeeded()
+            if let unadopted = adoptedResolved {
+                adoptedResolved = nil
+                await nextEpisodeCoordinator.releaseSession(unadopted.request)
             }
+            if let enrichTask {
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask { await enrichTask.value }
+                    group.addTask { try? await Task.sleep(nanoseconds: 2_000_000_000) }
+                    _ = await group.next()
+                    group.cancelAll()
+                }
+            }
+            await progressReporter.report(
+                event: .stop,
+                isPaused: true,
+                positionOverride: finalPosition,
+                durationOverride: finalDuration
+            )
+            if let request { await releaseStreamingSession(request) }
+            onPlaybackStopped(finalPosition, percent)
         }
-        await progressReporter.report(
-            event: .stop,
-            isPaused: true,
-            positionOverride: finalPosition,
-            durationOverride: finalDuration
-        )
-        if let request { await releaseStreamingSession(request) }
-        onPlaybackStopped(finalPosition, percent)
+        stopTask = task
+        await task.value
+        stopTask = nil
     }
 
     // MARK: - View / diagnostics access
@@ -2504,7 +2639,11 @@ public final class PlayerViewModel {
         // background download just as it suppresses the on-load selection.
         guard rule.mode != .off, rule.autoDownloadIfMissing else { return }
         let language = rule.preferredLanguage ?? behavior.resolvedPreferredLanguage
-        guard !request.subtitleTracks.hasSuitableSubtitle(forLanguage: language) else { return }
+        guard rememberedSubtitle(for: request.item) != .off else { return }
+        guard !request.subtitleTracks.hasSuitableSubtitle(
+            forLanguage: language, mode: rule.mode,
+            hearingImpairedPreference: behavior.hearingImpairedPreference
+        ) else { return }
         guard let language, !language.isEmpty else { return }
         // The SDH/Forced accessibility preference applies to auto-download too, with
         // the content-type mode as the source of truth for the forced-only gate.
@@ -2569,7 +2708,11 @@ extension PlayerViewModel: RemoteSubtitleAcquisitionHost {
         subtitleController.selectSubtitleOption(id: id, userInitiated: userInitiated)
     }
 
-    var isPrimarySubtitleOff: Bool { subtitleController.selectedSubtitleTrackID == nil }
+    var canAutoSelectDownloadedSubtitle: Bool {
+        subtitleController.selectedSubtitleTrackID == nil
+            && !subtitleController.viewerChangedSubtitleThisSession
+            && request.map { rememberedSubtitle(for: $0.item) != .off } == true
+    }
 }
 
 // MARK: - SubtitleOverlayLoaderHost
@@ -2706,14 +2849,28 @@ extension PlayerViewModel: EngineHandoffCoordinatorHost {
     }
 
     func handoffStartPlayback(forceTranscode: Bool, resumeOverride: TimeInterval?) async {
+        guard !Task.isCancelled, !didStop else { return }
+        if forceTranscode, request != nil {
+            restartStreamingRendition(forceTranscode: true, resumeOverride: resumeOverride)
+            return
+        }
         await startPlayback(forceTranscode: forceTranscode, resumeOverride: resumeOverride)
     }
 
     func handoffSetPhase(_ phase: PlayerViewModel.Phase) {
-        if case .failed(let error) = phase, streamingOptions != nil {
+        if case .failed = phase {
+            dynamicRangeLoadGeneration &+= 1
+            streamingSessionMaintenance.cancel()
+            if let request, request.streamingSessionID != nil {
+                Task { @MainActor [self] in await releaseStreamingSession(request) }
+            }
+        }
+        if case .failed(let error) = phase {
             if streamingQuality.error == nil {
                 streamingQuality.error = Self.streamingFailure(error, evidence: engine.streamingFailure)
             }
+            capturePlaybackFailure(stage: request == nil ? .preparation
+                : engine.hasPresentedVideoFrame ? .playback : .opening)
             if self.phase == .ready {
                 streamingResumePosition = controls.pendingSeekTarget ?? currentResumePosition()
                 streamingTrackSnapshot = subtitleController.streamSnapshot()
@@ -2725,15 +2882,26 @@ extension PlayerViewModel: EngineHandoffCoordinatorHost {
             seekCoordinator.cancelAll()
             subtitleOverlay.cancelAll()
             engine.stop()
-            if let request {
-                Task { @MainActor [weak self] in await self?.releaseStreamingSession(request) }
-            }
         }
         self.phase = phase
     }
 
+    private func capturePlaybackFailure(stage: PlaybackDiagnosticReport.Stage) {
+        let retryCodec: DirectPlayVideoCodec?
+        switch streamingQuality.fallbackCodec {
+        case .preferHEVC: retryCodec = .hevc
+        case .preferH264: retryCodec = .h264
+        default: retryCodec = nil
+        }
+        streamingQuality.failureReport = .onDemand(
+            error: streamingQuality.error ?? .playback(.init(kind: .unknown)),
+            provider: provider.kind, engine: stage == .preparation ? nil : currentEngineKind,
+            stage: stage, negotiatedCodec: streamingNegotiatedVideoCodec, retryCodec: retryCodec
+        )
+    }
+
     func handoffHandleStartupTimeout() -> Bool {
-        guard streamingOptions != nil, !didStop else { return false }
+        guard !didStop else { return false }
         HandoffDiagnostics.emit("streaming STARTUP_TIMEOUT provider=\(provider.kind.rawValue) suppliedStream=\(request != nil)")
         let evidence = engine.streamingFailure
         if (evidence?.allowsCodecFallback != false || evidence?.kind == .hdrConversion),
@@ -2747,9 +2915,18 @@ extension PlayerViewModel: EngineHandoffCoordinatorHost {
     ) -> StreamingQualityError? {
         if let evidence { return .playback(evidence) }
         switch error {
+        case .serverUnreachable: return .playback(.init(kind: .network))
+        case .unauthorized, .invalidCredentials: return .authenticationRequired
+        case .accessRestricted: return .playback(.init(kind: .accessRestricted))
+        case .rateLimited: return .playback(.init(kind: .rateLimited))
+        case .notFound:
+            return streamWasSupplied ? .playback(.init(kind: .unavailable)) : .sourceUnavailable
+        case .conflict:
+            return .serverRefusal("The playback request conflicts with the server’s current state.", reason: .conflictingState)
         case .invalidResponse, .unknown:
             return streamWasSupplied ? .playback(.init(kind: .unknown)) : .negotiationFailed
-        case .decoding: return .malformedResponse
+        case .decoding:
+            return streamWasSupplied ? .playback(.init(kind: .unsupportedFormat)) : .malformedResponse
         default: return nil
         }
     }
@@ -2791,7 +2968,7 @@ extension PlayerViewModel: ForegroundReloadCoordinatorHost {
     }
 
     func reloadFail(_ error: AppError) {
-        phase = .failed(error)
+        handoffSetPhase(.failed(error))
     }
 }
 
@@ -2801,7 +2978,7 @@ extension PlayerViewModel: VideoNowPlayingHost {
     var nowPlayingPlayer: AVPlayer? { engine.nowPlayingPlayer }
     var nowPlayingTime: TimeInterval { engine.currentTime }
     var nowPlayingDuration: TimeInterval { engine.duration }
-    var nowPlayingSpeed: Double { controls.playbackSpeed }
+    var nowPlayingSpeed: Double { temporarySpeedBoostRate ?? controls.playbackSpeed }
     var nowPlayingPaused: Bool { !intendsPlayback }
     var nowPlayingAdvancing: Bool { engine.preventsDisplaySleep }
     var nowPlayingReady: Bool {

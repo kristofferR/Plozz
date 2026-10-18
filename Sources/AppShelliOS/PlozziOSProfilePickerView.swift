@@ -171,7 +171,7 @@ private struct PlozziOSProfilePickerGrid: View {
                 Button {
                     if isEditing, canManage { onEdit(profile) } else { onSelect(profile) }
                 } label: {
-                    PlozziOSProfilePickerTile(title: Text(profile.name)) {
+                    PlozziOSProfilePickerTile(title: ProfileNameLabel(profile: profile)) {
                         ProfileAvatarView(profile: profile, size: layout.avatarSize)
                             .overlay(alignment: .bottomTrailing) {
                                 if isEditing {
@@ -185,6 +185,7 @@ private struct PlozziOSProfilePickerGrid: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(profile.name)
+                .accessibilityValue(profile.isLocked ? Text(ProfileLockCopy.title) : Text(verbatim: ""))
                 .accessibilityIdentifier("profile-picker-\(profile.id)")
                 .accessibilityHint(isEditing
                     ? "Opens this profile’s settings" : "Switches to this profile")
@@ -225,8 +226,8 @@ private struct PlozziOSProfilePickerGrid: View {
     }
 }
 
-private struct PlozziOSProfilePickerTile<Avatar: View>: View {
-    let title: Text
+private struct PlozziOSProfilePickerTile<Title: View, Avatar: View>: View {
+    let title: Title
     @ViewBuilder var avatar: () -> Avatar
     @Environment(\.themePalette) private var palette
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize

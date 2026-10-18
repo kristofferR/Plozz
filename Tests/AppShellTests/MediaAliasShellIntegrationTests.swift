@@ -137,6 +137,31 @@ final class MediaAliasShellIntegrationTests: XCTestCase {
         XCTAssertNotEqual(addBytes, removeBytes)
     }
 
+    func testDeferredProfileDeletionDoesNotRecaptureAliasesOrWatchlist() async throws {
+        let state = makeState()
+        let profileID = state.profilesModel.activeProfileID
+        let evidence = try XCTUnwrap(MediaAliasEvidence(
+            kind: .movie,
+            weak: MediaAliasWeakEvidence(kind: .movie, title: "Local", year: 2026)
+        ))
+        let aliasID = try await state.mediaAliasLedger.resolveOrCreate(
+            profileID: profileID, evidence: evidence
+        )
+        try state.universalWatchlist.activate(profileID: profileID)
+        try state.universalWatchlist.add(profileID: profileID, aliasID: aliasID, kind: .movie)
+        let aliasKey = MediaStateRecordKey(profileID: profileID, aliasID: aliasID).recordName
+        let watchlistKey = WatchlistMediaStateRecordKey(profileID: profileID, aliasID: aliasID).recordName
+        let before = await state.captureMediaStateSyncRecords(fallback: [:])
+        XCTAssertNotNil(before[aliasKey])
+        XCTAssertNotNil(before[watchlistKey])
+
+        state.profilesModel.applySyncedProfileDTOs([:], deletions: [profileID])
+        let after = await state.captureMediaStateSyncRecords(fallback: before)
+
+        XCTAssertNil(after[aliasKey])
+        XCTAssertNil(after[watchlistKey])
+    }
+
     func testPoisonAndDeletedProfileRecordsDoNotBlockValidMediaState() async throws {
         let state = makeState()
         let profileID = state.profilesModel.activeProfileID

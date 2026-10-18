@@ -33,6 +33,7 @@ struct SettingsCheckableRow: View {
     /// hugging the card's border. Default true (flush-left, for split panes).
     var flushLeading: Bool = true
     let action: () -> Void
+    @Environment(\.settingsFormRowsFlushLeading) private var groupFlushLeading
 
     // ``SettingsRowLabel`` insets content horizontally; cancel the leading inset
     // (unless `flushLeading` is off) so titles line up flush-left with the pane
@@ -43,7 +44,11 @@ struct SettingsCheckableRow: View {
     private var iconSize: CGFloat { prominence == .primary ? 24 : 20 }
     private var iconFrame: CGFloat { prominence == .primary ? 34 : 30 }
     private var titleFont: Font {
+        #if os(tvOS)
+        SettingsRowMetrics.titleFont
+        #else
         prominence == .primary ? .headline.weight(.semibold) : .callout.weight(.medium)
+        #endif
     }
     private var minRowHeight: CGFloat { SettingsRowMetrics.minHeight(prominence) }
     private var verticalPadding: CGFloat { SettingsRowMetrics.verticalPadding(prominence) }
@@ -63,7 +68,7 @@ struct SettingsCheckableRow: View {
                         .lineLimit(titleLineLimit)
                     if let subtitle {
                         subtitle
-                            .font(.footnote)
+                            .font(SettingsRowMetrics.descriptionFont)
                             .settingsRowSecondary()
                             .lineLimit(subtitleLineLimit)
                     }
@@ -79,7 +84,7 @@ struct SettingsCheckableRow: View {
         }
         .buttonStyle(SettingsFocusButtonStyle())
         .disabled(!isEnabled)
-        .padding(.leading, flushLeading ? -labelInset : 0)
+        .padding(.leading, flushLeading && groupFlushLeading ? -labelInset : 0)
         .accessibilityAddTraits(isChecked ? .isSelected : [])
     }
 }

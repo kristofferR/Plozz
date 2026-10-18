@@ -199,6 +199,9 @@ private final class ServerViewerFixture {
     }
 
     func activate(_ user: String) async throws {
+        plex.plexHomeUsersFetch = { _, _ in
+            [PlexHomeUser(id: user, name: user, requiresPIN: false)]
+        }
         plex.setPlexHomeUserForActiveProfile(
             accountID: "plex", user: PlexHomeUser(id: user, name: user, requiresPIN: false)
         )

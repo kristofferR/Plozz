@@ -63,6 +63,7 @@ public final class HomeLibraryVisibilityStore: HomeLibraryVisibilityStoring, @un
 public final class HomeLibraryVisibilityModel {
     public private(set) var visibility: HomeLibraryVisibility
     public private(set) var serverMatchFailures: [String: AppError] = [:]
+    public private(set) var rowDefaultsRevision = UUID()
 
     private let store: HomeLibraryVisibilityStoring
     @ObservationIgnored private var cachedServerDefaults: CachedHomeRowDefaults?
@@ -233,11 +234,28 @@ public final class HomeLibraryVisibilityModel {
         store.save(visibility)
     }
 
+    public func setHomeSectionVisible(
+        _ visible: Bool, id: HomeRowID, catalog: HomeSectionCatalog
+    ) throws {
+        let updated = try catalog.settingVisible(visible, id: id, in: visibility)
+        guard updated != visibility else { return }
+        visibility = updated
+        store.save(visibility)
+    }
+
+    public func reorderHomeSections(_ order: [HomeRowID], catalog: HomeSectionCatalog) throws {
+        let updated = try catalog.reordering(order, in: visibility)
+        guard updated != visibility else { return }
+        visibility = updated
+        store.save(visibility)
+    }
+
     public func useRowDefaults(_ defaults: HomeRowCustomization.Defaults) {
         serverRequest?.cancel()
         serverRequest = nil
         serverRequestID = UUID()
         visibility.rowCustomization = HomeRowCustomization(defaults: defaults)
+        rowDefaultsRevision = UUID()
         serverMatchFailures = [:]
         store.save(visibility)
     }
@@ -280,6 +298,12 @@ public final class HomeLibraryVisibilityModel {
     public func setContinueWatchingShowsSeriesArtwork(_ showsSeriesArtwork: Bool) {
         guard visibility.continueWatchingShowsSeriesArtwork != showsSeriesArtwork else { return }
         visibility.continueWatchingShowsSeriesArtwork = showsSeriesArtwork
+        store.save(visibility)
+    }
+
+    public func setMergeNextUpIntoContinueWatching(_ merge: Bool) {
+        guard visibility.mergeNextUpIntoContinueWatching != merge else { return }
+        visibility.mergeNextUpIntoContinueWatching = merge
         store.save(visibility)
     }
 
