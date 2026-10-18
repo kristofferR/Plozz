@@ -2247,6 +2247,7 @@
     "Recording stopped - do not repeat": "d59aa8490ab603578e8392c33606b168d760c2cd6e6eb9a5049b3a0da81b62f4",
     "Recordings": "4d37eb421e52408f5fe8b27d088dc3bd1ead1f8bffac5c4f557f94891148ca5a",
     "Recovery": "d7e0d3e46f88c672ce79018c447e7bc127d0bfa633f7eae010478e01dbb4cb59",
+    "Red": "5a2f16fa70228f68deb38699ce6f010ddc1615ab4b7fea928982f43eb91fc5f1",
     "Redeem Code": "aa58bcae0c353d4e64ed2f4bd22e4ab02fd87aee7223de7a50f4ca61def5160d",
     "Reduced qualities are transcoded by your media server.": "2f425372002bd1c04c5e7cfc08745e750fdb2428c209c55606ed8ee43d2ca625",
     "Reduced quality asks Plex, Jellyfin, or Emby to transcode a separate offline copy using your profile’s preferred audio language. Plex keeps one audio track and at most one text subtitle; choose Original to keep every embedded track. External subtitle sidecars remain on the server. Preparation can take time and use significant server CPU. Network shares support Original only.": "e7108cc4a2d14d0ff98e3a3e4f44e2df40833638dfaa4e47117847a4563d37f9",
