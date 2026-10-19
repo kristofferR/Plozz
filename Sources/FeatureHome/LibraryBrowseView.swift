@@ -19,6 +19,20 @@ private final class ShowcaseNavigationVisibility {
     }
 }
 
+/// A pushed Browse page is full-screen. A root keeps the app's navigation, which
+/// recedes with the library controls once focus leaves the first showcase row.
+private struct LibraryTabBarVisibilityModifier: ViewModifier {
+    let isNavigationRoot: Bool
+    let visibility: ShowcaseNavigationVisibility
+    let isRecommended: Bool
+    let rowIDs: [String]
+
+    func body(content: Content) -> some View {
+        let isVisible = isNavigationRoot && (!isRecommended || visibility.showsNavigation(in: rowIDs))
+        content.toolbar(isVisible ? .automatic : .hidden, for: .tabBar)
+    }
+}
+
 private struct ShowcaseNavigationVisibilityModifier: ViewModifier {
     let visibility: ShowcaseNavigationVisibility
     let isRecommended: Bool
@@ -49,6 +63,8 @@ public struct LibraryBrowseView: View {
     #if os(tvOS)
     @State private var showcaseNavigation = ShowcaseNavigationVisibility()
     @State private var isFrontmost = false
+    /// The top safe area a root destination reserves for the native top bar.
+    @State private var topBarClearance: CGFloat = 0
     #endif
     /// Owns a bounded lookahead without invalidating the view on every scroll update.
     @State private var artworkPrefetch = ArtworkPrefetchTracker()
@@ -130,17 +146,25 @@ public struct LibraryBrowseView: View {
         #if os(tvOS)
         NativeLibraryFocusHost(scrollTarget: nativeScrollTarget, content: libraryContent)
             .ignoresSafeArea(.container, edges: [.vertical, .trailing])
-            .toolbar(tabBarVisibility, for: .tabBar)
+            .modifier(LibraryTabBarVisibilityModifier(
+                isNavigationRoot: isNavigationRoot,
+                visibility: showcaseNavigation,
+                isRecommended: viewModel.contentMode == .recommended,
+                rowIDs: viewModel.recommendationState.value?.map(\.id) ?? []
+            ))
+            .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.top } action: { top in
+                if tracksTopBar { topBarClearance = top }
+            }
         #else
         libraryContent
+            .toolbar(isNavigationRoot ? .automatic : .hidden, for: .tabBar)
         #endif
     }
 
-    /// A pushed Browse page is full-screen, with no navigation chrome pinned at
-    /// the top. A root must keep it: hiding it there leaves no way to reach
-    /// another destination.
-    private var tabBarVisibility: Visibility {
-        isNavigationRoot ? .automatic : .hidden
+    /// Whether this root sits under the native top bar, which reserves its own
+    /// space and scrolls away with the grid.
+    private var tracksTopBar: Bool {
+        isNavigationRoot && navigationStyle == .tabBar
     }
 
     private var libraryContent: some View {
@@ -186,7 +210,6 @@ public struct LibraryBrowseView: View {
         .navigationEntryFocus(isEntryContentPending ? .pending : nil)
         .environment(\.plozzCardCaptionView, viewModel.browseScope.cardCaptionView(for: viewModel.contentMode))
         .environment(\.plozzArtworkArea, nil)
-        .toolbar(tabBarVisibility, for: .tabBar)
         .safeAreaInset(edge: .top, spacing: 0) {
             #if os(tvOS)
             NativeLibraryScrollingHeader(
@@ -314,6 +337,7 @@ public struct LibraryBrowseView: View {
             .compactMap { $0 as? UIWindowScene }
             .flatMap(\.windows)
             .first(where: \.isKeyWindow)?.safeAreaInsets.top ?? 60
+        if tracksTopBar { return max(overscan, topBarClearance) }
         // The native sidebar's compact page button remains visible above content.
         let pageButtonHeight: CGFloat = navigationStyle == .sidebar ? 60 : 0
         return overscan + pageButtonHeight
@@ -422,6 +446,7 @@ public struct LibraryBrowseView: View {
             leadingInset: contentLeadingPadding, trailingInset: HomeLayout.horizontalPadding,
             scrollTarget: nativeScrollTarget,
             hidesScrollIndicator: isRailVisible,
+            tracksTopBar: tracksTopBar,
             header: scanBanner,
             onSelect: { item, index in select(item, at: index) },
             onLoaded: { prefetchArtwork(aheadFrom: $0) },

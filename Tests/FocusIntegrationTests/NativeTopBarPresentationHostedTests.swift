@@ -1,7 +1,7 @@
 #if os(tvOS)
 import CoreModels
 import CoreUI
-import FeatureHome
+@testable import FeatureHome
 import FeatureHomeCore
 import Observation
 import SwiftUI
@@ -183,6 +183,112 @@ final class NativeTopBarPresentationHostedTests: XCTestCase {
         func children(of itemID: String) async throws -> [MediaItem] { [] }
         func items(in containerID: String, kind: MediaItemKind, page: PageRequest) async throws -> MediaPage {
             MediaPage(items: [], startIndex: 0, totalCount: 0)
+        }
+        func search(query: String, limit: Int) async throws -> [MediaItem] { [] }
+        func playbackInfo(for itemID: String) async throws -> PlaybackRequest { throw AppError.notFound }
+        func reportPlayback(_ progress: PlaybackProgress, event: PlaybackEvent) async throws {}
+        func imageURL(itemID: String, kind: ImageKind, maxWidth: Int?) -> URL? { nil }
+    }
+
+    func testLibraryGridRootMakesRoomForTopBarAndScrollsItAway() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let model = TransitionModel()
+        model.selection = .library("server-a:movies")
+        let host = UIHostingController(rootView: GridRootFixture(model: model))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKeyAndVisible()
+        }
+        func first<T>(_ type: T.Type, in controller: UIViewController) -> T? {
+            if let match = controller as? T { return match }
+            return controller.children.lazy.compactMap { first(type, in: $0) }.first
+        }
+        func barFrame() -> CGRect? {
+            window.layoutIfNeeded()
+            return first(UITabBarController.self, in: host).map { $0.tabBar.convert($0.tabBar.bounds, to: window) }
+        }
+        var header: NativeLibraryHeaderController?
+        var grid: UICollectionView?
+        let ready = ContinuousClock.now + .seconds(5)
+        repeat {
+            window.layoutIfNeeded()
+            header = first(NativeLibraryHeaderController.self, in: host)
+            grid = first(NativeLibraryGridController.self, in: host)?.view.subviews
+                .compactMap { $0 as? UICollectionView }.first
+            if header != nil, let grid, grid.numberOfSections > 0, grid.numberOfItems(inSection: 0) > 0 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        } while ContinuousClock.now < ready
+        try await Task.sleep(for: .milliseconds(300))
+        let resting = try XCTUnwrap(barFrame())
+        let controls = try XCTUnwrap(header).view.convert(try XCTUnwrap(header).view.bounds, to: window)
+        XCTAssertGreaterThanOrEqual(controls.minY, resting.maxY, "Library controls must start below the top bar.")
+
+        let collection = try XCTUnwrap(grid)
+        let top = collection.contentOffset
+        collection.setContentOffset(CGPoint(x: top.x, y: top.y + resting.maxY + 200), animated: false)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertLessThanOrEqual(try XCTUnwrap(barFrame()).maxY, 0, "The top bar scrolls away with the grid.")
+        collection.setContentOffset(top, animated: false)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(try XCTUnwrap(barFrame()).minY, resting.minY, accuracy: 0.5)
+    }
+
+    private struct GridRootFixture: View {
+        @Bindable var model: TransitionModel
+        @State private var browse = LibraryBrowseViewModel(
+            provider: ManyItemsProvider(), containerID: "movies", containerKind: .movie,
+            initialContentMode: .titles
+        )
+
+        var body: some View {
+            NativeTopBarNavigation(
+                destinations: [.home, .library("server-a:movies")], selection: $model.selection,
+                preventsAccidentalExit: false,
+                content: { destination, _ in
+                    guard destination != .home else { return AnyView(Text(verbatim: "home")) }
+                    return AnyView(NavigationStack {
+                        LibraryBrowseView(
+                            viewModel: browse, title: Text(verbatim: "Movies"),
+                            isNavigationRoot: true, onSelect: { _ in }
+                        )
+                    })
+                },
+                label: { AnyView(Label($0.storageValue, systemImage: "square")) }
+            )
+            .environment(\.plozzNavigationStyle, .tabBar)
+            .environment(\.plozzCardFocusStyle, .system)
+            .environment(\.themePalette, .dark)
+            .preferredColorScheme(.dark)
+        }
+    }
+
+    private struct ManyItemsProvider: MediaProvider {
+        let kind: ProviderKind = .jellyfin
+        let session = UserSession(
+            server: MediaServer(
+                id: "server-a", name: "Server", baseURL: URL(string: "https://example.invalid")!,
+                provider: .jellyfin
+            ),
+            userID: "viewer", userName: "Viewer", deviceID: "fixture", accessToken: ""
+        )
+        func libraries() async throws -> [MediaLibrary] { [] }
+        func continueWatching(limit: Int) async throws -> [MediaItem] { [] }
+        func latest(limit: Int) async throws -> [MediaItem] { [] }
+        func item(id: String) async throws -> MediaItem { throw AppError.notFound }
+        func children(of itemID: String) async throws -> [MediaItem] { [] }
+        func items(in containerID: String, kind: MediaItemKind, page: PageRequest) async throws -> MediaPage {
+            let range = page.startIndex..<min(300, page.startIndex + page.limit)
+            return MediaPage(
+                items: range.map { MediaItem(id: "m\($0)", title: "Movie \($0)", kind: .movie) },
+                startIndex: page.startIndex, totalCount: 300
+            )
         }
         func search(query: String, limit: Int) async throws -> [MediaItem] { [] }
         func playbackInfo(for itemID: String) async throws -> PlaybackRequest { throw AppError.notFound }
