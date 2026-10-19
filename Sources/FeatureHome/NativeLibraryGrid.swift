@@ -161,6 +161,7 @@ struct NativeLibraryGrid<Header: View>: UIViewControllerRepresentable {
     let trailingInset: CGFloat
     let scrollTarget: NativeLibraryScrollTarget
     let hidesScrollIndicator: Bool
+    let tracksTopBar: Bool
     let header: Header
     let onSelect: (MediaItem, Int) -> Void
     let onLoaded: (Int) -> Void
@@ -176,6 +177,7 @@ struct NativeLibraryGrid<Header: View>: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: NativeLibraryGridController, context: Context) {
         controller.focusOwner = scrollTarget.focusOwner
         controller.scrollTarget = scrollTarget
+        controller.tracksTopBar = tracksTopBar
         controller.update(
             model: viewModel, total: total, generation: generation, spoilerSettings: spoilerSettings,
             environment: context.environment, leadingInset: leadingInset, trailingInset: trailingInset,
@@ -187,6 +189,7 @@ struct NativeLibraryGrid<Header: View>: UIViewControllerRepresentable {
 
     static func dismantleUIViewController(_ controller: NativeLibraryGridController, coordinator: ()) {
         controller.stopObserving()
+        controller.releaseTopBar()
     }
 }
 
@@ -212,6 +215,11 @@ final class NativeLibraryGridController: UIViewController, UICollectionViewDataS
     private var requestedFocusIndex: IndexPath?
     private var measuredHeaderHeight: CGFloat = 0
     private var hidesScrollIndicator = false
+    /// A root grid drives the native top bar, which otherwise stays pinned over it.
+    var tracksTopBar = false {
+        didSet { if !tracksTopBar { releaseTopBar() } }
+    }
+    private var topBarOwners: [Weak] = []
     private var viewportReport: Task<Void, Never>?
     private var traversalRecorder: LibraryTraversalRecorder? =
         ProcessInfo.processInfo.environment["PLOZZ_LIBRARY_TRAVERSAL_RECORDING"] == "1" ? .init() : nil
@@ -324,6 +332,7 @@ final class NativeLibraryGridController: UIViewController, UICollectionViewDataS
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        trackTopBar()
         layoutViewport()
         scrollTarget?.moveHeader(with: collection.contentOffset.y + collection.adjustedContentInset.top)
         guard view.bounds.width > 0 else { return }
@@ -353,6 +362,37 @@ final class NativeLibraryGridController: UIViewController, UICollectionViewDataS
             layout.invalidateLayout()
         }
         scheduleViewportReport()
+    }
+
+    /// The tab bar follows its selected tab's top content scroll view. SwiftUI
+    /// cannot see this UIKit grid, so register it on every controller between
+    /// the grid and the tab bar controller.
+    private func trackTopBar() {
+        guard tracksTopBar, view.window != nil else { return }
+        var owners: [UIViewController] = []
+        var controller: UIViewController? = self
+        while let current = controller, !(current is UITabBarController) {
+            owners.append(current)
+            controller = current.parent
+        }
+        guard controller != nil else { return }
+        for owner in owners where owner.contentScrollView(for: .top) !== collection {
+            owner.setContentScrollView(collection, for: .top)
+        }
+        topBarOwners = owners.map(Weak.init)
+    }
+
+    func releaseTopBar() {
+        for owner in topBarOwners.compactMap(\.controller)
+        where owner.contentScrollView(for: .top) === collection {
+            owner.setContentScrollView(nil, for: .top)
+        }
+        topBarOwners = []
+    }
+
+    private struct Weak {
+        weak var controller: UIViewController?
+        init(_ controller: UIViewController) { self.controller = controller }
     }
 
     private func layoutViewport() {
