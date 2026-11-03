@@ -218,6 +218,7 @@ final class NativeSidebarPresentationHostedTests: XCTestCase {
         let anchor = try XCTUnwrap(focusSystem.focusedItem as? UIView)
         anchor.pressesBegan([MenuPress()], with: nil)
         XCTAssertEqual(model.settleCount, 1, "Back must hand navigation to the sidebar, not be taken back.")
+        XCTAssertFalse(anchor.canBecomeFocused, "Back must release the launch anchor's focus.")
     }
 
     private final class MenuPress: UIPress {

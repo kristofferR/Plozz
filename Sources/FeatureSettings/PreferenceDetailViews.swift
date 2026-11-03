@@ -237,7 +237,11 @@ struct AppearanceDetailView: View {
                 #if os(tvOS)
                 SettingsControlGroup(illustrated: true) {
                     CompactNavigationPicker(selection: $navigation.style)
-                        .settingsSearchAnchor("navigation-layout")
+                        // The launch toggle needs Sidebar, so search for it lands here until then.
+                        .settingsSearchAnchor(
+                            "navigation-layout",
+                            fallbackFor: navigation.style == .sidebar ? [] : ["sidebar-at-launch"]
+                        )
                     Toggle("Prevent Accidental Exit", isOn: $navigation.preventsAccidentalExit).settingsSearchAnchor("prevent-exit")
                     if navigation.style == .sidebar {
                         Toggle("Collapse Sidebar at Launch", isOn: $navigation.collapsesSidebarAtLaunch)
