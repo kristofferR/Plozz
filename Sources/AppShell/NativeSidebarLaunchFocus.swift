@@ -8,8 +8,8 @@ import UIKit
 /// whenever it holds focus, and SwiftUI's default-focus preferences cannot
 /// outrank it.
 ///
-/// Place it behind Home inside a ``NavigationRailFocusHost``; it treats every list
-/// as the sidebar, so it suits only a page without lists. The
+/// Place it behind Home inside a ``NavigationRailFocusHost``. It treats every list
+/// as the sidebar, so it suits only a page without lists, which Home is. The
 /// moment the sidebar takes launch focus, the anchor takes it back, holding it
 /// itself while the page loads, then hands focus to the page's entry. It settles
 /// when focus reaches the page, the viewer moves focus, or the viewer presses Back.
@@ -18,9 +18,7 @@ struct NativeSidebarLaunchFocusAnchor: UIViewRepresentable {
     let onSettled: () -> Void
 
     func makeUIView(context: Context) -> AnchorView {
-        let view = AnchorView()
-        view.isAccessibilityElement = false
-        return view
+        AnchorView()
     }
 
     func updateUIView(_ view: AnchorView, context: Context) {
@@ -48,21 +46,9 @@ struct NativeSidebarLaunchFocusAnchor: UIViewRepresentable {
         private var focusObserver: (any NSObjectProtocol)?
         private weak var owner: NavigationRailFocusHostController?
         /// Focusable only while it stands in for the page at launch.
-        private var holdsFocus = false {
-            didSet { isUserInteractionEnabled = holdsFocus }
-        }
+        private var holdsFocus = false
 
         override var canBecomeFocused: Bool { holdsFocus }
-
-        override init(frame: CGRect) {
-            super.init(frame: frame)
-            isUserInteractionEnabled = false
-        }
-
-        required init?(coder: NSCoder) {
-            super.init(coder: coder)
-            isUserInteractionEnabled = false
-        }
 
         override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
             // Back opens the sidebar without a focus heading; let it rather than take focus back.

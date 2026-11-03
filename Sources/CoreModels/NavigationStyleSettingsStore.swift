@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-/// Persists the selected `NavigationStyle` and tvOS remote behavior across
+/// Persists the selected `NavigationStyle` and tvOS navigation behavior across
 /// launches in standard `UserDefaults`.
 ///
 /// Mirrors `MusicPlayerSettingsStore`: these preferences are stored **per profile**
@@ -88,9 +88,9 @@ public final class NavigationStyleSettingsModel {
         didSet { store.savePreventsAccidentalExit(preventsAccidentalExit) }
     }
 
-    /// Whether a fresh launch moves focus from the tvOS native sidebar into the
-    /// page, collapsing the sidebar. tvOS still gives the sidebar first focus, so
-    /// it can appear briefly. Off keeps the system's expanded, focused sidebar.
+    /// Whether a fresh launch into Home moves focus from the tvOS native sidebar
+    /// into the page, collapsing the sidebar. tvOS still gives the sidebar first
+    /// focus, so it can appear briefly. Off keeps the system's expanded sidebar.
     public var collapsesSidebarAtLaunch: Bool {
         didSet { store.saveCollapsesSidebarAtLaunch(collapsesSidebarAtLaunch) }
     }

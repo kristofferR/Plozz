@@ -170,14 +170,9 @@ final class NativeSidebarPresentationHostedTests: XCTestCase {
 
     func testLaunchFocusCollapsesNativeSidebarOnlyWhenRequested() async throws {
         for collapses in [false, true] {
-            let fixture = try await makeFixture()
-            defer { fixture.close() }
             let model = LaunchFocusModel(isRequested: collapses)
-            fixture.window.rootViewController = UIHostingController(rootView: LaunchFocusSidebar(model: model))
-            fixture.window.layoutIfNeeded()
-            let focusSystem = try XCTUnwrap(UIFocusSystem.focusSystem(for: fixture.window))
-            focusSystem.requestFocusUpdate(to: fixture.window)
-            focusSystem.updateFocusIfNeeded()
+            let (fixture, focusSystem) = try await launch(model)
+            defer { fixture.close() }
             try await waitUntil { focusSystem.focusedItem != nil }
             // Like a loading Home page, the page only becomes focusable after launch.
             try await Task.sleep(for: .milliseconds(300))
@@ -205,14 +200,9 @@ final class NativeSidebarPresentationHostedTests: XCTestCase {
     }
 
     func testBackWhileHoldingLaunchFocusReleasesIt() async throws {
-        let fixture = try await makeFixture()
-        defer { fixture.close() }
         let model = LaunchFocusModel(isRequested: true)
-        fixture.window.rootViewController = UIHostingController(rootView: LaunchFocusSidebar(model: model))
-        fixture.window.layoutIfNeeded()
-        let focusSystem = try XCTUnwrap(UIFocusSystem.focusSystem(for: fixture.window))
-        focusSystem.requestFocusUpdate(to: fixture.window)
-        focusSystem.updateFocusIfNeeded()
+        let (fixture, focusSystem) = try await launch(model)
+        defer { fixture.close() }
         // The page is still loading, so the anchor holds focus.
         try await waitUntil { focusSystem.focusedItem is NativeSidebarLaunchFocusAnchor.AnchorView }
         let anchor = try XCTUnwrap(focusSystem.focusedItem as? UIView)
@@ -223,6 +213,16 @@ final class NativeSidebarPresentationHostedTests: XCTestCase {
 
     private final class MenuPress: UIPress {
         override var type: UIPress.PressType { .menu }
+    }
+
+    private func launch(_ model: LaunchFocusModel) async throws -> (Fixture, UIFocusSystem) {
+        let fixture = try await makeFixture()
+        fixture.window.rootViewController = UIHostingController(rootView: LaunchFocusSidebar(model: model))
+        fixture.window.layoutIfNeeded()
+        let focusSystem = try XCTUnwrap(UIFocusSystem.focusSystem(for: fixture.window))
+        focusSystem.requestFocusUpdate(to: fixture.window)
+        focusSystem.updateFocusIfNeeded()
+        return (fixture, focusSystem)
     }
 
     func testLiveTVWaitsForFirstVisitThenRetainsStateWithinItsProfile() async throws {
