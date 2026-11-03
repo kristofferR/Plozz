@@ -239,6 +239,10 @@ struct AppearanceDetailView: View {
                     CompactNavigationPicker(selection: $navigation.style)
                         .settingsSearchAnchor("navigation-layout")
                     Toggle("Prevent Accidental Exit", isOn: $navigation.preventsAccidentalExit).settingsSearchAnchor("prevent-exit")
+                    if navigation.style == .sidebar {
+                        Toggle("Open Sidebar at Launch", isOn: $navigation.opensSidebarAtLaunch)
+                            .settingsSearchAnchor("sidebar-at-launch")
+                    }
                 }
                 #else
                 CompactNavigationPicker(selection: $navigation.style)

@@ -552645,6 +552645,7 @@
         }
       }
     },
+    "Open Sidebar at Launch" : {},
     "Open Silo to approve" : {
       "localizations" : {
         "ar" : {
@@ -1059186,6 +1059187,7 @@
         }
       }
     },
+    "menu sidebar expand collapse start navigation" : {},
     "menu sidebar tabs toolbar navigation order" : {
       "localizations" : {
         "ar" : {

@@ -204,6 +204,23 @@ final class NavigationStyleSettingsStoreTests: XCTestCase {
         XCTAssertFalse(store.loadPreventsAccidentalExit())
     }
 
+    @MainActor
+    func testSidebarLaunchPreferenceDefaultsOpenAndPersistsPerProfile() {
+        let defaults = makeDefaults()
+        let primary = NavigationStyleSettingsStore(defaults: defaults)
+        let child = NavigationStyleSettingsStore(defaults: defaults, namespace: "child")
+        let model = NavigationStyleSettingsModel(
+            store: child,
+            layoutStore: NavigationLibraryLayoutStore(defaults: makeDefaults())
+        )
+        XCTAssertTrue(model.opensSidebarAtLaunch, "Unset profiles keep the system sidebar behavior.")
+
+        model.opensSidebarAtLaunch = false
+
+        XCTAssertFalse(NavigationStyleSettingsStore(defaults: defaults, namespace: "child").loadOpensSidebarAtLaunch())
+        XCTAssertTrue(primary.loadOpensSidebarAtLaunch())
+    }
+
     func testLayoutStoreUsesInjectedPlatformDefaultWhenUnset() {
         let defaults = makeDefaults()
         let fallback = NavigationLibraryLayout(

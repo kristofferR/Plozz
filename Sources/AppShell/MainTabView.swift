@@ -540,6 +540,8 @@ struct MainTabView: View {
     /// report it without any of them knowing about the chrome.
     @State private var navigationChrome = NavigationChromeModel()
     @State private var nativeSidebarFocus = NavigationDestinationFocusHandoff()
+    /// Set once per process when the profile keeps the native sidebar collapsed at launch.
+    @State private var collapsesNativeSidebarAtLaunch = false
     private var railLibraries: [AggregatedLibrary] { navigationStyleModel.contentLibraries }
     /// Whether the rail's library list reflects a real answer yet (snapshot or
     /// discovery), as opposed to the empty value it starts at.
@@ -687,6 +689,8 @@ struct MainTabView: View {
         railSelectionRaw = NavigationRailDestination.home.storageValue
         libraryNavigationEntryOverride = nil
         recordedProcessLaunch = Self.processLaunch
+        collapsesNativeSidebarAtLaunch = navigationStyle == .sidebar
+            && !navigationStyleModel.opensSidebarAtLaunch
     }
 
     private func releaseExplicitLiveTVEntry(ifLeavingFor destination: NavigationRailDestination) {
@@ -1475,7 +1479,8 @@ struct MainTabView: View {
 
     /// Native tvOS sidebar. Uses the same ordered/hidden library plan as custom
     /// rail, but lets SwiftUI own presentation and expansion. Content focus waits
-    /// for the selected page's appearance and first rendered frame.
+    /// for the selected page's appearance and first rendered frame. The shared
+    /// focus host lets a fresh launch move focus past the sidebar into the page.
     ///
     /// Keep every tab's content and label erased at this boundary. Adding the
     /// Watchlist destination made the nested `TabContentBuilder` type large enough
@@ -1501,7 +1506,26 @@ struct MainTabView: View {
             uniqueKeysWithValues: entries.map { ($0.destination, $0) }
         )
         let browsableLibraries = NavigationRailPlan.browsableLibraries(libraries)
-        return TabView(selection: nativeSidebarSelection(in: destinations)) {
+        return NavigationRailFocusHost { _ in nativeSidebarTabView(
+            destinations: destinations, selection: selection,
+            entriesByDestination: entriesByDestination, browsableLibraries: browsableLibraries
+        ) }
+        .ignoresSafeArea()
+        .onChange(of: selection) { _, destination in
+            if let request = nativeSidebarFocus.request, request.destination != destination {
+                nativeSidebarFocus.cancel()
+            }
+        }
+        .onDisappear { nativeSidebarFocus.cancel() }
+    }
+
+    private func nativeSidebarTabView(
+        destinations: [NavigationRailDestination],
+        selection: NavigationRailDestination,
+        entriesByDestination: [NavigationRailDestination: NavigationRailLibraryEntry],
+        browsableLibraries: [AggregatedLibrary]
+    ) -> some View {
+        TabView(selection: nativeSidebarSelection(in: destinations)) {
             Tab(value: NativeSidebarDestination.profile) {
                 // Selection immediately raises RootView's existing profile page.
                 AnyView(Color.clear.tvNavigationExitProtectionContent())
@@ -1526,7 +1550,14 @@ struct MainTabView: View {
                             libraryEntry: entriesByDestination[destination],
                             libraries: browsableLibraries
                         )
-                    ).tvNavigationExitProtectionContent())
+                    )
+                    .background {
+                        NativeSidebarLaunchFocusAnchor(
+                            isRequested: collapsesNativeSidebarAtLaunch && selection == destination,
+                            onSettled: { collapsesNativeSidebarAtLaunch = false }
+                        )
+                    }
+                    .tvNavigationExitProtectionContent())
                 } label: {
                     rootNavigationLabel(
                         for: destination, libraryEntry: entriesByDestination[destination]
@@ -1536,12 +1567,6 @@ struct MainTabView: View {
         }
         .tabViewStyle(.sidebarAdaptable)
         .tvNavigationExitProtection(isEnabled: navigationStyleModel.preventsAccidentalExit)
-        .onChange(of: selection) { _, destination in
-            if let request = nativeSidebarFocus.request, request.destination != destination {
-                nativeSidebarFocus.cancel()
-            }
-        }
-        .onDisappear { nativeSidebarFocus.cancel() }
     }
 
     /// Plozz's own chrome: the collapsible library rail plus the selected
