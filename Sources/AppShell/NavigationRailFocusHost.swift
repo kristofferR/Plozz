@@ -2,6 +2,7 @@
 import CoreModels
 import CoreUI
 import FeatureHomeCore
+import FeatureLiveTVCore
 import FeaturePlayback
 import FeatureSettings
 import SwiftUI
@@ -57,6 +58,9 @@ struct NavigationRailFocusHost<Content: View>: UIViewControllerRepresentable {
             target.managedProviderSetupRouter = source.managedProviderSetupRouter
             target.familyGuidanceProvider = source.familyGuidanceProvider
             target[ContentRatingSettingsModel.self] = source[ContentRatingSettingsModel.self]
+            target[LiveTVGuidePreparationModel.self] = source[LiveTVGuidePreparationModel.self]
+            target.versionPickerAudioLanguage = source.versionPickerAudioLanguage
+            target.tvProfileForegroundState = source.tvProfileForegroundState
             target[NavigationChromeModel.self] = source[NavigationChromeModel.self]
             target[ProfilesModel.self] = source[ProfilesModel.self]
             target[HeroTrailerController.self] = source[HeroTrailerController.self]
