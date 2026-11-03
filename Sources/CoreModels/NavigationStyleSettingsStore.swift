@@ -1,10 +1,10 @@
 import Foundation
 import Observation
 
-/// Persists the selected `NavigationStyle` and tvOS exit behavior across
+/// Persists the selected `NavigationStyle` and tvOS navigation behavior across
 /// launches in standard `UserDefaults`.
 ///
-/// Mirrors `MusicPlayerSettingsStore`: both preferences are stored **per profile**
+/// Mirrors `MusicPlayerSettingsStore`: these preferences are stored **per profile**
 /// with namespace-scoped keys. The primary profile keeps the legacy un-suffixed
 /// navigation-style key so existing installs upgrade cleanly and inherit the
 /// choice they already made while it was an app-wide setting.
@@ -13,12 +13,15 @@ public protocol NavigationStyleSettingsStoring: Sendable {
     func save(_ style: NavigationStyle)
     func loadPreventsAccidentalExit() -> Bool
     func savePreventsAccidentalExit(_ preventsExit: Bool)
+    func loadCollapsesSidebarAtLaunch() -> Bool
+    func saveCollapsesSidebarAtLaunch(_ collapses: Bool)
 }
 
 public final class NavigationStyleSettingsStore: NavigationStyleSettingsStoring, @unchecked Sendable {
     private let defaults: UserDefaults
     private let styleKey: String
     private let preventsAccidentalExitKey: String
+    private let collapsesSidebarAtLaunchKey: String
 
     /// - Parameter namespace: per-profile scope. `nil` (the default/primary
     ///   profile) uses the legacy un-suffixed key (`NavigationStyle.storageKey`);
@@ -30,6 +33,7 @@ public final class NavigationStyleSettingsStore: NavigationStyleSettingsStoring,
             "preventsAccidentalExit",
             namespace: namespace
         )
+        self.collapsesSidebarAtLaunchKey = SettingsKey.scoped("collapsesSidebarAtLaunch", namespace: namespace)
     }
 
     public func load() -> NavigationStyle {
@@ -51,6 +55,15 @@ public final class NavigationStyleSettingsStore: NavigationStyleSettingsStoring,
     public func savePreventsAccidentalExit(_ preventsExit: Bool) {
         defaults.set(preventsExit, forKey: preventsAccidentalExitKey)
     }
+
+    /// Defaults to `false`, the native sidebar's system behavior.
+    public func loadCollapsesSidebarAtLaunch() -> Bool {
+        defaults.bool(forKey: collapsesSidebarAtLaunchKey)
+    }
+
+    public func saveCollapsesSidebarAtLaunch(_ collapses: Bool) {
+        defaults.set(collapses, forKey: collapsesSidebarAtLaunchKey)
+    }
 }
 
 /// Observable wrapper so SwiftUI settings screens can two-way bind and have the
@@ -58,7 +71,8 @@ public final class NavigationStyleSettingsStore: NavigationStyleSettingsStoring,
 /// `CardStyleSettingsModel`.
 ///
 /// Owns all navigation preferences — which chrome, whether Back may leave the app
-/// from top-level navigation, and how destinations are arranged in every style.
+/// from top-level navigation, whether the native sidebar starts expanded, and how
+/// destinations are arranged in every style.
 /// Keeping them together lets every shell and the Settings page share
 /// one profile-scoped model.
 @MainActor
@@ -72,6 +86,13 @@ public final class NavigationStyleSettingsModel {
     /// changing Back navigation inside content or system Home controls.
     public var preventsAccidentalExit: Bool {
         didSet { store.savePreventsAccidentalExit(preventsAccidentalExit) }
+    }
+
+    /// Whether a fresh launch into Home moves focus from the tvOS native sidebar
+    /// into the page, collapsing the sidebar. tvOS still gives the sidebar first
+    /// focus, so it can appear briefly. Off keeps the system's expanded sidebar.
+    public var collapsesSidebarAtLaunch: Bool {
+        didSet { store.saveCollapsesSidebarAtLaunch(collapsesSidebarAtLaunch) }
     }
 
     /// Which optional destinations and libraries navigation shows, plus the library
@@ -121,6 +142,7 @@ public final class NavigationStyleSettingsModel {
         self.layoutStore = layoutStore
         self.style = store.load()
         self.preventsAccidentalExit = store.loadPreventsAccidentalExit()
+        self.collapsesSidebarAtLaunch = store.loadCollapsesSidebarAtLaunch()
         self.libraryLayout = layoutStore.load()
         self.librariesSnapshotStore = librariesSnapshotStore
         let libraries = librariesSnapshotStore?.load() ?? []

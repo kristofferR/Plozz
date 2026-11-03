@@ -168,6 +168,63 @@ final class NativeSidebarPresentationHostedTests: XCTestCase {
         }
     }
 
+    func testLaunchFocusCollapsesNativeSidebarOnlyWhenRequested() async throws {
+        for collapses in [false, true] {
+            let model = LaunchFocusModel(isRequested: collapses)
+            let (fixture, focusSystem) = try await launch(model)
+            defer { fixture.close() }
+            try await waitUntil { focusSystem.focusedItem != nil }
+            // Like a loading Home page, the page only becomes focusable after launch.
+            try await Task.sleep(for: .milliseconds(300))
+            if collapses {
+                // The sidebar collapses while the page is still loading, not after.
+                var environment: (any UIFocusEnvironment)? = focusSystem.focusedItem
+                while let current = environment, !(current is UICollectionView) {
+                    environment = current.parentFocusEnvironment
+                }
+                XCTAssertNil(environment, "Launch focus stayed in the sidebar: \(String(describing: focusSystem.focusedItem))")
+            }
+            model.showsPage = true
+            try await waitUntil { model.page?.window != nil }
+            let page = try XCTUnwrap(model.page)
+            if collapses {
+                try await waitUntil { page.isFocused }
+                XCTAssertEqual(model.settleCount, 1)
+            } else {
+                try await Task.sleep(for: .seconds(1))
+                XCTAssertNotNil(focusSystem.focusedItem)
+                XCTAssertFalse(page.isFocused, "tvOS starts the native sidebar focused: \(String(describing: focusSystem.focusedItem))")
+                XCTAssertEqual(model.settleCount, 0)
+            }
+        }
+    }
+
+    func testBackWhileHoldingLaunchFocusReleasesIt() async throws {
+        let model = LaunchFocusModel(isRequested: true)
+        let (fixture, focusSystem) = try await launch(model)
+        defer { fixture.close() }
+        // The page is still loading, so the anchor holds focus.
+        try await waitUntil { focusSystem.focusedItem is NativeSidebarLaunchFocusAnchor.AnchorView }
+        let anchor = try XCTUnwrap(focusSystem.focusedItem as? UIView)
+        anchor.pressesBegan([MenuPress()], with: nil)
+        XCTAssertEqual(model.settleCount, 1, "Back must hand navigation to the sidebar, not be taken back.")
+        XCTAssertFalse(anchor.canBecomeFocused, "Back must release the launch anchor's focus.")
+    }
+
+    private final class MenuPress: UIPress {
+        override var type: UIPress.PressType { .menu }
+    }
+
+    private func launch(_ model: LaunchFocusModel) async throws -> (Fixture, UIFocusSystem) {
+        let fixture = try await makeFixture()
+        fixture.window.rootViewController = UIHostingController(rootView: LaunchFocusSidebar(model: model))
+        fixture.window.layoutIfNeeded()
+        let focusSystem = try XCTUnwrap(UIFocusSystem.focusSystem(for: fixture.window))
+        focusSystem.requestFocusUpdate(to: fixture.window)
+        focusSystem.updateFocusIfNeeded()
+        return (fixture, focusSystem)
+    }
+
     func testLiveTVWaitsForFirstVisitThenRetainsStateWithinItsProfile() async throws {
         let fixture = try await makeFixture()
         defer { fixture.close() }
@@ -347,6 +404,55 @@ final class NativeSidebarPresentationHostedTests: XCTestCase {
         func updateUIView(_ button: UIButton, context: Context) {
             button.isEnabled = context.environment.isEnabled
         }
+    }
+
+    @MainActor @Observable
+    fileprivate final class LaunchFocusModel {
+        var isRequested: Bool
+        var showsPage = false
+        var settleCount = 0
+        @ObservationIgnored weak var page: UIButton?
+
+        init(isRequested: Bool) { self.isRequested = isRequested }
+    }
+
+    private struct LaunchFocusSidebar: View {
+        let model: LaunchFocusModel
+
+        var body: some View {
+            NavigationRailFocusHost { _ in
+                TabView {
+                    Tab("Home", systemImage: "house") {
+                        VStack {
+                            if model.showsPage { LaunchFocusPage(model: model).frame(width: 480, height: 80) }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background {
+                            NativeSidebarLaunchFocusAnchor(isRequested: model.isRequested) {
+                                model.settleCount += 1
+                                model.isRequested = false
+                            }
+                        }
+                    }
+                    Tab("Settings", systemImage: "gearshape") { Color.clear }
+                }
+                .tabViewStyle(.sidebarAdaptable)
+            }
+            .ignoresSafeArea()
+        }
+    }
+
+    private struct LaunchFocusPage: UIViewRepresentable {
+        let model: LaunchFocusModel
+
+        func makeUIView(context: Context) -> UIButton {
+            let button = UIButton(type: .system)
+            button.setTitle("Page", for: .normal)
+            model.page = button
+            return button
+        }
+
+        func updateUIView(_ button: UIButton, context: Context) {}
     }
 
     @MainActor @Observable

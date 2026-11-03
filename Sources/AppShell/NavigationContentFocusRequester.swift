@@ -249,8 +249,11 @@ struct NavigationContentFocusRequester: UIViewRepresentable {
         let isPending: Bool
     }
 
+    /// - Parameter excludesNavigationItem: identifies navigation the shell does not
+    ///   draw itself, such as the native sidebar, which overlaps its page.
     static func entrySelection(
-        in window: UIWindow, relativeTo marker: UIView, isRightToLeft: Bool
+        in window: UIWindow, relativeTo marker: UIView, isRightToLeft: Bool,
+        excludesNavigationItem: (any UIFocusItem) -> Bool = { _ in false }
     ) -> EntrySelection {
         guard !marker.bounds.isEmpty else { return EntrySelection(target: nil, isPending: false) }
         var rows: [NavigationRowFocusRequester.RequestView] = []
@@ -273,6 +276,7 @@ struct NavigationContentFocusRequester: UIViewRepresentable {
             (frame: $0.convert($0.bounds, to: marker), owner: NativeFocusRegion.owningController(of: $0))
         }
         func isInNavigation(_ item: any UIFocusItem, frame: CGRect) -> Bool {
+            if excludesNavigationItem(item) { return true }
             let owner = NativeFocusRegion.owningController(of: item)
             return railFrames.contains {
                 // Expanded rail labels can overlap content in another native host.
