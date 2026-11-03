@@ -540,7 +540,8 @@ struct MainTabView: View {
     /// report it without any of them knowing about the chrome.
     @State private var navigationChrome = NavigationChromeModel()
     @State private var nativeSidebarFocus = NavigationDestinationFocusHandoff()
-    /// Set once per process when the profile keeps the native sidebar collapsed at launch.
+    /// Set once per process when the profile keeps the native sidebar collapsed at
+    /// launch and the launch opens Home; any navigation clears it.
     @State private var collapsesNativeSidebarAtLaunch = false
     private var railLibraries: [AggregatedLibrary] { navigationStyleModel.contentLibraries }
     /// Whether the rail's library list reflects a real answer yet (snapshot or
@@ -691,6 +692,7 @@ struct MainTabView: View {
         recordedProcessLaunch = Self.processLaunch
         collapsesNativeSidebarAtLaunch = navigationStyle == .sidebar
             && navigationStyleModel.collapsesSidebarAtLaunch
+            && activeLibraryNavigationDestination == .home
     }
 
     private func releaseExplicitLiveTVEntry(ifLeavingFor destination: NavigationRailDestination) {
@@ -1512,6 +1514,7 @@ struct MainTabView: View {
         ) }
         .ignoresSafeArea()
         .onChange(of: selection) { _, destination in
+            collapsesNativeSidebarAtLaunch = false
             if let request = nativeSidebarFocus.request, request.destination != destination {
                 nativeSidebarFocus.cancel()
             }

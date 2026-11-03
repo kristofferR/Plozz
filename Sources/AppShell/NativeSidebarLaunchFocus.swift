@@ -8,10 +8,11 @@ import UIKit
 /// whenever it holds focus, and SwiftUI's default-focus preferences cannot
 /// outrank it.
 ///
-/// Place it behind the selected page inside a ``NavigationRailFocusHost``. The
+/// Place it behind Home inside a ``NavigationRailFocusHost``; it treats every list
+/// as the sidebar, so it suits only a page without lists. The
 /// moment the sidebar takes launch focus, the anchor takes it back, holding it
 /// itself while the page loads, then hands focus to the page's entry. It settles
-/// when focus reaches the page or the viewer moves focus.
+/// when focus reaches the page, the viewer moves focus, or the viewer presses Back.
 struct NativeSidebarLaunchFocusAnchor: UIViewRepresentable {
     let isRequested: Bool
     let onSettled: () -> Void
@@ -61,6 +62,12 @@ struct NativeSidebarLaunchFocusAnchor: UIViewRepresentable {
         required init?(coder: NSCoder) {
             super.init(coder: coder)
             isUserInteractionEnabled = false
+        }
+
+        override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+            // Back opens the sidebar without a focus heading; let it rather than take focus back.
+            if presses.contains(where: { $0.type == .menu }) { settle() }
+            super.pressesBegan(presses, with: event)
         }
 
         override func didMoveToWindow() {

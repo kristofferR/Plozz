@@ -204,6 +204,26 @@ final class NativeSidebarPresentationHostedTests: XCTestCase {
         }
     }
 
+    func testBackWhileHoldingLaunchFocusReleasesIt() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.close() }
+        let model = LaunchFocusModel(isRequested: true)
+        fixture.window.rootViewController = UIHostingController(rootView: LaunchFocusSidebar(model: model))
+        fixture.window.layoutIfNeeded()
+        let focusSystem = try XCTUnwrap(UIFocusSystem.focusSystem(for: fixture.window))
+        focusSystem.requestFocusUpdate(to: fixture.window)
+        focusSystem.updateFocusIfNeeded()
+        // The page is still loading, so the anchor holds focus.
+        try await waitUntil { focusSystem.focusedItem is NativeSidebarLaunchFocusAnchor.AnchorView }
+        let anchor = try XCTUnwrap(focusSystem.focusedItem as? UIView)
+        anchor.pressesBegan([MenuPress()], with: nil)
+        XCTAssertEqual(model.settleCount, 1, "Back must hand navigation to the sidebar, not be taken back.")
+    }
+
+    private final class MenuPress: UIPress {
+        override var type: UIPress.PressType { .menu }
+    }
+
     func testLiveTVWaitsForFirstVisitThenRetainsStateWithinItsProfile() async throws {
         let fixture = try await makeFixture()
         defer { fixture.close() }
