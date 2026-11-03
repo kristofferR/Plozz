@@ -61,6 +61,8 @@ struct NavigationRailFocusHost<Content: View>: UIViewControllerRepresentable {
             target[LiveTVGuidePreparationModel.self] = source[LiveTVGuidePreparationModel.self]
             target.versionPickerAudioLanguage = source.versionPickerAudioLanguage
             target.tvProfileForegroundState = source.tvProfileForegroundState
+            target.homeLiveTVSnapshot = source.homeLiveTVSnapshot
+            target.openHomeLiveTV = source.openHomeLiveTV
             target[NavigationChromeModel.self] = source[NavigationChromeModel.self]
             target[ProfilesModel.self] = source[ProfilesModel.self]
             target[HeroTrailerController.self] = source[HeroTrailerController.self]
