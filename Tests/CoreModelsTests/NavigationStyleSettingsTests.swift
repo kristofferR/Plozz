@@ -205,7 +205,7 @@ final class NavigationStyleSettingsStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testSidebarLaunchPreferenceDefaultsOpenAndPersistsPerProfile() {
+    func testSidebarLaunchCollapseDefaultsOffAndPersistsPerProfile() {
         let defaults = makeDefaults()
         let primary = NavigationStyleSettingsStore(defaults: defaults)
         let child = NavigationStyleSettingsStore(defaults: defaults, namespace: "child")
@@ -213,12 +213,12 @@ final class NavigationStyleSettingsStoreTests: XCTestCase {
             store: child,
             layoutStore: NavigationLibraryLayoutStore(defaults: makeDefaults())
         )
-        XCTAssertTrue(model.opensSidebarAtLaunch, "Unset profiles keep the system sidebar behavior.")
+        XCTAssertFalse(model.collapsesSidebarAtLaunch, "Unset profiles keep the system sidebar behavior.")
 
-        model.opensSidebarAtLaunch = false
+        model.collapsesSidebarAtLaunch = true
 
-        XCTAssertFalse(NavigationStyleSettingsStore(defaults: defaults, namespace: "child").loadOpensSidebarAtLaunch())
-        XCTAssertTrue(primary.loadOpensSidebarAtLaunch())
+        XCTAssertTrue(NavigationStyleSettingsStore(defaults: defaults, namespace: "child").loadCollapsesSidebarAtLaunch())
+        XCTAssertFalse(primary.loadCollapsesSidebarAtLaunch())
     }
 
     func testLayoutStoreUsesInjectedPlatformDefaultWhenUnset() {

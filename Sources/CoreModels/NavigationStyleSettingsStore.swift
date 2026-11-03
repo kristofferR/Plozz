@@ -13,15 +13,15 @@ public protocol NavigationStyleSettingsStoring: Sendable {
     func save(_ style: NavigationStyle)
     func loadPreventsAccidentalExit() -> Bool
     func savePreventsAccidentalExit(_ preventsExit: Bool)
-    func loadOpensSidebarAtLaunch() -> Bool
-    func saveOpensSidebarAtLaunch(_ opens: Bool)
+    func loadCollapsesSidebarAtLaunch() -> Bool
+    func saveCollapsesSidebarAtLaunch(_ collapses: Bool)
 }
 
 public final class NavigationStyleSettingsStore: NavigationStyleSettingsStoring, @unchecked Sendable {
     private let defaults: UserDefaults
     private let styleKey: String
     private let preventsAccidentalExitKey: String
-    private let opensSidebarAtLaunchKey: String
+    private let collapsesSidebarAtLaunchKey: String
 
     /// - Parameter namespace: per-profile scope. `nil` (the default/primary
     ///   profile) uses the legacy un-suffixed key (`NavigationStyle.storageKey`);
@@ -33,7 +33,7 @@ public final class NavigationStyleSettingsStore: NavigationStyleSettingsStoring,
             "preventsAccidentalExit",
             namespace: namespace
         )
-        self.opensSidebarAtLaunchKey = SettingsKey.scoped("opensSidebarAtLaunch", namespace: namespace)
+        self.collapsesSidebarAtLaunchKey = SettingsKey.scoped("collapsesSidebarAtLaunch", namespace: namespace)
     }
 
     public func load() -> NavigationStyle {
@@ -56,13 +56,13 @@ public final class NavigationStyleSettingsStore: NavigationStyleSettingsStoring,
         defaults.set(preventsExit, forKey: preventsAccidentalExitKey)
     }
 
-    /// Defaults to `true`, the native sidebar's system behavior.
-    public func loadOpensSidebarAtLaunch() -> Bool {
-        defaults.object(forKey: opensSidebarAtLaunchKey) as? Bool ?? true
+    /// Defaults to `false`, the native sidebar's system behavior.
+    public func loadCollapsesSidebarAtLaunch() -> Bool {
+        defaults.bool(forKey: collapsesSidebarAtLaunchKey)
     }
 
-    public func saveOpensSidebarAtLaunch(_ opens: Bool) {
-        defaults.set(opens, forKey: opensSidebarAtLaunchKey)
+    public func saveCollapsesSidebarAtLaunch(_ collapses: Bool) {
+        defaults.set(collapses, forKey: collapsesSidebarAtLaunchKey)
     }
 }
 
@@ -88,10 +88,11 @@ public final class NavigationStyleSettingsModel {
         didSet { store.savePreventsAccidentalExit(preventsAccidentalExit) }
     }
 
-    /// Whether the tvOS native sidebar keeps the system's expanded, focused
-    /// sidebar on a fresh launch. When off, launch focus enters the page instead.
-    public var opensSidebarAtLaunch: Bool {
-        didSet { store.saveOpensSidebarAtLaunch(opensSidebarAtLaunch) }
+    /// Whether a fresh launch moves focus from the tvOS native sidebar into the
+    /// page, collapsing the sidebar. tvOS still gives the sidebar first focus, so
+    /// it can appear briefly. Off keeps the system's expanded, focused sidebar.
+    public var collapsesSidebarAtLaunch: Bool {
+        didSet { store.saveCollapsesSidebarAtLaunch(collapsesSidebarAtLaunch) }
     }
 
     /// Which optional destinations and libraries navigation shows, plus the library
@@ -141,7 +142,7 @@ public final class NavigationStyleSettingsModel {
         self.layoutStore = layoutStore
         self.style = store.load()
         self.preventsAccidentalExit = store.loadPreventsAccidentalExit()
-        self.opensSidebarAtLaunch = store.loadOpensSidebarAtLaunch()
+        self.collapsesSidebarAtLaunch = store.loadCollapsesSidebarAtLaunch()
         self.libraryLayout = layoutStore.load()
         self.librariesSnapshotStore = librariesSnapshotStore
         let libraries = librariesSnapshotStore?.load() ?? []

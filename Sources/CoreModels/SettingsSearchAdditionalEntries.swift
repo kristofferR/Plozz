@@ -10,7 +10,7 @@ extension SettingsSearchCatalog {
               keywords: "poster backdrop background logo library server metadata artwork"),
         .init("prevent-exit", page: .navigation, title: "Prevent Accidental Exit",
               keywords: "menu sidebar tabs toolbar navigation order", platform: .television),
-        .init("sidebar-at-launch", page: .navigation, title: "Open Sidebar at Launch",
+        .init("sidebar-at-launch", page: .navigation, title: "Collapse Sidebar at Launch",
               keywords: "menu sidebar expand collapse start navigation", platform: .television),
         .init("spoiler-treatment", page: .allScreens, title: "Thumbnail treatment",
               keywords: "spoilers blur hide watched unwatched content"),

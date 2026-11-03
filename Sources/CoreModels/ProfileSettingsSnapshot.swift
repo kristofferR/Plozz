@@ -32,7 +32,7 @@ public enum ProfileSettingsTransfer {
     ///  - `com.plozz.uiDensity` (touch vs. TV density — platform-specific)
     ///  - `navigationStyle` (tab bar vs. sidebar — platform-specific)
     ///  - `preventsAccidentalExit` (tvOS remote behavior — platform-specific)
-    ///  - `opensSidebarAtLaunch` (tvOS native sidebar behavior — platform-specific)
+    ///  - `collapsesSidebarAtLaunch` (tvOS native sidebar behavior — platform-specific)
     ///  - `detailZoomEnabled` (retired title-transition preference)
     ///  - `com.plozz.diagnosticsSettings` (device-local debugging)
     ///  - `com.plozz.syncSetup.enabled` (the sync flag itself — must not propagate)

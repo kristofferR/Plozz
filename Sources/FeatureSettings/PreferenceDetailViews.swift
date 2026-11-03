@@ -240,7 +240,7 @@ struct AppearanceDetailView: View {
                         .settingsSearchAnchor("navigation-layout")
                     Toggle("Prevent Accidental Exit", isOn: $navigation.preventsAccidentalExit).settingsSearchAnchor("prevent-exit")
                     if navigation.style == .sidebar {
-                        Toggle("Open Sidebar at Launch", isOn: $navigation.opensSidebarAtLaunch)
+                        Toggle("Collapse Sidebar at Launch", isOn: $navigation.collapsesSidebarAtLaunch)
                             .settingsSearchAnchor("sidebar-at-launch")
                     }
                 }

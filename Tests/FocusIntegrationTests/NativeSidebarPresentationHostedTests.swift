@@ -181,6 +181,14 @@ final class NativeSidebarPresentationHostedTests: XCTestCase {
             try await waitUntil { focusSystem.focusedItem != nil }
             // Like a loading Home page, the page only becomes focusable after launch.
             try await Task.sleep(for: .milliseconds(300))
+            if collapses {
+                // The sidebar collapses while the page is still loading, not after.
+                var environment: (any UIFocusEnvironment)? = focusSystem.focusedItem
+                while let current = environment, !(current is UICollectionView) {
+                    environment = current.parentFocusEnvironment
+                }
+                XCTAssertNil(environment, "Launch focus stayed in the sidebar: \(String(describing: focusSystem.focusedItem))")
+            }
             model.showsPage = true
             try await waitUntil { model.page?.window != nil }
             let page = try XCTUnwrap(model.page)

@@ -234191,6 +234191,7 @@
         }
       }
     },
+    "Collapse Sidebar at Launch" : {},
     "Collapsed" : {
       "comment" : "Accessibility state of a collapsed section of a form.",
       "localizations" : {
@@ -552645,7 +552646,6 @@
         }
       }
     },
-    "Open Sidebar at Launch" : {},
     "Open Silo to approve" : {
       "localizations" : {
         "ar" : {

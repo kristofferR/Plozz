@@ -3,21 +3,21 @@ import CoreNetworking
 import SwiftUI
 import UIKit
 
-/// Moves fresh-launch focus from the native sidebar into the selected page, so
-/// `.sidebarAdaptable` starts collapsed. tvOS gives the sidebar first focus, the
-/// sidebar expands whenever it holds focus, and SwiftUI's default-focus
-/// preferences cannot outrank it.
+/// Keeps fresh-launch focus out of the native sidebar, so `.sidebarAdaptable`
+/// starts collapsed. tvOS gives the sidebar first focus, the sidebar expands
+/// whenever it holds focus, and SwiftUI's default-focus preferences cannot
+/// outrank it.
 ///
-/// Place it behind the selected page inside a ``NavigationRailFocusHost``. It
-/// retries briefly while the page is loading or has nothing focusable yet, and
-/// settles as soon as focus leaves the sidebar or the viewer moves focus.
+/// Place it behind the selected page inside a ``NavigationRailFocusHost``. The
+/// moment the sidebar takes launch focus, the anchor takes it back, holding it
+/// itself while the page loads, then hands focus to the page's entry. It settles
+/// when focus reaches the page or the viewer moves focus.
 struct NativeSidebarLaunchFocusAnchor: UIViewRepresentable {
     let isRequested: Bool
     let onSettled: () -> Void
 
     func makeUIView(context: Context) -> AnchorView {
         let view = AnchorView()
-        view.isUserInteractionEnabled = false
         view.isAccessibilityElement = false
         return view
     }
@@ -34,9 +34,9 @@ struct NativeSidebarLaunchFocusAnchor: UIViewRepresentable {
     }
 
     final class AnchorView: UIView {
-        /// Covers a cold Home load; each attempt is one entry search.
+        /// Covers a slow Home load; each attempt is one entry search.
         static let attemptInterval = Duration.milliseconds(100)
-        static let maximumAttempts = 50
+        static let maximumAttempts = 150
 
         var isRightToLeft = false
         var onSettled: (() -> Void)?
@@ -45,6 +45,23 @@ struct NativeSidebarLaunchFocusAnchor: UIViewRepresentable {
         }
         private var attempts: Task<Void, Never>?
         private var focusObserver: (any NSObjectProtocol)?
+        private weak var owner: NavigationRailFocusHostController?
+        /// Focusable only while it stands in for the page at launch.
+        private var holdsFocus = false {
+            didSet { isUserInteractionEnabled = holdsFocus }
+        }
+
+        override var canBecomeFocused: Bool { holdsFocus }
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            isUserInteractionEnabled = false
+        }
+
+        required init?(coder: NSCoder) {
+            super.init(coder: coder)
+            isUserInteractionEnabled = false
+        }
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
@@ -52,47 +69,71 @@ struct NativeSidebarLaunchFocusAnchor: UIViewRepresentable {
         }
 
         private func update() {
-            guard isRequested, let window else {
+            guard isRequested, let window, let owner = NavigationRailFocusHostController.containing(self) else {
                 stop()
                 return
             }
             guard attempts == nil else { return }
+            self.owner = owner
+            holdsFocus = true
             focusObserver = NotificationCenter.default.addObserver(
                 forName: UIFocusSystem.didUpdateNotification, object: nil, queue: .main
             ) { [weak self] notification in
                 let context = notification.userInfo?[UIFocusSystem.focusUpdateContextUserInfoKey]
                     as? UIFocusUpdateContext
-                // Programmatic updates have no heading; a remote swipe does.
-                guard let context, !context.focusHeading.isEmpty else { return }
-                MainActor.assumeIsolated { self?.settle() }
-            }
-            attempts = Task { @MainActor [weak self, weak window] in
-                for _ in 0..<Self.maximumAttempts {
-                    try? await Task.sleep(for: Self.attemptInterval)
-                    guard !Task.isCancelled, let self, let window, self.window === window else { return }
-                    if self.focusPage(in: window) {
-                        self.settle()
-                        return
+                guard let context else { return }
+                MainActor.assumeIsolated {
+                    // Programmatic updates have no heading; a remote swipe does.
+                    if !context.focusHeading.isEmpty {
+                        self?.settle()
+                    } else if let next = context.nextFocusedItem, Self.enclosingList(of: next) != nil {
+                        // tvOS focuses the sidebar once the app is active, ignoring
+                        // earlier requests; take focus back as soon as this update ends.
+                        DispatchQueue.main.async { self?.attempt() }
                     }
+                }
+            }
+            attempts = Task { @MainActor [weak self] in
+                for _ in 0..<Self.maximumAttempts {
+                    guard !Task.isCancelled, let self else { return }
+                    if self.attempt() { return }
+                    try? await Task.sleep(for: Self.attemptInterval)
                 }
                 PlozzLog.app.debug("Native sidebar launch page never accepted focus")
                 self?.settle()
             }
         }
 
-        /// Returns `true` once focus is outside the sidebar.
+        /// Returns `true` once settled.
+        @discardableResult
+        private func attempt() -> Bool {
+            guard attempts != nil, let window else { return true }
+            guard focusPage(in: window) else { return false }
+            settle()
+            return true
+        }
+
+        /// Returns `true` once focus is on the page itself.
         private func focusPage(in window: UIWindow) -> Bool {
-            guard let system = UIFocusSystem.focusSystem(for: window),
-                  let focused = system.focusedItem else { return false }
-            // The native sidebar is a list; launch focus starts on one of its rows.
-            guard let sidebar = Self.enclosingList(of: focused) else { return true }
+            guard let system = UIFocusSystem.focusSystem(for: window), let owner else { return false }
+            // The native sidebar is a list, and the launch page (Home) has none.
+            if let focused = system.focusedItem, focused !== self, Self.enclosingList(of: focused) == nil {
+                return true
+            }
             let selection = NavigationContentFocusRequester.entrySelection(
                 in: window, relativeTo: self, isRightToLeft: isRightToLeft,
-                excludesNavigationItem: { Self.environment(sidebar, contains: $0) }
+                excludesNavigationItem: { [weak self] item in
+                    item === self || Self.enclosingList(of: item) != nil
+                }
             )
-            guard let target = selection.target,
-                  let owner = NavigationRailFocusHostController.containing(self) else { return false }
-            return owner.requestFocus(to: target, using: system)
+            if let target = selection.target {
+                return owner.requestFocus(to: target, using: system)
+            }
+            // Nothing to focus yet: hold focus here so the sidebar stays collapsed.
+            if system.focusedItem !== self {
+                _ = owner.requestFocus(to: self, using: system)
+            }
+            return false
         }
 
         private static func enclosingList(of item: any UIFocusItem) -> UICollectionView? {
@@ -104,15 +145,6 @@ struct NativeSidebarLaunchFocusAnchor: UIViewRepresentable {
             return nil
         }
 
-        private static func environment(_ environment: any UIFocusEnvironment, contains item: any UIFocusItem) -> Bool {
-            var current: (any UIFocusEnvironment)? = item
-            while let candidate = current {
-                if candidate === environment { return true }
-                current = candidate.parentFocusEnvironment
-            }
-            return false
-        }
-
         private func settle() {
             guard attempts != nil else { return }
             stop()
@@ -122,6 +154,11 @@ struct NativeSidebarLaunchFocusAnchor: UIViewRepresentable {
         private func stop() {
             attempts?.cancel()
             attempts = nil
+            if holdsFocus {
+                holdsFocus = false
+                if isFocused { owner?.setNeedsFocusUpdate() }
+            }
+            owner = nil
             if let focusObserver { NotificationCenter.default.removeObserver(focusObserver) }
             focusObserver = nil
         }

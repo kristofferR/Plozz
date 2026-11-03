@@ -690,7 +690,7 @@ struct MainTabView: View {
         libraryNavigationEntryOverride = nil
         recordedProcessLaunch = Self.processLaunch
         collapsesNativeSidebarAtLaunch = navigationStyle == .sidebar
-            && !navigationStyleModel.opensSidebarAtLaunch
+            && navigationStyleModel.collapsesSidebarAtLaunch
     }
 
     private func releaseExplicitLiveTVEntry(ifLeavingFor destination: NavigationRailDestination) {
