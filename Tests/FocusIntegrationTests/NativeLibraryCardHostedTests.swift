@@ -14,6 +14,59 @@ import XCTest
 final class NativeLibraryCardHostedTests: XCTestCase {
     private var savedProviders = MetadataProviderSettings.default
 
+    func testLibraryCaptionsHonorHomeLibraryOverrideAcrossCardAndFocusStyles() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        let library = AggregatedLibrary(
+            accountID: "fixture", accountName: "Viewer", serverName: "Server", providerKind: .jellyfin,
+            library: MediaLibrary(id: "movies", title: "Movies", kind: .movie)
+        )
+        let host = UIHostingController(rootView: AnyView(EmptyView()))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKeyAndVisible()
+        }
+        for style in CardStyle.allCases {
+            for focusStyle in CardFocusStyle.allCases {
+                var heights: [CardCaptionPreference: CGFloat] = [:]
+                for preset in [CardCaptionPreference.show, .hide, .recommended] {
+                    var activations = 0
+                    host.rootView = AnyView(
+                        LibraryCardView(aggregated: library, subtitle: "Server", action: { activations += 1 })
+                            .fixedSize(horizontal: false, vertical: true)
+                            .background(LibraryCardFrameProbe())
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            .environment(\.plozzCardCaptionSettings, .init(
+                                preference: preset,
+                                overrides: [.home: preset == .hide, .homeLibraries: preset != .hide]
+                            ))
+                            .environment(\.plozzCardCaptionView, .home)
+                            .environment(\.plozzCardStyle, style)
+                            .environment(\.plozzCardFocusStyle, focusStyle)
+                    )
+                    host.view.layoutIfNeeded()
+                    try await Task.sleep(for: .milliseconds(150))
+                    host.view.layoutIfNeeded()
+                    heights[preset] = try XCTUnwrap(slotProbe(in: host.view)).bounds.height
+                    if focusStyle.usesSystemEffect {
+                        XCTAssertEqual(descendant(SystemPosterCaption.CaptionView.self, in: host.view) == nil,
+                                       preset == .hide)
+                        let poster = try XCTUnwrap(descendant(NativePosterButton.self, in: host.view))
+                        XCTAssertTrue(poster.accessibilityLabel?.contains("Movies") == true)
+                        poster.sendActions(for: .primaryActionTriggered)
+                        XCTAssertEqual(activations, 1)
+                    }
+                }
+                XCTAssertLessThan(try XCTUnwrap(heights[.hide]), try XCTUnwrap(heights[.show]) - 20)
+                XCTAssertEqual(try XCTUnwrap(heights[.show]), try XCTUnwrap(heights[.recommended]), accuracy: 1)
+            }
+        }
+    }
+
     override func setUp() async throws {
         try await super.setUp()
         let store = MetadataProviderSettingsStore()
@@ -1215,6 +1268,59 @@ final class NativeLibraryCardHostedTests: XCTestCase {
                 .environment(\.plozzCardFocusStyle, .system)
                 .environment(\.plozzWatchStatusIndicator, model.indicator)
                 .environment(\.plozzShowsUnwatchedEpisodeCount, model.showsCount)
+        }
+    }
+
+    func testLibraryPosterCompositionNeverDrawsPlaceholderOverLoadedArtwork() async throws {
+        var environment = EnvironmentValues()
+        environment.themePalette = .dark
+        environment.colorScheme = .dark
+        let size = CGSize(width: 280, height: 420)
+        for style in [WatchStatusIndicator.watched, .unwatched] {
+            environment.plozzWatchStatusIndicator = style
+            for kind in [MediaItemKind.movie, .series] {
+                for played in [false, true] {
+                    let item = MediaItem(
+                        id: UUID().uuidString, title: "Poster", kind: kind,
+                        unwatchedEpisodeCount: kind == .series && !played ? 12 : nil,
+                        isPlayed: played
+                    )
+                    let presentation = NativeLibraryPosterBitmap.Presentation(
+                        item: item, spoilerSettings: .default, environment: environment
+                    )
+                    let placeholder = await NativeLibraryPosterBitmap.composite(
+                        source: nil, key: .init(image: nil, presentation: presentation, size: size, scale: 2),
+                        environment: environment
+                    )
+                    let missingArtwork = try XCTUnwrap(placeholder)
+                    let placeholderRegion = CGRect(x: 80, y: 120, width: 120, height: 180)
+                        .applying(CGAffineTransform(scaleX: missingArtwork.scale, y: missingArtwork.scale))
+                    let placeholderPixels = try rgba(XCTUnwrap(missingArtwork.cgImage?.cropping(to: placeholderRegion)))
+                    let placeholderLevels = stride(from: 0, to: placeholderPixels.count, by: 4).map {
+                        placeholderPixels[$0]
+                    }
+                    XCTAssertGreaterThan(Set(placeholderLevels).count, 1, "Missing artwork must retain its placeholder glyph.")
+                    let source = try XCTUnwrap(UIImage(data: artworkData(.blue)))
+                    let result = await NativeLibraryPosterBitmap.composite(
+                        source: source, key: .init(image: source, presentation: presentation, size: size, scale: 2),
+                        environment: environment
+                    )
+                    let image = try XCTUnwrap(result)
+                    let region = CGRect(x: 80, y: 120, width: 120, height: 180)
+                        .applying(CGAffineTransform(scaleX: image.scale, y: image.scale))
+                    let pixels = try rgba(XCTUnwrap(image.cgImage?.cropping(to: region)))
+                    let unexpected = stride(from: 0, to: pixels.count, by: 4).filter {
+                        pixels[$0] > 5 || pixels[$0 + 1] > 5 || pixels[$0 + 2] < 250 || pixels[$0 + 3] != 255
+                    }.count
+                    if unexpected > 0 {
+                        let attachment = XCTAttachment(image: image)
+                        attachment.name = "loaded-poster-\(style)-\(kind)-\(played)"
+                        attachment.lifetime = .keepAlways
+                        add(attachment)
+                    }
+                    XCTAssertEqual(unexpected, 0, "\(style), \(kind), played=\(played): loaded artwork must have no placeholder glyph or wash.")
+                }
+            }
         }
     }
 

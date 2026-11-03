@@ -5,6 +5,73 @@ import XCTest
 
 @MainActor
 final class LiveTVPlaybackCoordinatorTests: XCTestCase {
+    func testExplicitInlineWatchStartsWithoutAutoPreviewAndExpandsWithoutReplacingPlayback() async throws {
+        let fixture = CoordinatorFixture()
+        fixture.preview.setFollowsFocus(false)
+        fixture.preview.setKeepWatchingWhileBrowsing(false)
+        let accepted = await fixture.coordinator.watch("iptv", expandsPlayer: false).value
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(fixture.model.playingChannelID, "iptv")
+        XCTAssertFalse(fixture.preview.isExpanded)
+        XCTAssertTrue(fixture.preview.isWatchingInline)
+        XCTAssertTrue(fixture.preview.isHoldingWatchedChannel)
+        let prepared = try XCTUnwrap(fixture.preparation.current?.id)
+        let presentation = fixture.coordinator.presentationID
+        let expanded = fixture.coordinator.expandPreview(presentationID: presentation, preparedID: prepared)
+        XCTAssertTrue(expanded)
+        XCTAssertNil(fixture.coordinator.pendingWatchChannelID)
+        XCTAssertFalse(fixture.preparation.isPreparing)
+        XCTAssertTrue(fixture.preview.isExpanded)
+        XCTAssertFalse(fixture.preview.isWatchingInline)
+        XCTAssertEqual(fixture.preparation.current?.id, prepared)
+        XCTAssertEqual(fixture.coordinator.presentationID, presentation)
+        fixture.coordinator.stop()
+        XCTAssertFalse(fixture.preview.isWatchingInline)
+        await fixture.preparation.close()
+    }
+
+    func testPreviewExpansionRejectsRevokedAuthorizationAndStaleOwnership() async throws {
+        let fixture = CoordinatorFixture()
+        _ = await fixture.coordinator.watch("iptv", expandsPlayer: false).value
+        let prepared = try XCTUnwrap(fixture.preparation.current?.id)
+        let presentation = fixture.coordinator.presentationID
+        XCTAssertFalse(fixture.coordinator.expandPreview(presentationID: UUID(), preparedID: prepared))
+        XCTAssertFalse(fixture.coordinator.expandPreview(presentationID: presentation, preparedID: UUID()))
+        XCTAssertFalse(fixture.preview.isExpanded)
+        fixture.coordinator.setInteractionActive(false)
+        XCTAssertFalse(fixture.coordinator.expandPreview(presentationID: presentation, preparedID: prepared))
+        fixture.coordinator.setInteractionActive(true)
+        fixture.scope.profileID = "replacement-profile"
+        XCTAssertFalse(fixture.coordinator.expandPreview(presentationID: presentation, preparedID: prepared))
+        XCTAssertFalse(fixture.preview.isExpanded)
+        XCTAssertNil(fixture.preparation.current)
+        await fixture.preparation.close()
+    }
+
+    func testCancelledInlineSelectionCannotReplaceTheCurrentPreview() async throws {
+        let entered = expectation(description: "Inline channel preparation started")
+        let gate = CoordinatorFixtureGate()
+        let candidate = try CoordinatorFixtureLease("one")
+        let fixture = CoordinatorFixture(replies: [
+            "one": [.init(lease: candidate, entered: entered, gate: gate)]
+        ])
+        _ = await fixture.coordinator.watch("iptv", expandsPlayer: false).value
+        let original = fixture.preparation.current?.id
+        let pending = fixture.coordinator.watch("one", expandsPlayer: false)
+        await fulfillment(of: [entered], timeout: 2)
+        fixture.coordinator.cancelWatch()
+        await gate.release()
+        let accepted = await pending.value
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(fixture.preparation.current?.id, original)
+        XCTAssertEqual(fixture.model.playingChannelID, "iptv")
+        XCTAssertFalse(fixture.preview.isExpanded)
+        XCTAssertTrue(fixture.preview.isWatchingInline)
+        let closes = await candidate.closeCalls
+        XCTAssertEqual(closes, 1)
+        await fixture.preparation.close()
+    }
+
     func testIPTVPreviewKeepsItsTaskKeyUntilCleanupFinishes() async throws {
         let closing = expectation(description: "Previous IPTV preview is draining")
         let gate = CoordinatorFixtureGate()
@@ -421,6 +488,34 @@ final class LiveTVPlaybackCoordinatorTests: XCTestCase {
         let opens = await fixture.provider.opens
         XCTAssertEqual(opens, ["one", "one"])
         await fixture.preparation.close()
+    }
+
+    func testVisibleIPTVRetryReleasesTheRefusedLeaseAndOpensANewOne() async throws {
+        for error in [AppError.rateLimited(retryAfter: 10), .conflict] {
+            let first = try CoordinatorFixtureLease("one", iptv: true)
+            let second = try CoordinatorFixtureLease("one", iptv: true)
+            let fixture = CoordinatorFixture(kind: .iptv, replies: [
+                "one": [.init(lease: first), .init(lease: second)]
+            ])
+            let opened = await fixture.coordinator.watch("one").value
+            XCTAssertTrue(opened)
+            let oldID = try XCTUnwrap(fixture.preparation.current?.id)
+            let report = LiveChannelFailureReport(failure: .engine(error))
+            fixture.coordinator.playbackFailed(oldID, report: report)
+            XCTAssertEqual(fixture.coordinator.watchFailure?.playbackFailure, report)
+            XCTAssertNil(fixture.preparation.current)
+            let retried = await fixture.coordinator.watch("one").value
+            XCTAssertTrue(retried)
+            XCTAssertNotEqual(fixture.preparation.current?.id, oldID)
+            XCTAssertNil(fixture.preparation.playbackFailure)
+            let opens = await fixture.provider.opens
+            let oldCloses = await first.closeCalls
+            let currentCloses = await second.closeCalls
+            XCTAssertEqual(opens, ["one", "one"])
+            XCTAssertEqual(oldCloses, 1)
+            XCTAssertEqual(currentCloses, 0)
+            await fixture.preparation.close()
+        }
     }
 
     func testNativePresentationSurvivesZapsButRetiredDismissalCannotAffectReplacement() async throws {

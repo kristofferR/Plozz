@@ -5,6 +5,38 @@ import XCTest
 @testable import CrashReporting
 
 final class CrashRedactionTests: XCTestCase {
+    func testOriginalAppActivitySurvivesWithoutPrivateAppContext() throws {
+        let event = Event(level: .fatal)
+        event.context = ["app": [
+            "in_foreground": false, "is_active": false, "app_memory": 1_024,
+            "app_name": "Private name", "app_start_time": "Private timestamp",
+            "url": "https://private.test/secret", "profile": "Private profile"
+        ]]
+        let clean = try XCTUnwrap(CrashRedaction.scrub(event))
+        let app = try XCTUnwrap(clean.context?["app"])
+        XCTAssertEqual(Set(app.keys), ["in_foreground", "is_active", "app_memory"])
+        XCTAssertEqual(app["in_foreground"] as? Bool, false)
+        XCTAssertEqual(app["is_active"] as? Bool, false)
+        XCTAssertEqual(app["app_memory"] as? Int, 1_024)
+        event.context?["app"]?["in_foreground"] = true
+        event.context?["app"]?["is_active"] = true
+        let active = try XCTUnwrap(CrashRedaction.scrub(event)?.context?["app"])
+        XCTAssertEqual(active["in_foreground"] as? Bool, true)
+        XCTAssertEqual(active["is_active"] as? Bool, true)
+    }
+
+    func testAppActivityRejectsNumbersAndUntrustedValuesRatherThanInventingState() throws {
+        for key in ["in_foreground", "is_active"] {
+            for invalid: Any in [0, 1, 2, "true", "Private state", NSNull(), ["url": "private"]] {
+                let event = Event(level: .fatal)
+                event.context = ["app": [key: invalid, "app_memory": 1_024]]
+                let clean = try XCTUnwrap(CrashRedaction.scrub(event))
+                XCTAssertNil(clean.context?["app"]?[key])
+                XCTAssertEqual(clean.context?["app"]?["app_memory"] as? Int, 1_024)
+            }
+        }
+    }
+
     func testSyncLimitBreadcrumbRetainsOnlyMeasuredCountsAndKnownLimit() throws {
         let diagnostic = try XCTUnwrap(LiveTVSyncLimitDiagnostic(
             limit: .libraryExportBytes, observed: 67_110_000, maximum: 67_108_864
@@ -67,6 +99,21 @@ final class CrashRedactionTests: XCTestCase {
         XCTAssertNil(clean.tags?["private"])
         XCTAssertFalse(try String(decoding: JSONSerialization.data(withJSONObject: data), as: UTF8.self).contains("private"))
         XCTAssertEqual(clean.fingerprint?.first, "playback_failure")
+    }
+
+    func testPlexTuneFailureRetainsTypedStatusAndRejectsServerPayload() throws {
+        let diagnostics = PlaybackFailureDiagnostics()
+        let attempt = try XCTUnwrap(diagnostics.begin(
+            layer: .plexLiveTune, content: .live, captureForPresentation: true
+        ))
+        let diagnostic = try XCTUnwrap(attempt.fail(stage: .response, code: -1, format: .json))
+        let event = try XCTUnwrap(SentryCrashReporter.playbackEvent(diagnostic))
+        event.context?["playback_failure"]?["serverMessage"] = "private-token private-channel"
+        let clean = try XCTUnwrap(CrashRedaction.scrub(event))
+        XCTAssertEqual(clean.tags?["playback.layer"], "plexLiveTune")
+        let data = try XCTUnwrap(clean.context?["playback_failure"])
+        XCTAssertEqual(data["code"] as? Int, -1)
+        XCTAssertNil(data["serverMessage"])
     }
 
     func testPlaybackRedactionRejectsInvalidEnumsCountersAndCancellation() throws {

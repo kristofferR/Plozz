@@ -72,6 +72,15 @@ class EvidenceTests(unittest.TestCase):
                 self.assertEqual(result["appFrames"], [{"stackSamples": 20, "frame": "main (in FocusHost)"}])
                 self.assertEqual([row["stackSamples"] for row in result["backgroundAppFrames"]], [8, 7])
                 self.assertIn("include waiting", result["note"])
+                self.assertTrue(result["binaryImagesAvailable"])
+
+    def test_finalized_sample_can_explicitly_lack_the_binary_image_map(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sample.txt"
+            path.write_text(stack_sample().split("Binary Images:")[0] + "Binary images description not available\n")
+            result = performance.stack_sample_summary(path, 42)
+            self.assertFalse(result["binaryImagesAvailable"])
+            self.assertEqual(len(result["appFrames"]), 1)
 
     def test_stack_sample_rejects_wrong_process_truncation_and_missing_main_thread(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -82,8 +91,22 @@ class EvidenceTests(unittest.TestCase):
                 with self.assertRaises(performance.Failure):
                     performance.stack_sample_summary(path, 42)
 
+    def test_guide_batches_report_cold_and_warm_cost_without_dropping_work(self):
+        self.assertEqual(performance.select(None, ["guide-large-batches"]), ["guide-large-batches"])
+        self.assertEqual(set(performance.SCENARIOS["guide-large-batches"]["counters"]), {
+            "guideBytes", "httpRequests", "downloadedBytes", "parseInvocations", "retainedRows",
+            "requestedChannels", "coldBatchNanoseconds", "warmBatchNanoseconds", "indexedChannels",
+        })
+
     def test_selection_is_explicit_and_narrow_by_default(self):
-        self.assertEqual(len(performance.select(None, None)), 4)
+        self.assertEqual(set(performance.select(None, None)), {
+            "sync-unchanged", "library-unchanged", "catalog-import", "watchlist-artwork-rehydration",
+            "live-tv-schedule-capture", "live-tv-schedule-sync", "poster-preview-admission",
+            "seek-generated-80ms", "seek-generated-180ms",
+        })
+        self.assertEqual(performance.select(None, ["guide-large-batches"]), ["guide-large-batches"])
+        self.assertEqual(performance.select(None, ["poster-preview-admission"]),
+                         ["poster-preview-admission"])
         self.assertEqual(performance.select(None, ["watchlist-artwork-rehydration"]),
                          ["watchlist-artwork-rehydration"])
         self.assertEqual(performance.select("matrix", None), ["runtime-matrix"])
@@ -94,6 +117,18 @@ class EvidenceTests(unittest.TestCase):
                              (None, ["sync-unchanged", "sync-unchanged"])]:
             with self.assertRaises(performance.Failure):
                 performance.select(suite, names)
+
+    def test_active_picture_comparisons_cover_both_platforms_without_entering_default_suite(self):
+        names = [f"active-picture-{players}-{state}"
+                 for players in (1, 4) for state in ("enabled", "disabled")]
+        self.assertFalse(set(names) & set(performance.select(None, None)))
+        for platform in ("tvOS", "iOS"):
+            self.assertEqual(performance.select(None, names, platform), sorted(names))
+        for name in names:
+            spec = performance.SCENARIOS[name]
+            self.assertEqual(spec["counters"], ["players", "samples", "windowMilliseconds"])
+            source = (performance.ROOT / spec["file"]).read_text()
+            self.assertIn("func " + spec["test"].split("/")[-1] + "(", source)
 
     def test_measurement_contract_rejects_missing_nonfinite_and_duplicate_samples(self):
         original = report()
@@ -136,6 +171,48 @@ class EvidenceTests(unittest.TestCase):
         ]:
             with self.subTest(change=change), self.assertRaises(performance.Failure):
                 performance.verify_summary(dict(summary(), **change), 1)
+
+    def test_mobile_loading_scroll_requires_complete_layout_work(self):
+        name = "mobile-home-loading-scroll"
+        self.assertEqual(performance.select(None, [name], "iOS"), [name])
+        with self.assertRaisesRegex(performance.Failure, "not supported on tvOS"):
+            performance.select(None, [name], "tvOS")
+        spec = performance.SCENARIOS[name]
+        sample = report(name=name)
+        performance.validate_report(sample, spec)
+        for counter in spec["counters"]:
+            incomplete = copy.deepcopy(sample)
+            del incomplete["samples"][0]["counters"][counter]
+            with self.assertRaises(performance.Failure):
+                performance.validate_report(incomplete, spec)
+
+    def test_controls_reveal_scenarios_require_tv_and_complete_responsiveness_counters(self):
+        for name in ("player-controls-reveal", "player-controls-reveal-contended"):
+            self.assertEqual(performance.select(None, [name], "tvOS"), [name])
+            with self.assertRaisesRegex(performance.Failure, "not supported on iOS"):
+                performance.select(None, [name], "iOS")
+            sample = report(name=name)
+            performance.validate_report(sample, performance.SCENARIOS[name])
+            for counter in ("preferenceReads", "mainThreadReads", "maxMainActorGapMicroseconds"):
+                incomplete = copy.deepcopy(sample)
+                del incomplete["samples"][0]["counters"][counter]
+                with self.assertRaises(performance.Failure):
+                    performance.validate_report(incomplete, performance.SCENARIOS[name])
+
+    def test_controls_clock_scenarios_require_tv_and_complete_work_counters(self):
+        for name in ("player-card-first-visits", "player-controls-cold-reveal", "player-controls-first-card",
+                     "player-controls-hidden-clock", "player-controls-hidden-static",
+                     "player-controls-visible-clock"):
+            self.assertEqual(performance.select(None, [name], "tvOS"), [name])
+            with self.assertRaisesRegex(performance.Failure, "not supported on iOS"):
+                performance.select(None, [name], "iOS")
+            sample = report(name=name)
+            performance.validate_report(sample, performance.SCENARIOS[name])
+            for counter in performance.SCENARIOS[name]["counters"]:
+                incomplete = copy.deepcopy(sample)
+                del incomplete["samples"][0]["counters"][counter]
+                with self.assertRaises(performance.Failure):
+                    performance.validate_report(incomplete, performance.SCENARIOS[name])
 
     def test_attachment_reader_checks_expected_set_and_paths(self):
         with tempfile.TemporaryDirectory() as path:
@@ -246,7 +323,7 @@ class RunnerFailureTests(unittest.TestCase):
             self.assertEqual(json.loads((lane.output / "result.json").read_text())["status"], "failed")
 
     def test_profile_lifecycle_preserves_evidence_and_never_drives_without_recorder(self):
-        for failure in (None, "build", "identity", "readiness", "test", "early-exit",
+        for failure in (None, "horizontal-navigation", "detail-return", "missing-journal", "build", "identity", "readiness", "test", "early-exit",
                         "finalize", "summary", "process", "sample"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -260,7 +337,14 @@ class RunnerFailureTests(unittest.TestCase):
                     "CFBundleIdentifier": bundle, "CFBundleExecutable": "Wrong" if failure == "identity" else "FocusHost",
                 }))
                 args = argparse.Namespace(platform="tvOS", sim_id="owned", timeout=120, names=[],
-                                          operation="profile", template="Process Sample")
+                                          operation="profile", template="Process Sample",
+                                          workload="detail-return" if failure in ("detail-return", "missing-journal")
+                                          else "horizontal-navigation" if failure == "horizontal-navigation"
+                                          else "home-navigation")
+                if failure == "detail-return":
+                    journal = root / "data/Library/Caches/Plozz/playback-trace.log"
+                    journal.parent.mkdir(parents=True)
+                    journal.write_text("fixture focus journal\n")
                 lane = performance.Lane(root, args, ())
                 labels = []
                 class Recorder:
@@ -287,11 +371,20 @@ class RunnerFailureTests(unittest.TestCase):
                         raise performance.Failure("build failure")
                     if label == "navigation-test":
                         self.assertIsNone(recorder.returncode)
+                        expected = (
+                            "LargeNativeNavigationRemoteTests/testProfileRapidHorizontalNavigation"
+                            if args.workload == "horizontal-navigation"
+                            else "DetailReturnFocusRemoteTests/testProfilePopulatedShowcaseDetailReturns"
+                            if args.workload == "detail-return"
+                            else "ProductionHomeNavigationTests/testNavigateProductionHomeWithNativeCards"
+                        )
+                        self.assertIn("-only-testing:PlozzHomeRemoteTests/" + expected, argv)
                         if failure == "test":
                             raise performance.Failure("driver failure")
                     values = {
                         "fixture-launch": bundle + ": 42\n", "fixture-container": str(app),
                         "fixture-process": str(app / "FocusHost"),
+                        "fixture-data-container": str(root / "data"),
                         "fixture-final-process": "different" if failure == "process" else str(app / "FocusHost"),
                         "navigation-summary": json.dumps(summary(0 if failure == "summary" else 1)),
                     }
@@ -299,14 +392,24 @@ class RunnerFailureTests(unittest.TestCase):
                 with patch.object(lane, "command", side_effect=command), \
                         patch.object(performance.subprocess, "Popen", side_effect=spawn), \
                         patch.object(performance, "stop_owned") as stop:
-                    if failure:
+                    if failure and failure not in ("detail-return", "horizontal-navigation"):
                         with self.assertRaises(performance.Failure):
                             lane.profile_navigation([])
                     else:
                         result = lane.profile_navigation([])
                         self.assertEqual(result["pid"], 42)
                         self.assertTrue(result["stacks"]["mainThreadFrames"])
-                        self.assertIn("--home-artwork-cache-namespace=" + lane.output.name, result["arguments"])
+                        if args.workload == "horizontal-navigation":
+                            self.assertIn("--large-native-navigation-fixture", result["arguments"])
+                            self.assertIn("--real-library-pages", result["arguments"])
+                        else:
+                            self.assertIn("--home-artwork-cache-namespace=" + lane.output.name, result["arguments"])
+                        self.assertEqual(result["workload"], args.workload)
+                        if args.workload == "detail-return":
+                            self.assertIn("--populated-home-return", result["arguments"])
+                            self.assertIn("--return-focus-trace", result["arguments"])
+                            self.assertEqual((lane.output / "navigation/handoff-journal.log").read_text(),
+                                             "fixture focus journal\n")
                     self.assertEqual(stop.call_count, int(failure == "test"))
                 self.assertEqual("fixture-terminate" in labels, failure not in ("build", "identity"))
                 self.assertEqual("navigation-test" in labels, failure not in ("build", "identity", "readiness"))

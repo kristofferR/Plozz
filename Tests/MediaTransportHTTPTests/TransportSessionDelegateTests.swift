@@ -18,7 +18,7 @@ final class TransportSessionDelegateTests: XCTestCase {
         }
     }
 
-    func testDigestChallengeUsesNonPersistentPasswordCredential() {
+    func testDigestChallengeUsesSessionOnlyPasswordCredential() {
         let decision = evaluateChallenge(
             authenticationMethod: NSURLAuthenticationMethodHTTPDigest,
             credential: .password(username: "user", password: "secret", policy: .automatic)
@@ -29,7 +29,7 @@ final class TransportSessionDelegateTests: XCTestCase {
         }
         XCTAssertEqual(credential.user, "user")
         XCTAssertEqual(credential.password, "secret")
-        XCTAssertEqual(credential.persistence, .none)
+        XCTAssertEqual(credential.persistence, .forSession)
     }
 
     func testDigestOnlyRejectsBasicChallenge() {
@@ -52,7 +52,7 @@ final class TransportSessionDelegateTests: XCTestCase {
         guard case .useCredential(let credential) = decision else {
             return XCTFail("expected useCredential")
         }
-        XCTAssertEqual(credential.persistence, .none)
+        XCTAssertEqual(credential.persistence, .forSession)
     }
 
     func testRejectedCredentialIsNotRetried() {
@@ -88,6 +88,33 @@ final class TransportSessionDelegateTests: XCTestCase {
         guard case .performDefaultHandling = decision else {
             return XCTFail("expected performDefaultHandling")
         }
+    }
+
+    func testWindowsAuthenticationAllowsNextSupportedChallengeWithoutCredentials() {
+        for policy in [PasswordAuthPolicy.automatic, .basicAllowed, .digestOnly] {
+            let delegate = TransportSessionDelegate(
+                credential: .password(username: "user", password: "fixture", policy: policy),
+                trustPolicy: .system, origin: origin
+            )
+            for method in [NSURLAuthenticationMethodNTLM, NSURLAuthenticationMethodNegotiate] {
+                let space = URLProtectionSpace(
+                    host: origin.host, port: origin.port, protocol: origin.scheme,
+                    realm: "fixture", authenticationMethod: method
+                )
+                XCTAssertEqual(delegate.unsupportedChallengeDisposition(space), .rejectProtectionSpace)
+            }
+        }
+    }
+
+    func testAnonymousDeliveryDoesNotNegotiateAnotherAuthenticationScheme() {
+        let delegate = TransportSessionDelegate(
+            credential: .anonymous, trustPolicy: .system, origin: origin, isAnonymousMediaSession: true
+        )
+        let space = URLProtectionSpace(
+            host: origin.host, port: origin.port, protocol: origin.scheme,
+            realm: "fixture", authenticationMethod: NSURLAuthenticationMethodNTLM
+        )
+        XCTAssertEqual(delegate.unsupportedChallengeDisposition(space), .cancelAuthenticationChallenge)
     }
 
     private func evaluateChallenge(

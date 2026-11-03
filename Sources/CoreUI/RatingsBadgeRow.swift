@@ -8,6 +8,7 @@ import CoreModels
 public struct RatingsBadgeRow: View {
     private let ratings: [ExternalRating]
     private let familyGuidanceAge: Double?
+    @Environment(\.metadataTextScale) private var textScale
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
@@ -21,8 +22,8 @@ public struct RatingsBadgeRow: View {
         if !ratings.isEmpty || familyGuidanceAge != nil {
             WrappingHStackLayout(
                 alignment: alignment,
-                spacing: spacing,
-                lineSpacing: 8
+                spacing: MetadataBadgeSpacing.betweenRatings * textScale,
+                lineSpacing: 8 * textScale
             ) {
                 if let familyGuidanceAge {
                     FamilyGuidanceAgeBadge(age: familyGuidanceAge)
@@ -41,27 +42,23 @@ public struct RatingsBadgeRow: View {
         return .leading
         #endif
     }
-
-    private var spacing: CGFloat {
-        #if os(iOS)
-        return horizontalSizeClass == .compact ? 12 : 14
-        #else
-        return 18
-        #endif
-    }
 }
 
 /// An age recommendation, deliberately separate from a review score or certification.
 public struct FamilyGuidanceAgeBadge: View {
     private let age: Double
     @Environment(\.locale) private var locale
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.mediaBadgeScale) private var containerScale
+    @Environment(\.metadataTextScale) private var textScale
+    @ScaledMetric(relativeTo: .subheadline) private var mobileScale: CGFloat = 1
 
     public init(age: Double) {
         self.age = age
     }
 
     public var body: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: iconToAgeSpacing) {
             FamilyGuidanceIcon(size: iconSize)
             Text(verbatim: age.formatted(.number.locale(locale).precision(.fractionLength(0...1))) + "+")
                 .font(valueFont)
@@ -69,24 +66,45 @@ public struct FamilyGuidanceAgeBadge: View {
                 .plozzForeground(.primary)
         }
         .fixedSize(horizontal: true, vertical: false)
+        .layoutValue(
+            key: WrappingHStackLayout.AdjacentSpacing.self,
+            value: MetadataBadgeSpacing.ratingGap(for: dynamicTypeSize) * containerScale * textScale
+        )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Common Sense Media, recommended age \(age, format: .number.precision(.fractionLength(0...1))) and older")
         .accessibilityIdentifier("family-guidance-age-badge")
     }
 
+    private var iconToAgeSpacing: CGFloat {
+        #if os(tvOS)
+        // Compensate the artwork's trailing inset without resizing the mark.
+        -textScale
+        #else
+        MetadataBadgeSpacing.iconToValue * badgeScale
+        #endif
+    }
+
     private var iconSize: CGFloat {
         #if os(iOS)
-        24
+        24 * badgeScale
         #else
-        32
+        32 * textScale
+        #endif
+    }
+
+    private var badgeScale: CGFloat {
+        #if os(iOS)
+        mobileScale * textScale
+        #else
+        textScale
         #endif
     }
 
     private var valueFont: Font {
         #if os(iOS)
-        .subheadline.weight(.semibold)
+        textScale == 1 ? .subheadline.weight(.medium) : .system(size: 15 * badgeScale, weight: .medium)
         #else
-        .system(size: 23, weight: .semibold)
+        .system(size: 23 * textScale, weight: .medium)
         #endif
     }
 }
@@ -98,6 +116,10 @@ public struct FamilyGuidanceAgeBadge: View {
 /// reads as a single line of facts; only the icons carry brand colour.
 public struct RatingBadge: View {
     private let rating: ExternalRating
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.mediaBadgeScale) private var containerScale
+    @Environment(\.metadataTextScale) private var textScale
+    @ScaledMetric(relativeTo: .subheadline) private var mobileScale: CGFloat = 1
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
@@ -106,9 +128,9 @@ public struct RatingBadge: View {
     /// year/runtime metadata line so the whole bottom row reads consistently.
     private var valueFont: Font {
         #if os(iOS)
-        return .subheadline.weight(.medium)
+        return textScale == 1 ? .subheadline.weight(.medium) : .system(size: 15 * badgeScale, weight: .medium)
         #else
-        return .system(size: 23, weight: .medium)
+        return .system(size: 23 * textScale, weight: .medium)
         #endif
     }
 
@@ -120,12 +142,20 @@ public struct RatingBadge: View {
         #endif
     }
 
+    private var badgeScale: CGFloat {
+        #if os(iOS)
+        mobileScale * textScale
+        #else
+        textScale
+        #endif
+    }
+
     public init(rating: ExternalRating) {
         self.rating = rating
     }
 
     public var body: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: MetadataBadgeSpacing.iconToValue * badgeScale) {
             icon
             Text(rating.displayValue)
                 .font(valueFont)
@@ -139,13 +169,17 @@ public struct RatingBadge: View {
         // SwiftUI compresses the numeric text first when several ratings share a
         // row, producing values such as "8…".
         .fixedSize(horizontal: true, vertical: false)
+        .layoutValue(
+            key: WrappingHStackLayout.AdjacentSpacing.self,
+            value: MetadataBadgeSpacing.ratingGap(for: dynamicTypeSize) * containerScale * textScale
+        )
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(rating.displayName) rating \(rating.displayValue)")
     }
 
     @ViewBuilder
     private var icon: some View {
-        RatingSourceIcon(rating: rating, size: iconSize)
+        RatingSourceIcon(rating: rating, size: iconSize * textScale)
     }
 }
 

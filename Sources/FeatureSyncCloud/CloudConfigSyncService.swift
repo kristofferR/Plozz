@@ -442,7 +442,10 @@ public actor CloudConfigSyncService {
                         ? .liveTVSources : .trackerSignIns
                 case CloudSyncSchemaDescriptor.mediaStateV1.recordType:
                     if channel.schema.zoneName.hasPrefix(CloudSyncSchemaDescriptor.liveTVStateV1.zoneName) {
-                        .liveTVPreferences
+                        switch LiveTVPortableRecordKey.parse(name)?.kind {
+                        case .library, .snapshot: .libraryChannelSchedules
+                        default: .liveTVPreferences
+                        }
                     } else if WatchlistMediaStateRecordKey.parse(name) != nil {
                         .watchlist
                     } else if MediaStateRecordKey.parse(name) != nil {

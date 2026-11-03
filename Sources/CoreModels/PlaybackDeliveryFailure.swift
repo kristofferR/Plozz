@@ -48,6 +48,14 @@ public final class PlaybackDeliveryFailure: @unchecked Sendable {
         }
     }
 
+    public func clearRateLimit() {
+        lock.withLock {
+            guard case .rateLimited = failure else { return }
+            failure = nil
+            failureDiagnostic = nil
+        }
+    }
+
     public static func register(loopbackURL: URL) -> PlaybackDeliveryFailure {
         let state = PlaybackDeliveryFailure()
         registry.lock.withLock { registry.entries[loopbackURL] = state }

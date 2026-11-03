@@ -1,10 +1,5 @@
 import Foundation
 import os
-#if canImport(Darwin)
-import Darwin
-#else
-import Glibc
-#endif
 
 /// Worker-written backing, immutable after publication; never an authoritative sync store.
 final class LiveTVPortableRecordStorage: @unchecked Sendable {
@@ -29,37 +24,9 @@ final class LiveTVPortableRecordStorage: @unchecked Sendable {
             residentBytes += bytes.count
             return bytes
         }
-        var name = Array(temporaryDirectory.appendingPathComponent(".plozz-record-XXXXXX").path.utf8CString)
-        let descriptor = mkstemp(&name)
-        guard descriptor >= 0 else { throw Self.posixError() }
-        defer { close(descriptor) }
-        // Unlink before writing: mappings own the bytes, and process exit reclaims
-        // even an interrupted export without relying on Swift deinitialization.
-        guard unlink(name) == 0 else {
-            let error = Self.posixError()
-            if unlink(name) != 0 {
-                Self.logger.error("Unable to unlink Live TV staging file errno=\(errno)")
-            }
-            throw error
-        }
-        try bytes.withUnsafeBytes { buffer in
-            var offset = 0
-            while offset < buffer.count {
-                try Task.checkCancellation()
-                let count = write(descriptor, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
-                if count < 0, errno == EINTR { continue }
-                guard count > 0 else { throw Self.posixError() }
-                offset += count
-            }
-        }
-        let mapping = mmap(nil, bytes.count, PROT_READ, MAP_PRIVATE, descriptor, 0)
-        guard mapping != MAP_FAILED, let mapping else { throw Self.posixError() }
+        let mapped = try TemporaryMappedData.store(bytes, in: temporaryDirectory)
         storedBytes += bytes.count
-        return Data(bytesNoCopy: mapping, count: bytes.count, deallocator: .unmap)
-    }
-
-    private static func posixError() -> NSError {
-        NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        return mapped
     }
 
     static func reclaimLegacyFiles(in root: URL) throws {

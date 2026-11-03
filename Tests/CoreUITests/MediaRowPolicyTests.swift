@@ -5,6 +5,88 @@ import CoreModels
 @testable import CoreUI
 
 final class MediaRowPolicyTests: XCTestCase {
+    func testQueuedPreviewDoesNotRepeatURLComparison() {
+        var prefetchedIDs = Set<String>()
+        var comparisons = 0
+        func isDistinct() -> Bool {
+            comparisons += 1
+            return true
+        }
+
+        XCTAssertTrue(MediaArtworkPrefetchPolicy.claimPreview(
+            for: "first", prefetchedIDs: &prefetchedIDs, isDistinct: isDistinct()
+        ))
+        for _ in 0..<20 {
+            XCTAssertFalse(MediaArtworkPrefetchPolicy.claimPreview(
+                for: "first", prefetchedIDs: &prefetchedIDs, isDistinct: isDistinct()
+            ))
+        }
+        XCTAssertEqual(comparisons, 1)
+        XCTAssertEqual(prefetchedIDs, ["first"])
+
+        XCTAssertTrue(MediaArtworkPrefetchPolicy.claimPreview(
+            for: "second", prefetchedIDs: &prefetchedIDs, isDistinct: isDistinct()
+        ))
+        prefetchedIDs.removeAll(keepingCapacity: true)
+        XCTAssertTrue(MediaArtworkPrefetchPolicy.claimPreview(
+            for: "first", prefetchedIDs: &prefetchedIDs, isDistinct: isDistinct()
+        ))
+        XCTAssertEqual(comparisons, 3, "Reset/reversal must allow the same artwork to warm again.")
+    }
+
+    func testRejectedPreviewDoesNotPreventLaterEligibleArtwork() throws {
+        var prefetchedIDs = Set<String>()
+        for width in [200, 320, 2000] {
+            let url = try XCTUnwrap(URL(
+                string: "https://jellyfin.example.test/Items/one/Images/Primary?maxWidth=\(width)"
+            ))
+            let claimed = MediaArtworkPrefetchPolicy.claimPreview(
+                for: "same-item", prefetchedIDs: &prefetchedIDs,
+                isDistinct: ArtworkImageVariant.posterPreview.hasDistinctRequestURL(from: .posterCard, for: url)
+            )
+            XCTAssertEqual(claimed, width == 2000)
+            XCTAssertEqual(prefetchedIDs.isEmpty, width != 2000)
+        }
+    }
+
+    func testPreviewAdmissionPreservesLegacyQueueAcrossURLKindsAndResets() throws {
+        let urls = try [
+            "https://jellyfin.example.test/Items/one/Images/Primary?maxWidth=2000",
+            "https://emby.example.test/Items/one/Images/Primary?maxWidth=2000",
+            "https://plex.example.test/photo/:/transcode?url=%2Flibrary%2Fmetadata%2F1%2Fthumb&width=2000&height=3000",
+            "https://image.tmdb.org/t/p/original/one.jpg",
+            "https://jellyfin.example.test/Items/one/Images/Primary?maxWidth=200",
+            "https://example.test/unresizable.jpg",
+            "file:///tmp/fixture-poster.jpg"
+        ].map { try XCTUnwrap(URL(string: $0)) }
+        var actualIDs = Set<String>()
+        var legacyIDs = Set<String>()
+        for traversal in [Array(urls.indices), Array(urls.indices.reversed())] {
+            actualIDs.removeAll()
+            legacyIDs.removeAll()
+            var actualQueue: [Int] = []
+            var legacyQueue: [Int] = []
+            for _ in 0..<3 {
+                for index in traversal {
+                    let id = String(index)
+                    if ArtworkImageVariant.posterPreview.hasDistinctRequestURL(from: .posterCard, for: urls[index]),
+                       legacyIDs.insert(id).inserted {
+                        legacyQueue.append(index)
+                    }
+                    if MediaArtworkPrefetchPolicy.claimPreview(
+                        for: id, prefetchedIDs: &actualIDs,
+                        isDistinct: ArtworkImageVariant.posterPreview.hasDistinctRequestURL(from: .posterCard, for: urls[index])
+                    ) {
+                        actualQueue.append(index)
+                    }
+                }
+            }
+            XCTAssertEqual(actualQueue, legacyQueue)
+            XCTAssertEqual(actualIDs, legacyIDs)
+            XCTAssertEqual(actualQueue.count, 4)
+        }
+    }
+
     @MainActor
     func testOverlappingWindowsScheduleEachPresentationOnlyOnce() async throws {
         let window = ArtworkPrefetchWindow(limiter: ConcurrencyLimiter(limit: 16))

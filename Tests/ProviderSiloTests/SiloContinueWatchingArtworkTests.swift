@@ -59,6 +59,7 @@ extension SiloProviderTests {
         let episode = try XCTUnwrap(items.first)
         XCTAssertEqual(items.count, 1)
         XCTAssertEqual(episode.resumePosition, 120)
+        XCTAssertEqual(try XCTUnwrap(episode.playedPercentage), 120.0 / 1800, accuracy: 0.0001)
         XCTAssertEqual(episode.providerID(.seriesImdb), "ttShow")
         XCTAssertEqual(episode.logoURL?.path, "/base/show-logo.png")
         let requests = await http.requests

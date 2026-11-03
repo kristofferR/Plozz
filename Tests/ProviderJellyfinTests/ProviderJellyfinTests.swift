@@ -100,6 +100,42 @@ final class JellyfinProviderMappingTests: XCTestCase {
         XCTAssertNil(JellyfinProvider.episodeOrdering(nil))
     }
 
+    func testAudioTrackMappingRetainsProfileAcrossJellyfinAndEmby() throws {
+        for kind in [ProviderKind.jellyfin, .emby] {
+            var session = makeSession()
+            session.server.provider = kind
+            let provider = JellyfinProvider(session: session, http: StubHTTPClient())
+            let dto = try JSONDecoder.plozz.decode(MediaStreamDto.self, from: Data(
+                #"{"Index":3,"Type":"Audio","Codec":"dca","Profile":"MA + DTS:X IMAX","Channels":8,"Language":"en"}"#.utf8
+            ))
+            let track = provider.map(stream: dto)
+            XCTAssertEqual(track.id, 3)
+            XCTAssertEqual(track.profile, "MA + DTS:X IMAX")
+            XCTAssertEqual(track.channels, 8)
+        }
+    }
+
+    func testRawAudioVersionSurvivesJellyfinAndEmbyGeneratedDisplayTitles() throws {
+        for kind in [ProviderKind.jellyfin, .emby] {
+            var session = makeSession()
+            session.server.provider = kind
+            let provider = JellyfinProvider(session: session, http: StubHTTPClient())
+            let dto = try JSONDecoder.plozz.decode(MediaStreamDto.self, from: Data(
+                #"{"Index":3,"Type":"Audio","Codec":"dca","Channels":6,"Language":"fr","DisplayTitle":"French DTS 5.1","Title":"VFQ"}"#.utf8
+            ))
+            let track = provider.map(stream: dto)
+            XCTAssertEqual(track.id, 3)
+            XCTAssertEqual(track.language, "fr")
+            XCTAssertEqual(track.displayTitle, "French DTS 5.1 VFQ")
+            XCTAssertEqual(
+                TrackLabeling.audioLabel(displayTitle: track.displayTitle, language: track.language,
+                                        codec: track.codec, channels: track.channels, trackID: track.id,
+                                        locale: Locale(identifier: "fr")),
+                TrackLabel(base: .content("Français"), qualifiers: [.audioVersion("VFQ"), .format("DTS 5.1")])
+            )
+        }
+    }
+
     func testSubtitleAccessibilitySurvivesFlagsAndContainerTitles() throws {
         let provider = JellyfinProvider(session: makeSession(), http: StubHTTPClient())
         for metadata in [
@@ -709,7 +745,7 @@ final class JellyfinProviderMappingTests: XCTestCase {
         let provider = JellyfinProvider(session: makeSession(), http: stub)
 
         let libs = try await provider.libraries()
-        XCTAssertEqual(libs.map(\.title), ["Movies", "Shows"])
+        XCTAssertEqual(libs.map(\.title), ["Movies", "Shows", "Collections"])
         XCTAssertEqual(libs[0].kind, .movie)
         XCTAssertEqual(libs[1].kind, .series)
     }

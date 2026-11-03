@@ -28,9 +28,8 @@ public struct PlaybackDiagnostics: Equatable, Sendable {
 
         public var displayName: LocalizedStringResource {
             switch self {
-            case .directPlay: return "Direct Play"
+            case .directPlay, .plozzigen: return "Direct Play"
             case .remux: return "Remux (server, lossless)"
-            case .plozzigen: return "Direct Play (Plozzigen)"
             case .transcode: return "Transcode (server)"
             case .unknown: return "Unknown"
             }
@@ -180,6 +179,7 @@ public struct PlaybackDiagnostics: Equatable, Sendable {
     /// Seconds of media buffered ahead of the current playback position.
     public var bufferedSecondsAhead: Double?
     public var engineBufferedSecondsAhead: Double?
+    public var sessionCache: EngineSessionCache?
     public var stallCount: Int?
     /// Cumulative dropped video frames reported by the access log.
     public var droppedVideoFrames: Int?
@@ -274,6 +274,7 @@ public struct PlaybackDiagnostics: Equatable, Sendable {
         engineName: String? = nil,
         bufferedSecondsAhead: Double? = nil,
         engineBufferedSecondsAhead: Double? = nil,
+        sessionCache: EngineSessionCache? = nil,
         stallCount: Int? = nil,
         droppedVideoFrames: Int? = nil,
         frameRate: Double? = nil,
@@ -323,6 +324,7 @@ public struct PlaybackDiagnostics: Equatable, Sendable {
         self.engineName = engineName
         self.bufferedSecondsAhead = bufferedSecondsAhead
         self.engineBufferedSecondsAhead = engineBufferedSecondsAhead
+        self.sessionCache = sessionCache
         self.stallCount = stallCount
         self.droppedVideoFrames = droppedVideoFrames
         self.frameRate = frameRate
@@ -478,8 +480,13 @@ public extension PlaybackDiagnostics {
     static public func friendlyAudioName(codec: String?, profile: String?) -> String? {  // l10n:content — audio codec/spatial-format brand names (Dolby Atmos, DTS:X, ...), never translated
         if let profile = profile?.trimmingCharacters(in: .whitespaces), !profile.isEmpty {
             let lower = profile.lowercased()
-            if lower.contains("atmos") { return "Dolby Atmos" }
-            if lower.contains("dts:x") || lower.contains("dts-x") || lower.contains("dts x") { return "DTS:X" }
+            if lower.contains("atmos")
+                || (friendlyCodecName(codec) == "Dolby Digital+"
+                    && lower.split(whereSeparator: { !$0.isLetter }).contains("joc")) {
+                return "Dolby Atmos"
+            }
+            if lower.contains("dts:x") || lower.contains("dts-x") || lower.contains("dts x")
+                || lower.contains("dtsx") { return "DTS:X" }
             if lower.contains("truehd") { return "Dolby TrueHD" }
             if lower.contains("dts-hd ma") || lower.contains("dts-hd master") { return "DTS-HD MA" }
             if lower.contains("dts-hd") { return "DTS-HD" }
@@ -520,9 +527,9 @@ public extension PlaybackDiagnostics {
         case "truehd", "mlp":
             return isAtmos ? "TrueHD Atmos is not AVPlayer-compatible" : "TrueHD is not AVPlayer-compatible"
         case "dts", "dca":
-            return capabilities.supportsDTSPassthrough ? "DTS passthrough" : "DTS requires Plozzigen decode or a passthrough route"
+            return capabilities.supportsDTSPassthrough ? "DTS passthrough" : "DTS requires AetherEngine decode or a passthrough route"
         case "dts-hd", "dtshd", "dca-ma":
-            return capabilities.supportsDTSPassthrough ? "DTS-HD passthrough" : "DTS-HD requires Plozzigen decode or a passthrough route"
+            return capabilities.supportsDTSPassthrough ? "DTS-HD passthrough" : "DTS-HD requires AetherEngine decode or a passthrough route"
         case "aac", "mp4a", "alac", "mp3", "flac", "pcm", "lpcm":
             return "Decoded by Apple TV"
         default:
@@ -691,19 +698,6 @@ public extension PlaybackDiagnostics {
     public struct DiskSpaceFacts: Equatable, Sendable {
         public let freeText: String
         public let totalText: String?
-    }
-
-    /// Human-readable Dolby Vision profile, calling out the make-or-break facts:
-    /// Profile 5 has **no** HDR10 fallback (a wrong sample entry = no picture),
-    /// Profile 8 is HDR10-compatible, Profile 7 is dual-layer (stays on Plozzigen).
-    static func dolbyVisionDescription(profile: Int?) -> String? {  // l10n:content — Dolby Vision brand name + technical profile description, never translated
-        guard let profile else { return nil }
-        switch profile {
-        case 5: return "Profile 5 (single-layer · no HDR10 fallback)"
-        case 7: return "Profile 7 (dual-layer · hybrid engine)"
-        case 8: return "Profile 8 (single-layer · HDR10-compatible)"
-        default: return "Profile \(profile)"
-        }
     }
 
     /// Friendly transfer-function label from a raw token, e.g. `smpte2084` → `PQ`.
@@ -879,6 +873,33 @@ public extension PlaybackDiagnostics {
     var hdrText: String { hdr == .unknown ? Self.placeholder : hdr.displayName }
     var videoCodecText: String { videoCodec ?? Self.placeholder }
     var audioCodecText: String { audioCodec ?? Self.placeholder }
+    /// Display-only interpretation of the active engine label, not source fidelity or receiver output.
+    var audioEncodingDescription: LocalizedStringResource? {
+        guard mode == .plozzigen, let pipeline = audioPipelineDescription else { return nil }
+        if pipeline.hasPrefix("Stream-copy ("), pipeline.hasSuffix(")"),
+           pipeline.count > "Stream-copy ()".count {
+            return "No re-encoding"
+        }
+        let parts = pipeline.components(separatedBy: " → ")
+        guard parts.count == 2, !parts[0].isEmpty else { return nil }
+        switch parts[1] {
+        case "FLAC bridge", "FLAC bridge (timestamp correction)":
+            return "Lossless encoding"
+        case "EAC3 bridge", "EAC3 bridge (timestamp correction)":
+            return "Lossy encoding"
+        case let output where output.hasPrefix("APAC "):
+            return "Lossy encoding"
+        case let output where output.hasPrefix("PCM ")
+            && SpatialAudioLayout(rawValue: String(output.dropFirst(4))) != nil:
+            return "Rendered to PCM"
+        case "renderer (compressed)" where parts[0] == "EAC3 Atmos":
+            return "No re-encoding"
+        case "CoreAudio" where parts[0].hasPrefix("libavcodec "):
+            return "Decoded to PCM"
+        default:
+            return nil
+        }
+    }
     var droppedFramesText: String { droppedVideoFrames.map(String.init) ?? Self.placeholder }
     var observedFpsText: String { observedFps.map { String(format: "%.0f fps", $0) } ?? Self.placeholder }
 
@@ -943,9 +964,14 @@ public extension PlaybackDiagnostics {
             ?? Self.placeholder
     }
 
-    /// Explicit Dolby Vision profile line.
-    var dolbyVisionText: String {
-        Self.dolbyVisionDescription(profile: dolbyVisionProfile) ?? Self.placeholder
+    /// Source/stream format facts, not confirmation of FEL processing or display output.
+    var videoFormatText: String {
+        let format = [hdr.shortName, dolbyVisionProfile.map { "P\($0)" }]
+            .compactMap { $0 }.joined(separator: " ")
+        return Self.joinParts([
+            format.isEmpty ? nil : format,
+            colorText == Self.placeholder ? nil : colorText
+        ])
     }
 
     /// Selected source filename, or a placeholder when the provider cannot expose

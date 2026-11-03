@@ -480,7 +480,30 @@ public final class ProfilesModel {
     /// See ``ProfilePersisting/rootNamespaceOwnerID()``.
     @ObservationIgnored
     public private(set) var rootNamespaceOwnerID: String?
-    public private(set) var activeProfileID: String
+    public private(set) var activeProfileID: String {
+        didSet {
+            if activeProfileID != oldValue {
+                unlockedProfileLocks.removeAll()
+                selectionGeneration += 1
+            }
+        }
+    }
+    @ObservationIgnored public private(set) var selectionGeneration = 0
+    private var unlockedProfileLocks: [String: ProfileLock] = [:]
+
+    public func isProfileUnlocked(_ id: String) -> Bool {
+        guard let lock = profiles.first(where: { $0.id == id })?.lock else { return false }
+        return unlockedProfileLocks[id] == lock
+    }
+
+    /// Keeps proof only until the active profile changes, including sync/deletion fallbacks.
+    public func noteProfileUnlocked(_ id: String) {
+        unlockedProfileLocks[id] = profiles.first(where: { $0.id == id })?.lock
+    }
+
+    public func forgetProfileUnlock(_ id: String) {
+        unlockedProfileLocks[id] = nil
+    }
     /// Whether the current Apple TV system user already has a *stored* profile
     /// pick (vs. the in-memory default). Drives the launch picker: with system
     /// multi-user support, a user with no remembered pick still sees the picker
@@ -936,17 +959,22 @@ public final class ProfilesModel {
     /// Whether the one-time first-run profile setup has completed.
     ///
     /// True when the local flag is set OR the household already has more than the
-    /// default profile — extra profiles only exist because setup was already done
-    /// (here or on another device, arriving via sync/pairing), so a device that
-    /// receives a multi-profile household must not re-run first-run onboarding just
-    /// because its LOCAL flag (which isn't synced) is still false.
+    /// default profile and at least one profile has completed setup. Plex Home
+    /// import marks every profile as pending until the viewer finishes first-run.
+    /// A configured household still skips this on a new device even when its
+    /// other imported profiles have not finished their own setup.
     public var firstRunProfileSetupComplete: Bool {
-        store.firstRunProfileSetupComplete() || profiles.count > 1
+        store.firstRunProfileSetupComplete()
+            || (profiles.count > 1 && profiles.contains { !$0.needsSetup })
     }
 
     /// Marks the one-time first-run profile setup as done so it never runs
     /// again — even if the user later signs out of every server and re-adds one.
     public func markFirstRunProfileSetupComplete() {
+        if var profile = profiles.first(where: { $0.id == activeProfileID }), profile.needsSetup {
+            profile.needsSetup = false
+            update(profile)
+        }
         store.setFirstRunProfileSetupComplete(true)
     }
 

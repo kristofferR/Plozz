@@ -104,6 +104,27 @@ final class SetupSendLifecycleTests: XCTestCase {
         XCTAssertEqual(model.phase, .sent, "A later profile change cannot undo a completed transfer.")
     }
 
+    func testCancelledHandshakeCannotInstallStaleConfirmation() async throws {
+        let pairing = try makeService().makeHostPairing()
+        var model: SyncSetupPairingModel?
+        let link = RecordingHandshakeLink(
+            invite: try JSONEncoder().encode(PairingHandshakeInvite(
+                publicKeyData: pairing.identity.publicKeyData,
+                context: pairing.invite.context, hostNonce: SyncPairingSAS.makeNonce()
+            )),
+            beforeInvite: {},
+            afterSend: { count in if count == 2 { model?.reset() } }
+        )
+        model = SyncSetupPairingModel(
+            service: try makeService(), confirmationTimeout: .milliseconds(50),
+            makeGuestLink: { _ in StaticGuest(link: link) }
+        )
+        await model?.send(code: "ABCD")
+        let count = await link.sendCount
+        XCTAssertEqual(count, 2, "Cancellation after the nonce reveal must prevent the sealed transfer.")
+        XCTAssertEqual(model?.phase, .idle, "A stale callback cannot revive confirmation after reset.")
+    }
+
     private func makeService(
         secrets: @escaping @MainActor () -> SyncSecretsBundle = { SyncSecretsBundle() }
     ) throws -> SyncSetupService {
@@ -127,14 +148,20 @@ private struct FailingGuest: PairingLinkConnecting {
 private actor RecordingHandshakeLink: PairingLink {
     let invite: Data
     let beforeInvite: @MainActor @Sendable () -> Void
+    let afterSend: @MainActor @Sendable (Int) -> Void
     private(set) var sendCount = 0
 
-    init(invite: Data, beforeInvite: @escaping @MainActor @Sendable () -> Void) {
+    init(invite: Data, beforeInvite: @escaping @MainActor @Sendable () -> Void,
+         afterSend: @escaping @MainActor @Sendable (Int) -> Void = { _ in }) {
         self.invite = invite
         self.beforeInvite = beforeInvite
+        self.afterSend = afterSend
     }
 
-    func send(_ data: Data) async throws { sendCount += 1 }
+    func send(_ data: Data) async throws {
+        sendCount += 1
+        await afterSend(sendCount)
+    }
     func receive() async throws -> Data {
         await beforeInvite()
         return invite

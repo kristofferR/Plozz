@@ -1,3 +1,4 @@
+import CoreModels
 import XCTest
 @testable import MediaTransportHTTP
 
@@ -6,22 +7,161 @@ final class RangeProbeTests: XCTestCase {
     private let strongETag = ETag(headerValue: "\"strong-etag-1\"")!
     private let weakETag = ETag(headerValue: "W/\"weak-etag-1\"")!
 
+    func testDiagnosticSummaryDistinguishesMissingInvalidWeakAndStrongValidators() {
+        XCTAssertEqual(
+            RangeProbe.diagnosticSummary(status: 200, headers: [:], bodyLength: 2),
+            "status=200 bytes=2 etag=missing lastModified=missing contentRange=missing encoding=missing"
+        )
+        XCTAssertEqual(
+            RangeProbe.diagnosticSummary(status: 206, headers: [
+                "ETag": "W/\"private-validator\"",
+                "Last-Modified": "Wed, 14 Oct 2026 12:00:00 GMT",
+                "Content-Range": "bytes 0-1/1000",
+                "Content-Encoding": " Identity "
+            ], bodyLength: 2),
+            "status=206 bytes=2 etag=weak lastModified=valid contentRange=valid encoding=identity"
+        )
+        XCTAssertEqual(
+            RangeProbe.diagnosticSummary(status: 206, headers: [
+                "etag": "\"private-validator\""
+            ], bodyLength: 2),
+            "status=206 bytes=2 etag=strong lastModified=missing contentRange=missing encoding=missing"
+        )
+        let secret = "https://private.example/file?token=private-secret"
+        XCTAssertEqual(
+            RangeProbe.diagnosticSummary(status: 206, headers: [
+                "ETag": secret, "Last-Modified": secret, "Content-Range": secret,
+                "Content-Encoding": secret, "Authorization": secret, "Location": secret,
+                "Set-Cookie": secret
+            ], bodyLength: 2),
+            "status=206 bytes=2 etag=invalid lastModified=invalid contentRange=invalid encoding=other"
+        )
+    }
+
     // MARK: - probeRequest
 
-    func testProbeRequestSendsRangeZeroZeroAndIdentityEncoding() {
+    func testUnvalidatedPlaybackRequiresExplicitOptInAndStillChecksEveryRange() throws {
+        let headers = ["Content-Range": "bytes 0-1/1000"]
+        XCTAssertThrowsError(try RangeProbe.validateProbe(
+            status: 206, headers: headers, bodyLength: 2, resourceURL: url
+        ).get())
+        let probe = try RangeProbe.validateProbe(
+            status: 206, headers: headers, bodyLength: 2, resourceURL: url,
+            allowUnvalidatedPlayback: true
+        ).get()
+        XCTAssertEqual(probe.validator, .unvalidatedPlayback)
+        XCTAssertNil(probe.etag)
+        XCTAssertNil(probe.lastModified)
+        let request = try RangeProbe.readRequest(
+            url: url, start: 500, end: 509, validator: probe.validator
+        ).get()
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Range"), "bytes=500-509")
+        XCTAssertNil(request.value(forHTTPHeaderField: "If-Match"))
+        XCTAssertNil(request.value(forHTTPHeaderField: "If-Unmodified-Since"))
+        try RangeProbe.validateRead(
+            status: 206, headers: ["Content-Range": "bytes 500-509/1000"], bodyLength: 10,
+            expectedStart: 500, expectedEnd: 509, expectedTotal: 1000,
+            expectedValidator: probe.validator
+        ).get()
+        for (status, range, bodyLength, encoding) in [
+            (200, "bytes 500-509/1000", 10, "identity"),
+            (412, "bytes 500-509/1000", 10, "identity"),
+            (206, "bytes 501-510/1000", 10, "identity"),
+            (206, "bytes 500-509/1001", 10, "identity"),
+            (206, "bytes 500-509/1000", 9, "identity"),
+            (206, "bytes 500-509/1000", 10, "gzip"),
+            (206, "malformed", 10, "identity")
+        ] {
+            XCTAssertThrowsError(try RangeProbe.validateRead(
+                status: status, headers: ["Content-Range": range, "Content-Encoding": encoding],
+                bodyLength: bodyLength, expectedStart: 500, expectedEnd: 509,
+                expectedTotal: 1000, expectedValidator: probe.validator
+            ).get())
+        }
+        for (status, range, bodyLength) in [
+            (200, "bytes 0-1/1000", 2),
+            (206, "bytes 1-2/1000", 2),
+            (206, "bytes 0-1/1000", 1),
+            (206, "malformed", 2)
+        ] {
+            XCTAssertThrowsError(try RangeProbe.validateProbe(
+                status: status, headers: ["Content-Range": range], bodyLength: bodyLength,
+                resourceURL: url, allowUnvalidatedPlayback: true
+            ).get())
+        }
+        for validatorHeaders in [
+            ["ETag": "\"strong\""], ["Last-Modified": "Wed, 14 Oct 2026 12:00:00 GMT"]
+        ] {
+            let validated = try RangeProbe.validateProbe(
+                status: 206, headers: headers.merging(validatorHeaders) { _, value in value },
+                bodyLength: 2, resourceURL: url, allowUnvalidatedPlayback: true
+            ).get()
+            XCTAssertNotEqual(validated.validator, .unvalidatedPlayback)
+        }
+        for invalidHeaders in [
+            ["ETag": "W/\"weak\""], ["ETag": "malformed"],
+            ["Last-Modified": "malformed"], ["Last-Modified": ""]
+        ] {
+            XCTAssertThrowsError(try RangeProbe.validateProbe(
+                status: 206, headers: headers.merging(invalidHeaders) { _, value in value },
+                bodyLength: 2, resourceURL: url, allowUnvalidatedPlayback: true
+            ).get())
+        }
+    }
+
+    func testProbeRequestAvoidsZeroEndOffsetAndSendsIdentityEncoding() {
         let request = RangeProbe.probeRequest(url: url)
-        XCTAssertEqual(request.value(forHTTPHeaderField: "Range"), "bytes=0-0")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Range"), "bytes=0-1")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Accept-Encoding"), "identity")
         XCTAssertEqual(request.httpMethod, "GET")
     }
 
     // MARK: - validateProbe
 
+    func testPrefetchProbeUsesABoundedPrefixWithoutRelaxingCacheOrEncoding() {
+        let request = RangeProbe.probeRequest(url: url, prefetch: true)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Range"), "bytes=0-262143")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Accept-Encoding"), "identity")
+        XCTAssertEqual(request.cachePolicy, .reloadIgnoringLocalAndRemoteCacheData)
+    }
+
+    func testPrefetchProbeRequiresTheEntireRequestedPrefixClampedOnlyAtEOF() throws {
+        for total in [1, 1000, RangeProbe.initialReadByteCount, 1_000_000] {
+            let length = min(total, RangeProbe.initialReadByteCount)
+            let headers = ["ETag": "\"strong\"", "Content-Range": "bytes 0-\(length - 1)/\(total)"]
+            let probe = try RangeProbe.validateProbe(
+                status: 206, headers: headers, bodyLength: length, resourceURL: url, prefetch: true
+            ).get()
+            XCTAssertEqual(probe.totalLength, Int64(total))
+            for wrongLength in [length - 1, length + 1] {
+                XCTAssertThrowsError(try RangeProbe.validateProbe(
+                    status: 206, headers: headers, bodyLength: wrongLength, resourceURL: url, prefetch: true
+                ).get())
+            }
+        }
+        for headers in [
+            ["ETag": "\"strong\"", "Content-Range": "bytes 0-1/1000000"],
+            ["ETag": "\"strong\"", "Content-Range": "bytes 1-262144/1000000"],
+            ["ETag": "W/\"weak\"", "Content-Range": "bytes 0-262143/1000000"],
+            ["Content-Range": "bytes 0-262143/1000000"],
+            ["ETag": "\"strong\"", "Content-Range": "bytes 0-262143/1000000", "Content-Encoding": "gzip"]
+        ] {
+            XCTAssertThrowsError(try RangeProbe.validateProbe(
+                status: 206, headers: headers, bodyLength: RangeProbe.initialReadByteCount,
+                resourceURL: url, prefetch: true
+            ).get())
+        }
+        XCTAssertThrowsError(try RangeProbe.validateProbe(
+            status: 200, headers: ["ETag": "\"strong\""], bodyLength: RangeProbe.initialReadByteCount,
+            resourceURL: url, prefetch: true
+        ).get())
+    }
+
     func testValidateProbeSucceedsOn206WithStrongETagAndMatchingContentRange() {
         let result = RangeProbe.validateProbe(
             status: 206,
-            headers: ["ETag": "\"strong-etag-1\"", "Content-Range": "bytes 0-0/1000"],
-            bodyLength: 1,
+            headers: ["ETag": "\"strong-etag-1\"", "Content-Range": "bytes 0-1/1000"],
+            bodyLength: 2,
             resourceURL: url
         )
         switch result {
@@ -49,8 +189,8 @@ final class RangeProbeTests: XCTestCase {
     func testValidateProbeRejectsWeakETag() {
         let result = RangeProbe.validateProbe(
             status: 206,
-            headers: ["ETag": "W/\"weak-etag-1\"", "Content-Range": "bytes 0-0/1000"],
-            bodyLength: 1,
+            headers: ["ETag": "W/\"weak-etag-1\"", "Content-Range": "bytes 0-1/1000"],
+            bodyLength: 2,
             resourceURL: url
         )
         guard case .failure(.seekableRequiresValidator) = result else {
@@ -61,8 +201,8 @@ final class RangeProbeTests: XCTestCase {
     func testValidateProbeRejectsMissingETag() {
         let result = RangeProbe.validateProbe(
             status: 206,
-            headers: ["Content-Range": "bytes 0-0/1000"],
-            bodyLength: 1,
+            headers: ["Content-Range": "bytes 0-1/1000"],
+            bodyLength: 2,
             resourceURL: url
         )
         guard case .failure(.seekableRequiresValidator) = result else {
@@ -75,11 +215,11 @@ final class RangeProbeTests: XCTestCase {
         for etag in [nil, "W/\"weak\""] {
             var headers = [
                 "Last-Modified": "Wed, 14 Oct 2026 12:00:00 GMT",
-                "Content-Range": "bytes 0-0/1000"
+                "Content-Range": "bytes 0-1/1000"
             ]
             headers["ETag"] = etag
             let probe = try RangeProbe.validateProbe(
-                status: 206, headers: headers, bodyLength: 1, resourceURL: url
+                status: 206, headers: headers, bodyLength: 2, resourceURL: url
             ).get()
             XCTAssertEqual(probe.validator, .lastModified(date))
             XCTAssertNil(probe.etag)
@@ -92,9 +232,9 @@ final class RangeProbeTests: XCTestCase {
             status: 206,
             headers: [
                 "ETag": strongETag.rawValue, "Last-Modified": "Wed, 14 Oct 2026 12:00:00 GMT",
-                "Content-Range": "bytes 0-0/1000"
+                "Content-Range": "bytes 0-1/1000"
             ],
-            bodyLength: 1, resourceURL: url
+            bodyLength: 2, resourceURL: url
         ).get()
         XCTAssertEqual(probe.validator, .strongETag(strongETag))
         XCTAssertEqual(probe.lastModified, HTTPDate.parse("Wed, 14 Oct 2026 12:00:00 GMT"))
@@ -103,8 +243,8 @@ final class RangeProbeTests: XCTestCase {
     func testProbeRejectsInvalidLastModified() {
         for date in ["", "not a date", "Wed, 99 Oct 2026 12:00:00 GMT"] {
             let result = RangeProbe.validateProbe(
-                status: 206, headers: ["Last-Modified": date, "Content-Range": "bytes 0-0/1000"],
-                bodyLength: 1, resourceURL: url
+                status: 206, headers: ["Last-Modified": date, "Content-Range": "bytes 0-1/1000"],
+                bodyLength: 2, resourceURL: url
             )
             guard case .failure(.seekableRequiresValidator) = result else {
                 return XCTFail("invalid date must not enable unvalidated playback")
@@ -163,11 +303,11 @@ final class RangeProbeTests: XCTestCase {
         let result = RangeProbe.validateProbe(
             status: 206,
             headers: ["ETag": "\"e\"", "Content-Range": "bytes 5-10/1000"],
-            bodyLength: 1,
+            bodyLength: 2,
             resourceURL: url
         )
         guard case .failure(.rangeValidationFailed) = result else {
-            return XCTFail("expected rangeValidationFailed when Content-Range doesn't echo bytes=0-0")
+            return XCTFail("expected rangeValidationFailed when Content-Range doesn't match the probe")
         }
     }
 
@@ -176,10 +316,10 @@ final class RangeProbeTests: XCTestCase {
             status: 206,
             headers: [
                 "ETag": "\"e\"",
-                "Content-Range": "bytes 0-0/1000",
+                "Content-Range": "bytes 0-1/1000",
                 "Content-Encoding": "gzip"
             ],
-            bodyLength: 1,
+            bodyLength: 2,
             resourceURL: url
         )
         guard case .failure(.rangeValidationFailed) = result else {
@@ -190,8 +330,8 @@ final class RangeProbeTests: XCTestCase {
     func testValidateProbeAcceptsCaseInsensitiveRangeUnit() {
         let result = RangeProbe.validateProbe(
             status: 206,
-            headers: ["ETag": "\"e\"", "Content-Range": "Bytes 0-0/1000"],
-            bodyLength: 1,
+            headers: ["ETag": "\"e\"", "Content-Range": "Bytes 0-1/1000"],
+            bodyLength: 2,
             resourceURL: url
         )
         guard case .success = result else {
@@ -208,6 +348,34 @@ final class RangeProbeTests: XCTestCase {
         )
         guard case .failure(.sourceChanged) = result else {
             return XCTFail("expected sourceChanged for a 412 probe response")
+        }
+    }
+
+    func testProbeAcceptsExactPrefixClampedOnlyAtEOF() throws {
+        for total in [1, 2, 1000] {
+            let length = min(total, 2)
+            let result = try RangeProbe.validateProbe(
+                status: 206,
+                headers: ["ETag": "\"e\"", "Content-Range": "bytes 0-\(length - 1)/\(total)"],
+                bodyLength: length, resourceURL: url
+            ).get()
+            XCTAssertEqual(result.totalLength, Int64(total))
+        }
+    }
+
+    func testProbeRejectsShortOversizedAndEmptyPrefixes() {
+        for (range, count) in [
+            ("bytes 0-0/1000", 1), ("bytes 0-2/1000", 3),
+            ("bytes 0-999/1000", 1000), ("bytes 0-1/1000", 1),
+            ("bytes 0-1/1000", 3), ("bytes 0-0/1", 2), ("bytes */0", 0)
+        ] {
+            let result = RangeProbe.validateProbe(
+                status: 206, headers: ["ETag": "\"e\"", "Content-Range": range],
+                bodyLength: count, resourceURL: url
+            )
+            guard case .failure(.rangeValidationFailed) = result else {
+                return XCTFail("Invalid probe accepted: \(range), \(count) bytes")
+            }
         }
     }
 

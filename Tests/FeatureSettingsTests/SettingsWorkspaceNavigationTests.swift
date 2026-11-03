@@ -1,11 +1,80 @@
 #if canImport(SwiftUI)
 @testable import FeatureSettings
 import CoreUI
+import CoreModels
 import XCTest
 
 @MainActor
 final class SettingsWorkspaceNavigationTests: XCTestCase {
+    func testAdvancedPlaybackKeepsExternalPlayerWithoutRetiredConversionControls() throws {
+        let suite = "AdvancedPlaybackSettingsTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let external = ExternalPlayerSettingsModel(defaults: defaults)
+        let rows = PlaybackAdvancedSettingsView.rows(model: external)
+        let expectedIDs = ["external-player"]
+        XCTAssertEqual(rows.map(\.id), expectedIDs)
+        XCTAssertEqual(rows.first?.presentation, .page)
+        XCTAssertEqual(external.settings.player, .builtIn)
+    }
+
+    func testExternalPlayerKeepsAboutAndCustomDetailsBehindNestedPages() throws {
+        let suite = "ExternalPlayerSettingsTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = ExternalPlayerSettingsModel(defaults: defaults)
+        let advanced = ExternalPlayerSettingsRows.advanced(model: model)
+        XCTAssertEqual(advanced.map(\.id), ["external-player"])
+        XCTAssertEqual(advanced.first?.presentation, .page)
+        let external = try XCTUnwrap(advanced.first?.childRows?())
+        XCTAssertEqual(external.map(\.id), ["default-player", "external-player-help", "custom-player"])
+        XCTAssertEqual(external[1].presentation, .page)
+        XCTAssertEqual(external.last?.presentation, .page)
+        XCTAssertEqual(model.settings.player, .builtIn)
+        model.settings.player = .infuse
+        XCTAssertEqual(ExternalPlayerSettingsModel(defaults: defaults).settings.player, .infuse)
+        XCTAssertNil(defaults.object(forKey: "com.plozz.playbackSettings"))
+    }
+
     #if os(tvOS)
+    func testInlineSearchDoesNotPushAPageAndRetainsQueryAcrossResultNavigation() {
+        let navigation = SettingsNavigationModel()
+        navigation.pages.animationsEnabled = false
+        navigation.beginSearch()
+        XCTAssertTrue(navigation.isSearching)
+        XCTAssertEqual(navigation.section, .search)
+        XCTAssertTrue(navigation.path.isEmpty)
+        navigation.searchQuery = "subtitles"
+        let source = UUID()
+        navigation.pages.push(.searchResult("subtitle-size"), sourceID: source)
+        XCTAssertEqual(navigation.path, [.searchResult("subtitle-size")])
+        navigation.pages.pop()
+        navigation.restoreCategoryFocus()
+        XCTAssertEqual(navigation.searchQuery, "subtitles")
+        XCTAssertTrue(navigation.isSearching)
+        XCTAssertEqual(navigation.pages.returnSourceID, source)
+        navigation.endSearch()
+        XCTAssertFalse(navigation.isSearching)
+        XCTAssertTrue(navigation.searchQuery.isEmpty)
+        XCTAssertTrue(navigation.path.isEmpty)
+        XCTAssertEqual(navigation.section, .search)
+        XCTAssertTrue(navigation.restoringSidebar)
+        XCTAssertGreaterThan(navigation.sidebarFocusRequest, 0)
+    }
+
+    func testProfileResetClearsInlineSearchAndItsResult() {
+        let navigation = SettingsNavigationModel()
+        navigation.pages.animationsEnabled = false
+        navigation.beginSearch()
+        navigation.searchQuery = "server"
+        navigation.pages.push(.searchResult("servers"), sourceID: UUID())
+        navigation.resetForProfile()
+        XCTAssertFalse(navigation.isSearching)
+        XCTAssertTrue(navigation.searchQuery.isEmpty)
+        XCTAssertTrue(navigation.path.isEmpty)
+        XCTAssertEqual(navigation.section, .playback)
+    }
+
     func testSharedStackRetainsRepeatedRouteIdentityAndReturnsToItsSource() {
         let pages = SettingsPageNavigation<SettingsRoute>()
         pages.animationsEnabled = false
@@ -132,7 +201,7 @@ final class SettingsWorkspaceNavigationTests: XCTestCase {
 
     func testEveryCategoryIsTheFirstPageUntilExplicitReturn() {
         let navigation = SettingsNavigationModel()
-        for route: SettingsRoute in [.playback, .myLibraries, .appearance, .screensNavigation, .subtitles, .liveTV, .metadata, .about] {
+        for route: SettingsRoute in [.playback, .myLibraries, .appearance, .screensNavigation, .subtitles, .liveTV, .metadata, .topShelf, .about] {
             navigation.select(route)
             navigation.enterDetail()
             XCTAssertEqual(navigation.path, [route])
@@ -155,7 +224,7 @@ final class SettingsWorkspaceNavigationTests: XCTestCase {
 
     func testHouseholdRoutesRemainUnavailableToKidsEvenAfterUnlock() {
         let routes: [SettingsRoute] = [
-            .servers, .server(key: "server"), .profile, .parentalPIN,
+            .servers, .server(key: "server"), .profile, .parentalPIN, .topShelf,
             .metadata, .metadataDiagnostics, .seerr, .seerUserPicker(profileID: "child"),
             .syncSetup, .syncTroubleshooting, .profileSettings(profileID: "adult"),
             .profileAppearance(profileID: "adult"), .profileLockSetup(profileID: "adult")

@@ -10,10 +10,17 @@ variable, a public-posting notice, and the workflow on `main`.
 
 ## Behavior
 
-- A new human-authored forum post is compared with open GitHub issues of the
+- A new human-authored forum post is compared with open and closed GitHub issues of the
   appropriate kind. Copilot links a clearly equivalent report to an existing
   issue, or creates a new `bug` / `enhancement` issue when no confident match exists.
-  Closed issues are not candidates for new reports; existing links remain intact.
+  Closed originals remain candidates for delayed imports and cross-posts of the
+  same historical report. Original Discord creation time, subsequent human
+  replies, issue timestamps and stated builds help distinguish those from new
+  regressions. A link alone is not
+  proof of duplication; related problems, unsuccessful fixes and new regressions
+  must not be hidden under a closed issue. Matching never reopens an issue or
+  declares a fix delivered. Issues labeled `duplicate` are not new routing targets;
+  existing mappings remain intact.
 - Report text and subsequent human replies are copied to GitHub with attribution
   and links to their Discord originals. Edits update bridge-managed content.
   Maintainer text outside the marked regions is preserved.
@@ -26,7 +33,9 @@ variable, a public-posting notice, and the workflow on `main`.
   IDs breaking ties; editing an older comment does not move it to the end.
   A failed send stops later replies to that thread from overtaking it. Long
   comments are split without dropping content. Bot imports do not bounce between
-  services. The bridge never closes or reopens a GitHub issue.
+  services. Ordinary report mirroring never closes or reopens a GitHub issue.
+  The separate delivery watcher below closes explicitly declared fixes only
+  after external TestFlight availability.
 - Other channels, private threads, bot-created posts, and posts created before
   the published activation timestamp are excluded.
 
@@ -47,8 +56,9 @@ visibly; they do not silently create duplicates or choose another model.
 
 The configured server and forum IDs are in `tools/discord-bridge.py`. The bot needs
 View Channels, Read Message History, Send Messages in Threads, and Embed Links in
-both forums, plus Message Content Intent. Administrator, Presence Intent, and
-Server Members Intent are unnecessary. Set each forum's default reaction to
+both forums, plus Message Content Intent. Delivery-gated archival additionally
+needs Manage Threads in these two forums, not across the server.
+Administrator, Presence Intent, and Server Members Intent are unnecessary. Set each forum's default reaction to
 thumbs-up for a consistent voting affordance.
 
 Repository Actions secrets:
@@ -130,6 +140,35 @@ post. A conflicting human-owned title or multiple matching guides stops the
 operation. Ambiguous creation failures are not retried immediately; a later run
 rediscovers a successfully created guide.
 
+### TestFlight information channel
+
+The existing `#testflight` text channel can receive a separate bot-owned
+beta guide. Run **Discord issue bridge -> publish-testflight-guide** explicitly.
+This manual-only mode uses the existing Discord bot secret, no model or GitHub
+write token, and does not change the issue bridge or release-announcement schedule.
+
+The guide includes the public beta invitation, `https://plozz.app/testflight/`,
+an App Store fallback, beta reliability/expiry, Apple TV joining steps and the
+public bug-report notice. `TESTFLIGHT_GUIDE` in `tools/discord-bridge.py` owns
+its content. The bot finds one existing `testflight` channel in the configured
+Plozz server, verifies its identity and effective send/embed/history permissions,
+before posting. It never creates a channel. Ordinary publication works with the
+channel's existing permissions and does not change them. Give the bot a
+channel-specific Send Messages allow if needed; Administrator is not required.
+
+With explicit owner approval, the manual `make_testflight_read_only` input can
+configure that one existing channel. The bot must already have Manage Permissions
+there. The operation denies member messages, thread creation and thread replies,
+preserves unrelated permissions/visibility and existing staff overrides, and
+keeps the bot able to post. It verifies the changed permissions before posting.
+No server roles or other channels are changed. This option defaults off; it is
+never used by scheduled synchronization.
+
+Publication uses a stable bot-owned footer and deterministic nonce. Re-running
+updates the same guide, never modifies human messages, suppresses mentions and
+verifies the published content. Missing/ambiguous channels, duplicate bot
+markers, insufficient permissions and unconfirmed writes fail visibly.
+
 ## Operational limits and recovery
 
 Mappings live in the bot-authored GitHub report bodies/comments and Discord
@@ -145,10 +184,27 @@ voter set as a complete total. Check failed Actions runs rather than repeatedly
 rerunning a job without reading its error.
 
 Locked Discord threads retain inbound synchronization but defer outbound updates
-with a warning until unlocked. No Manage Threads permission is used. Posting a
-GitHub reply to an unlocked archived thread may unarchive it. Previously linked
-threads that disappear cause a visible failure rather than silently reducing
-their vote counts.
+with a warning until unlocked; the bridge never removes a moderator's lock.
+An unlocked archived thread is temporarily unarchived only when a message needs
+to change, then archived again, including after an edit fails. This avoids
+Discord rejecting edits to archived messages and preserves the post's prior
+state. Thread-management permission is required for these transitions.
+Previously linked threads missing from discovery are looked up directly by ID.
+They must still be public threads in the configured forums, created after the
+public notice. If Discord returns Unknown Channel (HTTP 404, code 10003), the
+bridge logs the thread and linked issue, preserves their imported content and
+the issue's last complete vote total, and continues processing other reports.
+It does not assume that the missing thread had zero votes or delete its mapping.
+Permission, transport, and eligibility failures remain visible failures, but are
+reported after the other available threads have been processed; vote totals are
+not updated on a failed run. A returning thread resumes its existing mapping
+without duplicate creation or reclassification.
+
+If Discord explicitly confirms that a starter message was deleted, the bridge
+logs a warning and retains the last imported report and vote total. Existing
+linked replies and outbound status can still synchronize. It never recreates a
+deleted starter or creates a new report from an empty thread. Access failures
+are not treated as deletions.
 
 Deletions are not propagated between services. For sensitive content, remove or
 edit the Discord source first, then remove every GitHub copy and any mirrored
@@ -162,9 +218,18 @@ Upload an important diagnostic attachment to GitHub separately if permanent
 availability there is required.
 
 Copilot matching is conservative, not infallible. An incorrect link needs a
-maintainer correction; ordinary reports do not require manual approval. Large
-backlogs can exceed API or matching-context budgets; those failures are explicit
-instead of silently truncating candidates or report text.
+maintainer correction; ordinary reports do not require manual approval. Candidate
+sets are checked in bounded batches without dropping closed issues or truncating
+report/candidate bodies. Confident matches to different issues across batches
+leave the report pending for triage rather than choosing an arbitrary target or
+creating another duplicate. A single oversized report/candidate, API budget or
+model failure is explicit.
+
+Maintainer-generated development findings follow the
+[issue-filing policy](../.github/CONTRIBUTING.md#development-pipeline): active,
+unreleased work stays in its current task, even after merging to main. The public
+support forums still accept genuine user reports and feature requests; missing
+version information is not proof that a user's report concerns unreleased work.
 
 Offline regression tests:
 
@@ -188,8 +253,13 @@ Uploads, internal availability, and pending review are not advertised as ready.
 The public beta link must still be enabled for that group.
 
 Each Apple version/build has one bot-owned message with its available platforms,
-Plozz display version, TestFlight link, and published GitHub release-notes link
-when available. Published releases read the catalog from their exact release tag
+Plozz display version, TestFlight link, and inline **New / Updated / Fixed** release
+notes plus a full-notes link when the GitHub release is published. Shared bullets
+appear once. Platform-specific bullets are labeled when both platforms are
+available; notes for a platform still waiting for review are not displayed.
+If a platform has no applicable changes, the message says so.
+
+Published releases read the catalog from their exact release tag
 and validate its release ID, build, and Apple version against TestFlight. The
 public date does not depend on the release entry already being merged into `main`.
 An unreadable or mismatched tagged catalog fails visibly rather than substituting
@@ -197,8 +267,14 @@ Apple's retained marketing version.
 
 Before a GitHub release is published, the bot uses a matching entry from `main`
 if present; otherwise it announces only the build number, without inventing a
-public date. It directs readers to TestFlight's notes and adds the public date
-and release link on a later check. Platform availability and label corrections
+public date. It directs readers to TestFlight's notes; mutable `main` notes are
+not copied into the announcement. Once a matching release tag is published,
+the bot adds its inline notes, public date and full-notes link on a later check.
+Descriptions respect Discord's 4,096 UTF-16-unit limit. Oversized notes retain
+whole bullets in order and explicitly state that they were shortened, with
+a link to the complete published notes. No bullet is silently cut in half.
+
+Platform availability, notes and label corrections
 update the same message instead of creating another announcement. Dotted hotfix
 builds remain distinct and sort numerically.
 
@@ -239,4 +315,100 @@ this workflow, not `fastlane beta`.
 ```bash
 python3 -m unittest discover -s tools/tests -p 'test_*discord*.py'
 actionlint .github/workflows/testflight-discord.yml
+```
+
+## Delivery-gated issue resolution
+
+**TestFlight issue resolutions** is a separate scheduled GitHub Actions workflow
+on GitHub-hosted Ubuntu runners. It runs approximately every 15 minutes and on
+published releases. It uses no Copilot/LLM, local session, local daemon, or
+self-hosted runner. It does not run inside Fastlane, delay a release, rebuild
+anything, or change App Store Connect. Ordinary new-report matching remains a
+separate hosted bridge operation.
+
+Use the [commit trailer](../.github/CONTRIBUTING.md#commit-issue-references) only
+when an issue is fully resolved. A non-closing `Refs #123` alone never enrolls an
+issue. The watcher reads declarations from `main` and verified available release
+tags, so an intentionally distributed branch release is supported too. Tagged
+code is never executed. New declarations use `TestFlight-Issue: 123 [tvOS,iOS]`,
+with `Refs #123` separately. The old closing-keyword trailer is read only for
+compatibility. A terminal, blank-separated `Copilot-Session` UUID footer from
+older clients is recognized without rewriting history; prose or examples outside
+the actual trailer block never enroll a report.
+
+For each declaration it:
+
+1. Leaves the issue open and records `awaiting release`, with a bot-owned comment
+   identifying the fixing commit and affected platforms.
+2. Verifies actual external availability using the same read-only Apple checks
+   as build announcements. A published GitHub release and matching tagged
+   catalog must also exist; the fixing commit must be an ancestor of that exact
+   source. Uploads, internal builds, pending review, and unrelated tags do not
+   qualify.
+3. Records the first **observed and verified** delivered build for each affected
+   platform. Partial availability is reported but does not close the issue.
+   Numeric dotted builds remain distinct. A build disappearing later does not
+   erase its recorded delivery history, but closing still requires a qualifying
+   currently available build on every affected platform.
+4. Posts a new build-specific delivery comment, closes GitHub as completed, then
+   mirrors that comment and archives every already-linked Discord report.
+   Archival is not deletion or locking: history remains accessible, and a new
+   reply can reopen an unlocked Discord post.
+
+GitHub comments hold durable delivery receipts; Discord bot footers retain
+message identity. A retry does not create another delivery notification. Each
+platform keeps its own build number if Apple releases them separately. A human
+reopen is respected: the same declaration cannot close the issue again; add a
+new trailer on the actual follow-up fix. Reopen protection starts at the fixing
+commit, even before the bot's first receipt, and is not reset by a later delivery
+notification. Competing nonancestor declarations, malformed metadata, and
+recognized Git reverts fail closed. Malformed declarations quarantine their
+referenced issues rather than block unrelated valid fixes; a new complete
+declaration after the malformed commit supersedes its issue's quarantine; the
+historical error clears once every affected issue is superseded. Unidentifiable malformed
+declarations also block older candidates. The run reports declaration errors and
+exits unsuccessfully even when unrelated reports synchronize successfully.
+After withdrawing
+an implementation, remove its `awaiting release` label; a replacement needs a
+new complete-fix declaration. As with any explicit resolution marker, maintainers
+must not leave a declaration claiming a fix that subsequent changes undo.
+
+The watcher deliberately does not guess historical first-fixed builds, inspect
+arbitrary commit wording, or bulk reopen/close older issues. There are no
+automatic enrollments for the issue audit that preceded this workflow.
+
+### Activation
+
+The watcher reuses the existing `TESTFLIGHT_ASC_*` read-only Apple credentials,
+`DISCORD_BOT_TOKEN`, and `TESTFLIGHT_DISCORD_MIN_BUILD`; it never receives
+`COPILOT_GITHUB_TOKEN`. Its job-scoped GitHub token gets `issues: write`.
+
+1. Give the existing bot **Manage Threads** in `bugs` and `feature-requests`,
+   alongside its existing view, history, embed, and thread-send permissions.
+   Administrator and Manage Channels are not needed.
+2. Merge the reviewed workflow to `main`. Run it manually in `check` mode to
+   verify source/Apple data, forum notices, effective permissions, and proposed
+   actions without posting, labeling, archiving, or closing anything.
+3. Set repository variable `TESTFLIGHT_RESOLUTION_ENABLED=true` and run `sync`.
+   `DISCORD_BRIDGE_ENABLED=true` and both public notices remain prerequisites
+   for Discord updates. Disable the resolution variable to stop automatic
+   GitHub closure and delivery-based Discord archival.
+
+Live checks always execute scripts from `main`, not a manually selected branch
+or release tag. Push-triggered tests use no secrets. Resolution delivery and
+ordinary report mirroring share an Actions concurrency group to prevent races,
+but release announcements and the local archive/upload lane remain independent.
+Discord delivery does not require new-report matching or a model call; it can
+retry even when ordinary report classification is failing.
+
+Failures remain visible in Actions. A GitHub close can succeed while a Discord
+send/archive is pending; the next run retries the Discord work without another
+GitHub closure or notification. Locked posts remain pending rather than having
+their locks removed. Keep bot-owned resolution comments and message footers
+intact; removing these durable records can prevent recovery or permit a replay.
+
+```bash
+python3 -m unittest discover -s tools/tests -p 'test_*discord*.py'
+python3 -m unittest discover -s tools/tests -p 'test_testflight_resolutions.py'
+actionlint .github/workflows/discord-bridge.yml .github/workflows/testflight-discord.yml .github/workflows/testflight-resolutions.yml
 ```

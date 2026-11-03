@@ -31,6 +31,10 @@ public extension MediaItem {
         )
         if originalTitle?.isEmpty != false { originalTitle = donor.originalTitle }
         if overview?.isEmpty != false { overview = donor.overview }
+        if seriesSynopsis?.matches(self) != true,
+           let synopsis = donor.seriesSynopsis, synopsis.matches(self) {
+            seriesSynopsis = synopsis
+        }
         if productionYear == nil { productionYear = donor.productionYear }
         if releaseDate == nil { releaseDate = donor.releaseDate }
         if officialRating?.isEmpty != false {
@@ -101,6 +105,7 @@ public extension MediaItem {
         }
         if availability == nil { availability = donor.availability }
         if downloadProgress == nil { downloadProgress = donor.downloadProgress }
+        if hasRequestDownloadActivity == nil { hasRequestDownloadActivity = donor.hasRequestDownloadActivity }
         if mediaInfo == nil { mediaInfo = donor.mediaInfo }
     }
 }

@@ -1,12 +1,403 @@
 import XCTest
 import CoreModels
+import CoreNetworking
+import CoreUI
 import MetadataKit
 import RatingsService
 import Observation
 @testable import FeatureHome
+@testable import FeatureHomeCore
+
+private final class ServerRatingsFakeProvider: FakeMediaProvider, ServerRatingsProviding, @unchecked Sendable {
+    var serverRatingsHandler: (@Sendable (MediaItem) async throws -> [ExternalRating]?)?
+
+    func serverRatings(for item: MediaItem) async throws -> [ExternalRating]? {
+        try await serverRatingsHandler?(item)
+    }
+}
+
+private final class SeriesResumeFakeProvider: FakeMediaProvider, SeriesResumeProviding, @unchecked Sendable {
+    var resumeHandler: (@Sendable (String) async throws -> MediaItem?)?
+
+    func resumeEpisode(inSeries seriesID: String) async throws -> MediaItem? {
+        try await resumeHandler?(seriesID)
+    }
+}
 
 @MainActor
 final class ItemDetailViewModelTests: XCTestCase {
+    func testServerRatingsDoNotDelayDetailLoadOrReplaceContentWithAPlaceholder() async {
+        let native = ExternalRating(source: .community, value: 7, scale: .outOfTen)
+        let supplied = ExternalRating(source: .imdb, value: 8.7, scale: .outOfTen)
+        let item = MediaItem(id: "movie", title: "Immediate title", kind: .movie, ratings: [native])
+        let started = AsyncGate()
+        let release = AsyncGate()
+        let provider = ServerRatingsFakeProvider(allItems: [item])
+        provider.serverRatingsHandler = { _ in
+            started.open()
+            await release.wait()
+            return [supplied]
+        }
+        let external = CapturingDiscoveryRatingsProvider()
+        let vm = ItemDetailViewModel(
+            provider: provider, itemID: item.id, ratingsProvider: external,
+            onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+            trailerCache: TrailerResolutionCache()
+        )
+        let returned = expectation(description: "Detail load returns without optional metadata")
+        let load = Task { await vm.load(); returned.fulfill() }
+        await started.wait()
+        await fulfillment(of: [returned], timeout: 1)
+        XCTAssertEqual(vm.state.value?.item.title, item.title)
+        XCTAssertEqual(vm.state.value?.item.ratings, [native])
+        XCTAssertNil(external.seenItem)
+        release.open()
+        await load.value
+        await vm.waitForServerRatings()
+        XCTAssertEqual(vm.state.value?.item.ratings, [supplied])
+        XCTAssertEqual(vm.state.value?.item.usesProviderRatings, true)
+        XCTAssertNil(external.seenItem, "A supplied set must not initiate client-side rating lookups.")
+        vm.suspendEnrichment()
+    }
+
+    func testMissingServerRatingsUseExistingFallbackWithoutHoldingLoadOpen() async {
+        let item = MediaItem(id: "movie", title: "Title", kind: .movie)
+        let release = AsyncGate()
+        let provider = ServerRatingsFakeProvider(allItems: [item])
+        provider.serverRatingsHandler = { _ in await release.wait(); return nil }
+        let external = CapturingDiscoveryRatingsProvider()
+        let vm = ItemDetailViewModel(
+            provider: provider, itemID: item.id, ratingsProvider: external,
+            onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+            trailerCache: TrailerResolutionCache()
+        )
+        let returned = expectation(description: "Detail load returns with a missing server rating response pending")
+        let load = Task { await vm.load(); returned.fulfill() }
+        await fulfillment(of: [returned], timeout: 1)
+        XCTAssertEqual(vm.state.value?.item.title, item.title)
+        XCTAssertNil(external.seenItem)
+        release.open()
+        await load.value
+        await vm.waitForServerRatings()
+        XCTAssertEqual(external.seenItem?.id, item.id)
+        XCTAssertFalse(vm.state.value?.item.ratings.isEmpty ?? true)
+        vm.suspendEnrichment()
+    }
+
+    func testLeavingDetailCancelsOptionalServerMetadataAndDoesNotFetchFallback() async {
+        let item = MediaItem(id: "movie", title: "Title", kind: .movie)
+        let started = expectation(description: "Optional request started")
+        let cancelled = expectation(description: "Optional request cancelled")
+        let provider = ServerRatingsFakeProvider(allItems: [item])
+        provider.serverRatingsHandler = { _ in
+            started.fulfill()
+            do {
+                try await Task.sleep(for: .seconds(30))
+            } catch {
+                cancelled.fulfill()
+                throw error
+            }
+            return nil
+        }
+        let external = CapturingDiscoveryRatingsProvider()
+        let vm = ItemDetailViewModel(
+            provider: provider, itemID: item.id, ratingsProvider: external,
+            onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+            trailerCache: TrailerResolutionCache()
+        )
+        await vm.load()
+        await fulfillment(of: [started], timeout: 1)
+        vm.suspendEnrichment()
+        await fulfillment(of: [cancelled], timeout: 1)
+        XCTAssertNil(external.seenItem)
+        XCTAssertEqual(vm.state.value?.item.usesProviderRatings, false)
+    }
+
+    func testConfirmedNoStreamsReplacesStaleInventoryAndExplicitRetryCanRecover() async throws {
+        for isEpisode in [false, true] {
+            let root = MediaItem(id: "root", title: "Title", kind: isEpisode ? .series : .movie)
+            let target = isEpisode ? MediaItem(id: "episode", title: "Episode", kind: .episode) : root
+            var available = target
+            available.versions = [.init(id: "4k"), .init(id: "hd")]
+            let resolved = available
+            let provider = FakeMediaProvider(allItems: isEpisode ? [root, target] : [root])
+            provider.childrenByParent = ["root": []]
+            provider.playbackInventoryRequiresEnrichment = true
+            provider.playbackItemHandler = { _ in throw StreamingQualityError.noStreams }
+            let vm = ItemDetailViewModel(
+                provider: provider, itemID: root.id, sourceAccountID: "server",
+                onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+                trailerCache: TrailerResolutionCache()
+            )
+            await vm.load()
+            XCTAssertFalse(vm.hasNoPlaybackStreams(for: target), "Browsing must not discover playback sources.")
+            do { _ = try await vm.loadPlaybackVersions(for: target); XCTFail("Expected no streams.") }
+            catch { XCTAssertEqual(error as? StreamingQualityError, .noStreams) }
+            XCTAssertFalse(vm.hasNoPlaybackStreams(for: target.taggingSource("other")))
+            XCTAssertTrue(vm.episodeWithEnrichedBadges(available).versions.isEmpty)
+            provider.playbackItemHandler = { _ in throw URLError(.timedOut) }
+            await vm.retryPlaybackInventory(for: target)
+            XCTAssertNotNil(vm.playbackInventoryRetryError, "An explicit retry must surface its network failure.")
+            XCTAssertTrue(vm.hasNoPlaybackStreams(for: target), "A timeout does not replace the last confirmed inventory.")
+
+            let entered = AsyncGate()
+            let release = AsyncGate()
+            let calls = LockedCounter()
+            provider.playbackItemHandler = { _ in
+                _ = calls.increment()
+                entered.open()
+                await release.wait()
+                return resolved
+            }
+
+            _ = await EnrichmentScheduler.shared.bumpGeneration()
+            let retry = Task { await vm.retryPlaybackInventory(for: target) }
+            await entered.wait()
+            XCTAssertTrue(vm.isRetryingPlaybackInventory(for: target))
+            XCTAssertNil(vm.playbackInventoryRetryError)
+            await vm.retryPlaybackInventory(for: target)
+            XCTAssertEqual(calls.value, 1, "Coalesce repeat taps; do not negotiate or start playback.")
+            release.open()
+            await retry.value
+            XCTAssertFalse(vm.hasNoPlaybackStreams(for: target))
+            XCTAssertFalse(vm.isRetryingPlaybackInventory(for: target))
+            let displayed = isEpisode ? vm.episodeWithEnrichedBadges(target) : vm.state.value?.item
+            XCTAssertEqual(displayed?.versions, resolved.versions)
+            vm.suspendEnrichment()
+        }
+    }
+
+    func testFailedInventoryIsNotTreatedAsConfirmedNoStreams() async {
+        let errors: [any Error] = [URLError(.timedOut), AppError.invalidResponse, StreamingQualityError.sourceUnavailable]
+        for error in errors {
+            let root = series("show")
+            let target = episode("episode", number: 1)
+            let provider = FakeMediaProvider(allItems: [root])
+            provider.playbackInventoryRequiresEnrichment = true
+            provider.playbackItemHandler = { _ in throw error }
+            let vm = ItemDetailViewModel(provider: provider, itemID: root.id)
+            await vm.load()
+            do { _ = try await vm.loadPlaybackVersions(for: target); XCTFail("Expected inventory failure.") }
+            catch { }
+            XCTAssertFalse(vm.hasNoPlaybackStreams(for: target))
+            vm.suspendEnrichment()
+        }
+    }
+
+    func testNoStreamsAndLateRetryAreScopedToTheSelectedServer() async {
+        let item = MediaItem(id: "same", title: "Movie", kind: .movie)
+        let provider = FakeMediaProvider(allItems: [item])
+        provider.playbackInventoryRequiresEnrichment = true
+        provider.playbackItemHandler = { _ in throw StreamingQualityError.noStreams }
+        let other = FakeMediaProvider(allItems: [item])
+        let vm = ItemDetailViewModel(
+            provider: provider, itemID: item.id, sourceAccountID: "first",
+            onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+            trailerCache: TrailerResolutionCache(),
+            initialSources: [.init(accountID: "first", itemID: item.id), .init(accountID: "second", itemID: item.id)],
+            alternateProviderResolver: { _ in other }
+        )
+        await vm.load()
+        do { _ = try await vm.loadPlaybackVersions(for: item); XCTFail("Expected no streams.") }
+        catch { XCTAssertEqual(error as? StreamingQualityError, .noStreams) }
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        provider.playbackItemHandler = { _ in
+            entered.open()
+            await release.wait()
+            throw StreamingQualityError.noStreams
+        }
+        let retry = Task { await vm.retryPlaybackInventory(for: item) }
+        await entered.wait()
+        await vm.switchToSource(accountID: "second")
+        release.open()
+        await retry.value
+        XCTAssertFalse(vm.hasNoPlaybackStreams(for: item))
+        XCTAssertFalse(vm.isRetryingPlaybackInventory(for: item))
+        XCTAssertNil(vm.playbackInventoryRetryError)
+        vm.suspendEnrichment()
+    }
+
+    func testExplicitInventoryUpdatesDetailMenuWithoutBlockingHeroOrLosingToDiscovery() async throws {
+        let item = MediaItem(id: "movie", title: "Movie", kind: .movie, sourceAccountID: "account")
+        var resolved = item
+        resolved.versions = [.init(id: "hd"), .init(id: "4k")]
+        let inventory = resolved
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        let discoveryRelease = AsyncGate()
+        let primary = MediaSourceRef(accountID: "account", itemID: item.id, kind: .movie)
+        let alternate = MediaSourceRef(
+            accountID: "account", itemID: "alternate", kind: .movie, versions: [.init(id: "alternate-file")]
+        )
+        let provider = FakeMediaProvider(allItems: [item])
+        provider.playbackInventoryRequiresEnrichment = true
+        provider.playbackItemHandler = { _ in
+            entered.open()
+            await release.wait()
+            return inventory
+        }
+        let vm = ItemDetailViewModel(
+            provider: provider, itemID: item.id,
+            sourceAccountID: "account",
+            onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+            trailerCache: TrailerResolutionCache(),
+            crossServerSourceResolver: { _ in
+                await discoveryRelease.wait()
+                return CrossServerSourceResolution(sources: [primary, alternate])
+            }
+        )
+        defer {
+            release.open()
+            discoveryRelease.open()
+            vm.suspendEnrichment()
+        }
+        await vm.load()
+        XCTAssertNotNil(vm.playbackVersionsLoader(for: item), "Explicit inventory loading remains available to callers.")
+        let lookup = Task { try await vm.loadPlaybackVersions(for: item) }
+        await entered.wait()
+        XCTAssertEqual(vm.state.value?.item.title, "Movie")
+        XCTAssertEqual(vm.state.value?.item.versions, [])
+        release.open()
+        _ = try await lookup.value
+        await waitUntil { vm.state.value?.item.versions.count == 2 }
+        discoveryRelease.open()
+        await waitUntil { vm.sources.count == 2 }
+        let displayed = try XCTUnwrap(vm.state.value?.item)
+        let versions = DetailPlaybackSelection.versions(for: displayed, sources: vm.sources, activeAccountID: "account")
+        XCTAssertEqual(Set(versions.compactMap(\.playbackMediaSourceID)), ["hd", "4k", "alternate-file"])
+    }
+
+    func testSuspendedDetailCannotPublishLateInventoryOrAutomaticallyRetryOnReturn() async throws {
+        let item = MediaItem(id: "movie", title: "Movie", kind: .movie, sourceAccountID: "account")
+        var resolved = item
+        resolved.versions = [.init(id: "hd"), .init(id: "4k")]
+        let inventory = resolved
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        let returned = AsyncGate()
+        let calls = LockedCounter()
+        let provider = FakeMediaProvider(allItems: [item])
+        provider.playbackInventoryRequiresEnrichment = true
+        provider.playbackItemHandler = { _ in
+            let call = calls.increment()
+            entered.open()
+            await release.wait()
+            if call == 1 { returned.open() }
+            return inventory
+        }
+        let vm = ItemDetailViewModel(
+            provider: provider, itemID: item.id, sourceAccountID: "account",
+            onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+            trailerCache: TrailerResolutionCache()
+        )
+        await vm.load()
+        XCTAssertEqual(calls.value, 0)
+        let lookup = Task { try await vm.loadPlaybackVersions(for: item) }
+        await entered.wait()
+        vm.suspendEnrichment()
+        lookup.cancel()
+        release.open()
+        await returned.wait()
+        do { _ = try await lookup.value; XCTFail("Suspended detail must reject a late response.") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(vm.state.value?.item.versions, [])
+        vm.resumeEnrichmentIfNeeded()
+        XCTAssertEqual(calls.value, 1, "Returning to a detail must not repeat source discovery.")
+        _ = try await vm.loadPlaybackVersions(for: item)
+        XCTAssertEqual(calls.value, 2)
+        vm.suspendEnrichment()
+    }
+
+    func testExplicitVersionPickerDiscoversLazySameAccountAlternateFiles() async throws {
+        let item = MediaItem(id: "movie", title: "Movie", kind: .movie, sourceAccountID: "account")
+        let source = MediaSourceRef(accountID: "account", itemID: item.id, kind: .movie)
+        let alternate = MediaSourceRef(accountID: "account", itemID: "alternate", kind: .movie)
+        let provider = FakeMediaProvider(allItems: [item])
+        let calls = LockedCounter()
+        provider.playbackInventoryRequiresEnrichment = true
+        provider.playbackItemHandler = { id in
+            _ = calls.increment()
+            return MediaItem(
+                id: id, title: "Movie", kind: .movie, sourceAccountID: "account",
+                versions: [.init(id: "\(id)-hd"), .init(id: "\(id)-4k")]
+            )
+        }
+        let vm = ItemDetailViewModel(
+            provider: provider, itemID: item.id, sourceAccountID: "account",
+            initialSources: [source, alternate]
+        )
+        await vm.load()
+        XCTAssertEqual(calls.value, 0)
+        let loader = try XCTUnwrap(vm.playbackVersionsLoader(for: item))
+        let versions = try await loader.load()
+        XCTAssertEqual(calls.value, 2)
+        XCTAssertEqual(Set(versions.compactMap(\.playbackMediaSourceID)),
+                       ["movie-hd", "movie-4k", "alternate-hd", "alternate-4k"])
+        XCTAssertEqual(Set(versions.compactMap(\.sourceItemID)), ["movie", "alternate"])
+        vm.suspendEnrichment()
+    }
+
+    func testLateAlternateMetadataKeepsDiscoveredFilesWhileUpdatingWatchState() async throws {
+        let item = MediaItem(id: "movie", title: "Movie", kind: .movie, sourceAccountID: "account")
+        var alternateItem = MediaItem(id: "alternate", title: "Movie", kind: .movie, sourceAccountID: "account")
+        alternateItem.resumePosition = 91
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        let metadata = FakeMediaProvider(allItems: [alternateItem])
+        metadata.itemGate = ["alternate": { entered.open(); await release.wait() }]
+        let provider = FakeMediaProvider(allItems: [item])
+        provider.playbackInventoryRequiresEnrichment = true
+        provider.playbackItemHandler = { id in
+            MediaItem(
+                id: id, title: "Movie", kind: .movie, sourceAccountID: "account",
+                versions: [.init(id: "\(id)-hd"), .init(id: "\(id)-4k")]
+            )
+        }
+        let vm = ItemDetailViewModel(
+            provider: provider, itemID: item.id, sourceAccountID: "account",
+            initialSources: [.init(accountID: "account", itemID: item.id, kind: .movie),
+                             .init(accountID: "account", itemID: "alternate", kind: .movie)],
+            alternateProviderResolver: { _ in metadata }
+        )
+        await vm.load()
+        await entered.wait()
+        _ = try await vm.loadPlaybackVersions(for: item)
+        release.open()
+        await waitUntil { vm.sources.first { $0.itemID == "alternate" }?.resumePosition == 91 }
+        XCTAssertEqual(vm.sources.first { $0.itemID == "alternate" }?.versions.map(\.id),
+                       ["alternate-hd", "alternate-4k"])
+        vm.suspendEnrichment()
+    }
+
+    func testLatePassiveEpisodeMetadataCannotEraseExplicitInventory() async throws {
+        let root = series("show")
+        let item = MediaItem(id: "episode", title: "Episode", kind: .episode, sourceAccountID: "account")
+        let provider = FakeMediaProvider(allItems: [root, item])
+        provider.childrenByParent = ["show": []]
+        provider.playbackInventoryRequiresEnrichment = true
+        let vm = ItemDetailViewModel(provider: provider, itemID: root.id, sourceAccountID: "account")
+        await vm.load()
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        provider.itemGate = ["episode": {
+            entered.open()
+            await release.wait()
+        }]
+        provider.playbackItemHandler = { _ in
+            var resolved = item
+            resolved.versions = [.init(id: "hd"), .init(id: "4k")]
+            return resolved
+        }
+        let passive = Task { await vm.enrichEpisodeBadgesIfNeeded(item) }
+        await entered.wait()
+        _ = try await vm.loadPlaybackVersions(for: item)
+        release.open()
+        _ = await passive.value
+        XCTAssertEqual(vm.episodeWithEnrichedBadges(item).versions.map(\.id), ["hd", "4k"])
+        vm.suspendEnrichment()
+    }
+
     func testAllProvidersFillDetailGapsAfterHydrationWithoutReplacingServerCrew() async {
         for kind: ProviderKind in [.plex, .jellyfin, .emby, .silo, .mediaShare] {
             let director = MediaPerson(id: "server-director", name: "Server director", kind: "Director")
@@ -92,11 +483,14 @@ final class ItemDetailViewModelTests: XCTestCase {
             )
             let load = Task { await vm.load() }
             if holdResume {
-                await waitUntil { provider.childrenCallCount[show.id] == 1 }
+                await waitUntil { vm.state.value?.childrenLoaded == true }
                 XCTAssertTrue(vm.isResolvingServerResume)
-                XCTAssertEqual(vm.state.value?.childrenLoaded, false)
-                XCTAssertEqual(vm.state.value?.children.map(\.id), [])
+                XCTAssertEqual(vm.state.value?.children.map(\.id), ["s4"])
                 XCTAssertNil(vm.serverResumeEpisode)
+                XCTAssertTrue(SeriesEpisodeEntry.waitsForResume(
+                    isResolving: vm.isResolvingServerResume,
+                    hasResumeSeed: false, hasExplicitSelection: false
+                ))
             } else {
                 await waitUntil { vm.serverResumeEpisode != nil }
                 XCTAssertEqual(vm.serverResumeEpisode?.id, resume.id)
@@ -118,7 +512,145 @@ final class ItemDetailViewModelTests: XCTestCase {
         }
     }
 
-    func testDetailFactorySeedsTheCurrentEpisodeAndMovieProgressBeforeAnyLoad() {
+    func testGoToShowPublishesSeasonsWhileResumeLookupIsStillPending() async throws {
+        for kind in [ProviderKind.plex, .jellyfin, .emby] {
+            let show = MediaItem(id: "show", title: "Show", kind: .series, sourceAccountID: "account")
+            let seasons = [1, 4].map { (number: Int) in
+                MediaItem(id: "s\(number)", title: "Season \(number)", kind: .season, seasonNumber: number)
+            }
+            let episode = MediaItem(
+                id: "s4e2", title: "Episode", kind: .episode, parentTitle: show.title,
+                seasonNumber: 4, episodeNumber: 2, seriesID: show.id, seasonID: "s4",
+                sourceAccountID: "account"
+            )
+            let target = try XCTUnwrap(episode.navigationTarget(for: .goToSeason))
+            let provider: FakeMediaProvider = kind == .plex
+                ? FakeMediaProvider(allItems: [show], kind: kind)
+                : SeriesResumeFakeProvider(allItems: [show], kind: kind)
+            provider.childrenByParent = [show.id: seasons, "s4": [episode]]
+            let resumeStarted = expectation(description: "\(kind) resume lookup started")
+            let releaseResume = AsyncGate()
+            let resume = MediaItem(
+                id: "s1e1", title: "Resume", kind: .episode,
+                seriesID: show.id, seasonID: "s1", resumePosition: 100
+            )
+            if let scoped = provider as? SeriesResumeFakeProvider {
+                scoped.resumeHandler = { seriesID in
+                    XCTAssertEqual(seriesID, show.id)
+                    resumeStarted.fulfill()
+                    await releaseResume.wait()
+                    return resume
+                }
+            } else {
+                provider.continueWatchingItems = [resume]
+                provider.continueWatchingGate = {
+                    resumeStarted.fulfill()
+                    await releaseResume.wait()
+                }
+            }
+            let vm = ItemDetailViewModel(
+                provider: provider, itemID: target.id, initialItem: target, sourceAccountID: "account",
+                onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+                trailerCache: TrailerResolutionCache()
+            )
+            let load = Task { await vm.load() }
+            await fulfillment(of: [resumeStarted], timeout: 1)
+            await waitUntil { vm.state.value?.childrenLoaded == true }
+            XCTAssertEqual(vm.state.value?.children.map(\.id), ["s1", "s4"])
+            XCTAssertTrue(vm.isResolvingServerResume)
+            let selected = SeriesResume.openingSeasonID(
+                seasons: vm.state.value?.children ?? [], episodes: [],
+                selectedSeasonID: nil, preserveSelection: false,
+                initialSeasonID: target.seasonID, initialEpisode: nil, resumeEpisode: vm.serverResumeEpisode
+            )
+            XCTAssertEqual(selected, "s4")
+            if let selected {
+                await vm.loadEpisodes(for: selected)
+                XCTAssertEqual(vm.episodes(for: selected)?.map(\.id), [episode.id])
+                XCTAssertFalse(SeriesEpisodeEntry.waitsForResume(
+                    isResolving: vm.isResolvingServerResume,
+                    hasResumeSeed: vm.serverResumeEpisode != nil, hasExplicitSelection: true
+                ))
+            }
+            releaseResume.open()
+            await load.value
+            XCTAssertEqual(vm.serverResumeEpisode?.id, resume.id)
+            XCTAssertEqual(SeriesResume.openingSeasonID(
+                seasons: vm.state.value?.children ?? [], episodes: [],
+                selectedSeasonID: selected, preserveSelection: false,
+                initialSeasonID: target.seasonID, initialEpisode: nil, resumeEpisode: vm.serverResumeEpisode
+            ), "s4", "Late resume must not override Go to Show's explicit season")
+            XCTAssertEqual(vm.episodes(for: "s4")?.map(\.id), [episode.id])
+            vm.suspendEnrichment()
+        }
+    }
+
+    func testGoToShowFetchFailureExitsLoadingAndCanBeRetried() async throws {
+        let episode = MediaItem(
+            id: "episode", title: "Episode", kind: .episode,
+            seriesID: "show", seasonID: "season", sourceAccountID: "account"
+        )
+        let target = try XCTUnwrap(episode.navigationTarget(for: .goToSeason))
+        let provider = FakeMediaProvider(allItems: [])
+        let vm = ItemDetailViewModel(
+            provider: provider, itemID: target.id, initialItem: target, sourceAccountID: "account",
+            onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+            trailerCache: TrailerResolutionCache()
+        )
+        await vm.load()
+        guard case .failed(.notFound) = vm.state else {
+            vm.suspendEnrichment()
+            return XCTFail("A bare show seed must not remain loading after its request failed")
+        }
+        let season = MediaItem(id: "season", title: "Season", kind: .season)
+        provider.allItems = [target]
+        provider.childrenByParent = [target.id: [season]]
+        await vm.load()
+        XCTAssertEqual(vm.state.value?.childrenLoaded, true)
+        XCTAssertEqual(vm.state.value?.children.map(\.id), [season.id])
+        vm.suspendEnrichment()
+    }
+
+    func testCancelledShowFetchKeepsTheSeedWithoutReportingFailure() async {
+        let show = MediaItem(id: "show", title: "Show", kind: .series)
+        let provider = FakeMediaProvider(allItems: [])
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        provider.itemGate = [show.id: { entered.open(); await release.wait() }]
+        let vm = ItemDetailViewModel(
+            provider: provider, itemID: show.id, initialItem: show,
+            onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+            trailerCache: TrailerResolutionCache()
+        )
+        let load = Task { await vm.load() }
+        await entered.wait()
+        load.cancel()
+        release.open()
+        await load.value
+        XCTAssertEqual(vm.state.value?.item.id, show.id)
+        vm.suspendEnrichment()
+    }
+
+    func testFailedShowRefreshPreservesPreviouslyLoadedSeasons() async {
+        let show = MediaItem(id: "show", title: "Show", kind: .series)
+        let season = MediaItem(id: "s1", title: "Season 1", kind: .season)
+        let provider = FakeMediaProvider(allItems: [show])
+        provider.childrenByParent = [show.id: [season]]
+        let vm = ItemDetailViewModel(
+            provider: provider, itemID: show.id, initialItem: show,
+            onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+            trailerCache: TrailerResolutionCache()
+        )
+        await vm.load()
+        provider.allItems = []
+        await vm.load()
+        XCTAssertEqual(vm.state.value?.item.id, show.id)
+        XCTAssertEqual(vm.state.value?.childrenLoaded, true)
+        XCTAssertEqual(vm.state.value?.children.map(\.id), [season.id])
+        vm.suspendEnrichment()
+    }
+
+    func testDetailFactorySeedsTheCurrentEpisodeAndMovieProgressBeforeAnyLoad() throws {
         let provider = FakeMediaProvider(allItems: [], kind: .plex)
         let show = MediaItem(id: "show", title: "Show", kind: .series, sourceAccountID: "plex")
         let episode = MediaItem(
@@ -143,7 +675,7 @@ final class ItemDetailViewModelTests: XCTestCase {
             continueWatchingSnapshot: { [episode, movieResume] }
         )
 
-        let seriesVM = environment.makeViewModel(for: show, libraryOrigin: nil)
+        let seriesVM = try environment.makeViewModel(for: show, libraryOrigin: nil)
         XCTAssertEqual(seriesVM.serverResumeEpisode?.id, "s4e1")
         XCTAssertEqual(seriesVM.serverResumeEpisode?.resumePosition, 867)
         XCTAssertEqual(
@@ -151,10 +683,10 @@ final class ItemDetailViewModelTests: XCTestCase {
             episode.id
         )
 
-        let movieVM = environment.makeViewModel(for: movie, libraryOrigin: nil)
+        let movieVM = try environment.makeViewModel(for: movie, libraryOrigin: nil)
         XCTAssertEqual(movieVM.state.value?.item.resumePosition, 800)
         XCTAssertEqual(movieVM.state.value?.item.resumeProgressFraction, 0.4)
-        let contextVM = environment.makeSeriesContextViewModel(
+        let contextVM = try environment.makeSeriesContextViewModel(
             seriesID: show.id, seed: episode,
             sourceAccountID: "plex", originAccountID: nil
         )
@@ -415,7 +947,7 @@ final class ItemDetailViewModelTests: XCTestCase {
         vm.suspendEnrichment()
     }
 
-    func testFullAlternateRejectionRemovesDependentIndexBridge() async {
+    func testFullAlternateRejectionRemovesDependentIndexBridge() async throws {
         let a = MediaItem(id: "a", title: "Movie", kind: .movie,
                           providerIDs: ["Imdb": "tt111", "Tmdb": "123"], sourceAccountID: "account")
         let b = MediaItem(id: "b", title: "Movie", kind: .movie,
@@ -433,7 +965,7 @@ final class ItemDetailViewModelTests: XCTestCase {
             identitySources: { snapshot.sourceRefs(for: $0) },
             crossServerSourceResolver: { _ in .init() }
         )
-        let vm = environment.makeViewModel(for: a, libraryOrigin: "account")
+        let vm = try environment.makeViewModel(for: a, libraryOrigin: "account")
         await vm.load()
         await waitUntil { vm.state.value?.item.rejectedSourceIDs.contains("account:b") == true }
         XCTAssertEqual(vm.sources.map(\.itemID), ["a"])
@@ -558,7 +1090,7 @@ final class ItemDetailViewModelTests: XCTestCase {
         let provider = FakeMediaProvider(allItems: [owned], kind: .silo)
         provider.childrenByParent = [owned.id: [season("s1", "Season 1")]]
         let vm = ItemDetailViewModel(
-            provider: provider, itemID: seed.id, initialItem: seed, isDiscoveryItem: true,
+            provider: nil, itemID: seed.id, initialItem: seed, isDiscoveryItem: true,
             externalMetadataResolver: { _, region in
                 ExternalTitleMetadata(
                     enrichment: MetadataEnrichment(externalIDs: [
@@ -581,7 +1113,39 @@ final class ItemDetailViewModelTests: XCTestCase {
         XCTAssertEqual(vm.state.value?.children.map(\.id), ["s1"])
         XCTAssertEqual(provider.itemCallCount(for: seed.id), 0)
         XCTAssertGreaterThan(provider.itemCallCount(for: owned.id), 0)
+        XCTAssertEqual(vm.currentSourceForDisplay?.accountID, "silo")
         vm.suspendEnrichment()
+    }
+
+    func testProviderFreeDiscoveryLoadsMetadataAndRequestStatus() async {
+        let seed = MediaItem(
+            id: "external", title: "External movie", kind: .movie,
+            locallyValidatedPlayableSource: false
+        )
+        let vm = ItemDetailViewModel(
+            provider: nil, itemID: seed.id, initialItem: seed, isDiscoveryItem: true,
+            discoveryStatusRefresh: { _ in .init(status: .pending) },
+            externalMetadataResolver: { _, region in
+                .init(
+                    enrichment: MetadataEnrichment(overview: SourcedValue(value: "External overview", source: .tmdb)),
+                    availability: ExternalTitleAvailability(regionCode: region)
+                )
+            },
+            onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+            trailerCache: TrailerResolutionCache()
+        )
+        defer { vm.suspendEnrichment() }
+        await vm.load()
+        vm.resumeEnrichmentIfNeeded()
+        XCTAssertTrue(vm.isDiscoveryItem)
+        XCTAssertEqual(vm.state.value?.item.id, seed.id)
+        XCTAssertEqual(vm.state.value?.item.overview, "External overview")
+        XCTAssertEqual(vm.state.value?.item.availability, .pending)
+        XCTAssertEqual(vm.state.value?.item.ownershipPresentation().canPlay, false)
+        XCTAssertNil(vm.currentSourceForDisplay)
+        XCTAssertNil(vm.themeMusicPlaybackID)
+        let music = await vm.resolveThemeMusic()
+        XCTAssertNil(music)
     }
 
     func testExternalDetailWithoutMatchingLibraryCopyStaysUnplayable() async {
@@ -703,7 +1267,7 @@ final class ItemDetailViewModelTests: XCTestCase {
         XCTAssertTrue(provider.itemCallCounts.isEmpty)
     }
 
-    func testDetailEnvironmentProbesLibraryAfterAnIndexMiss() async {
+    func testDetailEnvironmentProbesLibraryAfterAnIndexMiss() async throws {
         let provider = FakeMediaProvider(allItems: [])
         let entered = AsyncGate()
         let release = AsyncGate()
@@ -717,7 +1281,7 @@ final class ItemDetailViewModelTests: XCTestCase {
                 return .init()
             }
         )
-        let vm = environment.makeViewModel(
+        let vm = try environment.makeViewModel(
             for: MediaItem(
                 id: "external",
                 title: "Loki",
@@ -734,6 +1298,140 @@ final class ItemDetailViewModelTests: XCTestCase {
 
         XCTAssertTrue(vm.isDiscoveryItem)
         XCTAssertTrue(provider.itemCallCounts.isEmpty)
+    }
+
+    func testMissingSourceFailsBeforeConstructingADetailModel() {
+        let environment = DetailOpenEnvironment(
+            resolveProvider: { _ in throw AppError.unauthorized },
+            resolveOptionalProvider: { _ in nil },
+            identitySources: { _ in [] },
+            crossServerSourceResolver: nil
+        )
+        let item = MediaItem(id: "saved", title: "Saved", kind: .movie, sourceAccountID: "removed")
+        XCTAssertThrowsError(try environment.makeViewModel(for: item, libraryOrigin: nil)) {
+            XCTAssertEqual($0 as? AppError, .unauthorized)
+        }
+        XCTAssertThrowsError(try environment.makeSeriesContextViewModel(
+            seriesID: "series", seed: item, sourceAccountID: nil, originAccountID: "removed"
+        )) {
+            XCTAssertEqual($0 as? AppError, .unauthorized)
+        }
+    }
+
+    func testExternalDetailsDoNotRequireAProviderEvenWithAnInactiveAccountTag() throws {
+        let environment = DetailOpenEnvironment(
+            resolveProvider: { _ in
+                XCTFail("External metadata must not resolve a media server")
+                throw AppError.unauthorized
+            },
+            resolveOptionalProvider: { _ in nil },
+            identitySources: { _ in [] },
+            crossServerSourceResolver: nil
+        )
+        for account: String? in [nil, "removed"] {
+            let item = MediaItem(
+                id: "external", title: "Watchlist", kind: .movie,
+                locallyValidatedPlayableSource: false, sourceAccountID: account
+            )
+            let model = try environment.makeViewModel(for: item, libraryOrigin: nil)
+            XCTAssertTrue(model.isDiscoveryItem)
+            XCTAssertEqual(model.state.value?.item.id, item.id)
+            XCTAssertEqual(model.state.value?.item.ownershipPresentation().canPlay, false)
+            XCTAssertNil(model.currentSourceForDisplay)
+        }
+    }
+
+    func testStaleIndexCannotRouteAnExternalIDToThePrimaryProvider() throws {
+        let primary = FakeMediaProvider(allItems: [], kind: .plex, accountID: "primary")
+        let removed = MediaSourceRef(accountID: "removed", itemID: "42", kind: .movie)
+        let environment = DetailOpenEnvironment(
+            resolveProvider: { _ in
+                XCTFail("A stale index must not turn an external ID into a primary-server request")
+                return primary
+            },
+            resolveOptionalProvider: { $0 == "primary" ? primary : nil },
+            identitySources: { _ in [removed] },
+            crossServerSourceResolver: nil
+        )
+        var item = MediaItem(
+            id: "external", title: "Watchlist", kind: .movie, locallyValidatedPlayableSource: false
+        )
+        item.sources = [removed]
+        let model = try environment.makeViewModel(for: item, libraryOrigin: nil)
+        XCTAssertTrue(model.isDiscoveryItem)
+        XCTAssertEqual(model.state.value?.item.id, "external")
+        XCTAssertEqual(model.state.value?.item.sources, [])
+        XCTAssertNil(model.currentSourceForDisplay)
+        XCTAssertTrue(primary.itemCallCounts.isEmpty)
+    }
+
+    func testExternalDetailSelectsTheSurvivingIndexedCopyUsingItsOwnID() throws {
+        let live = FakeMediaProvider(allItems: [], kind: .jellyfin, accountID: "live")
+        let environment = DetailOpenEnvironment(
+            resolveProvider: { accountID in
+                XCTAssertEqual(accountID, "live")
+                return live
+            },
+            resolveOptionalProvider: { $0 == "live" ? live : nil },
+            identitySources: { _ in [
+                MediaSourceRef(accountID: "removed", itemID: "42", kind: .movie, locality: .local),
+                MediaSourceRef(accountID: "live", itemID: "live-id", kind: .movie, locality: .remote)
+            ] },
+            crossServerSourceResolver: nil
+        )
+        let item = MediaItem(
+            id: "external", title: "Watchlist", kind: .movie, locallyValidatedPlayableSource: false
+        )
+        let model = try environment.makeViewModel(for: item, libraryOrigin: nil)
+        XCTAssertFalse(model.isDiscoveryItem)
+        XCTAssertEqual(model.state.value?.item.id, "live-id")
+        XCTAssertEqual(model.currentSourceForDisplay?.accountID, "live")
+        XCTAssertEqual(model.currentSourceForDisplay?.itemID, "live-id")
+        XCTAssertEqual(model.state.value?.item.sources.map(\.accountID), ["live"])
+    }
+
+    func testDetailSelectionSkipsRemovedSourcesWithoutSendingTheirItemIDToAnotherServer() throws {
+        let live = FakeMediaProvider(allItems: [], kind: .jellyfin, accountID: "live")
+        var item = MediaItem(id: "old-id", title: "Saved", kind: .movie, sourceAccountID: "removed")
+        item.sources = [
+            MediaSourceRef(accountID: "removed", itemID: "old-id", kind: .movie, locality: .local),
+            MediaSourceRef(accountID: "live", itemID: "live-id", kind: .movie, locality: .remote)
+        ]
+        let environment = DetailOpenEnvironment(
+            resolveProvider: { accountID in
+                guard accountID == "live" else { throw AppError.unauthorized }
+                return live
+            },
+            resolveOptionalProvider: { $0 == "live" ? live : nil },
+            identitySources: { _ in [] },
+            crossServerSourceResolver: nil
+        )
+        let model = try environment.makeViewModel(for: item, libraryOrigin: nil)
+        XCTAssertEqual(model.currentSourceForDisplay?.accountID, "live")
+        XCTAssertEqual(model.currentSourceForDisplay?.itemID, "live-id")
+        XCTAssertEqual(model.state.value?.item.sources.map(\.accountID), ["live"])
+        XCTAssertTrue(live.itemCallCounts.isEmpty)
+    }
+
+    func testSeriesContextResolvesItsOriginWhenTheSeedHasNoSource() throws {
+        let provider = FakeMediaProvider(allItems: [], kind: .plex, accountID: "origin")
+        var requested: [String?] = []
+        let environment = DetailOpenEnvironment(
+            resolveProvider: { accountID in
+                requested.append(accountID)
+                guard accountID == "origin" else { throw AppError.unauthorized }
+                return provider
+            },
+            resolveOptionalProvider: { _ in provider },
+            identitySources: { _ in [] },
+            crossServerSourceResolver: nil
+        )
+        let model = try environment.makeSeriesContextViewModel(
+            seriesID: "series", seed: .init(id: "season", title: "Season", kind: .season),
+            sourceAccountID: nil, originAccountID: "origin"
+        )
+        XCTAssertEqual(requested, ["origin"])
+        XCTAssertEqual(model.currentSourceForDisplay?.accountID, "origin")
     }
 
     func testSeriesResumeFindsNextEpisodeBeyondSixtyTitles() async {
@@ -931,7 +1629,7 @@ final class ItemDetailViewModelTests: XCTestCase {
                 if statusCalls.increment() == 1 {
                     await firstStatusGate.wait()
                 }
-                return (.processing, nil)
+                return .init(status: .processing)
             },
             externalMetadataResolver: { _, region in
                 ExternalTitleMetadata(
@@ -981,6 +1679,35 @@ final class ItemDetailViewModelTests: XCTestCase {
             "Max"
         )
         XCTAssertEqual(vm.state.value?.item.availability, .processing)
+    }
+
+    func testDiscoveryQueueOnlyChangesUpdateUnreleasedMovieStatus() async throws {
+        let seed = MediaItem(
+            id: "seer:movie:42", title: "Future Movie", kind: .movie,
+            releaseDate: MediaItem.calendarDayReleaseDate(from: "2099-10-20"),
+            providerIDs: ["Tmdb": "42"], availability: .processing,
+            locallyValidatedPlayableSource: false, hasRequestDownloadActivity: false
+        )
+        let calls = LockedCounter()
+        let vm = ItemDetailViewModel(
+            provider: FakeMediaProvider(allItems: []), itemID: seed.id, initialItem: seed,
+            isDiscoveryItem: true,
+            discoveryStatusRefresh: { _ in
+                .init(status: .processing, hasDownloadActivity: calls.increment() == 1)
+            }
+        )
+        XCTAssertEqual(vm.state.value?.item.heroCTA(seerConnected: true), .awaitingRelease)
+        await vm.refreshDiscoveryStatusNow()
+        XCTAssertEqual(vm.state.value?.item.hasRequestDownloadActivity, true)
+        XCTAssertEqual(vm.state.value?.item.heroCTA(seerConnected: true), .requested)
+        let queued = try XCTUnwrap(vm.state.value?.item)
+        XCTAssertEqual(HeroDiscoveryStatus.merging([queued], into: [seed]).first?.hasRequestDownloadActivity, true)
+        await vm.refreshDiscoveryStatusNow()
+        XCTAssertEqual(vm.state.value?.item.hasRequestDownloadActivity, false)
+        XCTAssertEqual(vm.state.value?.item.heroCTA(seerConnected: true), .awaitingRelease)
+        XCTAssertEqual(vm.state.value?.item.releaseDate, seed.releaseDate)
+        let merged = HeroDiscoveryStatus.merging([try XCTUnwrap(vm.state.value?.item)], into: [queued])
+        XCTAssertEqual(merged.first?.hasRequestDownloadActivity, false)
     }
 
     func testLoadFetchesSeasonsAsChildren() async {
@@ -1035,7 +1762,7 @@ final class ItemDetailViewModelTests: XCTestCase {
         XCTAssertEqual(provider.supplementalProbeCount, 1)
         XCTAssertEqual(
             vm.state.value?.item.technicalBadges.map(\.label),
-            ["Dolby Atmos"]
+            ["Dolby Digital+", "Dolby Atmos"]
         )
     }
 
@@ -1083,7 +1810,7 @@ final class ItemDetailViewModelTests: XCTestCase {
         XCTAssertEqual(vm.state.value?.item.versions.first?.audioProfile, "Dolby Atmos")
         XCTAssertEqual(
             vm.state.value?.item.versions.first?.technicalBadges.map { $0.label },
-            ["4K", "Dolby Vision", "Dolby Atmos"]
+            ["4K", "Dolby Vision", "Dolby Digital+", "Dolby Atmos"]
         )
     }
 
@@ -1823,6 +2550,55 @@ final class ItemDetailViewModelTests: XCTestCase {
         )
     }
 
+    func testHomeEpisodeEntryCanToggleWatchedRepeatedlyWithoutReopening() async throws {
+        for kind: ProviderKind in [.plex, .jellyfin] {
+            for hasResumeSeed in [false, true] {
+                let account = kind.rawValue
+                let series = MediaItem(id: "series", title: "Series", kind: .series)
+                let season = MediaItem(id: "season", title: "Season 1", kind: .season, seasonNumber: 1)
+                let tapped = MediaItem(
+                    id: "episode-4", title: "Four", kind: .episode,
+                    seasonNumber: 1, episodeNumber: 4, seriesID: series.id, seasonID: season.id,
+                    sourceAccountID: account
+                )
+                let sibling = MediaItem(id: "episode-5", title: "Five", kind: .episode, episodeNumber: 5)
+                let provider = FakeMediaProvider(allItems: [series, season, tapped, sibling], kind: kind)
+                provider.childrenByParent = [series.id: [season], season.id: [tapped, sibling]]
+                provider.continueWatchingItems = hasResumeSeed ? [tapped] : []
+                let vm = ItemDetailViewModel(
+                    provider: provider, itemID: series.id,
+                    sourceAccountID: account,
+                    onlineTrailerResolver: { _ in [] },
+                    playableVideoIDResolver: { _ in nil },
+                    trailerCache: TrailerResolutionCache()
+                )
+                defer { vm.suspendEnrichment() }
+                await vm.load()
+                await vm.loadEpisodes(for: season.id)
+                for played in [true, false, true, false] {
+                    vm.applyWatchedState(MediaItemMutation(
+                        itemIDs: [tapped.id], scopedItemIDs: ["\(account):\(tapped.id)"],
+                        played: played, resumePosition: 0
+                    ))
+                    let episodes = try XCTUnwrap(vm.episodes(for: season.id))
+                    let hero = try XCTUnwrap(SeriesEpisodeEntry.resolvedOpeningEpisode(
+                        initialEpisode: tapped, initialSeasonID: season.id,
+                        resumeEpisode: vm.serverResumeEpisode, in: episodes
+                    ))
+                    XCTAssertEqual(hero.id, tapped.id)
+                    XCTAssertEqual(hero.sourceAccountID, account)
+                    XCTAssertEqual(hero.isPlayed, played, "\(kind), resume=\(hasResumeSeed)")
+                    XCTAssertEqual(
+                        MediaItemActionCatalog.actions(for: hero, supportsWatchState: true).first,
+                        played ? .markUnwatched : .markWatched
+                    )
+                    XCTAssertEqual(episodes.map(\.id), [tapped.id, sibling.id])
+                    XCTAssertFalse(episodes[1].isPlayed)
+                }
+            }
+        }
+    }
+
     func testSeriesWatchMutationCascadesToLoadedEpisodes() async {
         let series = MediaItem(id: "series", title: "Series", kind: .series)
         let season = MediaItem(id: "season", title: "Season 1", kind: .season)
@@ -1953,6 +2729,172 @@ final class ItemDetailViewModelTests: XCTestCase {
         await vm.load()
         XCTAssertEqual(vm.state.value?.item.sourceAccountID, "remote",
                        "A subsequent load() must not re-apply the local-first preference over the user's pick")
+    }
+
+    func testDiscoveryPreservesServerLabelsForSeparateSignInsOnTheSameServer() async {
+        for kind in [ProviderKind.plex, .jellyfin] {
+            let primary = MediaItem(
+                id: "movie", title: "Movie", kind: .movie, resumePosition: 30,
+                sourceAccountID: "first", versions: [.init(id: "current-file")]
+            )
+            let alternate = MediaItem(
+                id: "movie", title: "Movie", kind: .movie, resumePosition: 300,
+                sourceAccountID: "second", versions: [.init(id: "other-file")]
+            )
+            let first = FakeMediaProvider(
+                allItems: [primary], kind: kind, accountID: "shared-server",
+                serverName: "Family library", userName: "Alice"
+            )
+            let second = FakeMediaProvider(
+                allItems: [alternate], kind: kind, accountID: "shared-server",
+                serverName: "Family library", userName: "Bob"
+            )
+            let discovered = [
+                MediaSourceRef(
+                    accountID: "first", itemID: "movie", kind: .movie, providerKind: kind,
+                    serverName: "Family library", accountName: "Alice",
+                    versions: [.init(id: "stale-file")], resumePosition: 5
+                ),
+                MediaSourceRef(
+                    accountID: "second", itemID: "movie", kind: .movie, providerKind: kind,
+                    serverName: "Family library", accountName: "Bob"
+                )
+            ]
+            let vm = ItemDetailViewModel(
+                provider: first, itemID: "movie", sourceAccountID: "first",
+                onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+                trailerCache: TrailerResolutionCache(),
+                alternateProviderResolver: { $0 == "second" ? second : nil },
+                crossServerSourceResolver: { _ in .init(sources: discovered) }
+            )
+            defer { vm.suspendEnrichment() }
+            await vm.load()
+            await waitUntil { vm.sources.last?.versions.first?.id == "other-file" }
+
+            let choices = DetailPlaybackSelection.serverChoices(from: vm.sources)
+            XCTAssertEqual(choices.map(\.accountID), ["first", "second"])
+            XCTAssertEqual(choices.map(\.itemID), ["movie", "movie"])
+            XCTAssertEqual(choices.map(\.displayName), ["Family library", "Family library"])
+            XCTAssertEqual(choices.map(\.providerKind), [kind, kind])
+            XCTAssertEqual(choices.map(\.accountName), ["Alice", "Bob"])
+            XCTAssertEqual(choices.first?.versions.map(\.id), ["current-file"])
+            XCTAssertEqual(choices.map(\.resumePosition), [30, 300])
+            XCTAssertEqual(vm.state.value?.item.sourceAccountID, "first")
+            XCTAssertEqual(vm.currentSourceForDisplay?.displayName, "Family library")
+
+            await vm.switchToSource(accountID: "second")
+            XCTAssertEqual(vm.state.value?.item.sourceAccountID, "second")
+            XCTAssertEqual(vm.currentSourceForDisplay?.accountName, "Bob")
+        }
+    }
+
+    func testSeededSourceLabelsUseExactAccountsAndPreserveKnownDisplayNames() async {
+        let primary = MediaItem(id: "movie", title: "Movie", kind: .movie, sourceAccountID: "first")
+        let alternate = primary.taggingSource("second")
+        let first = FakeMediaProvider(allItems: [primary], kind: .plex, serverName: "Plex library")
+        let second = FakeMediaProvider(
+            allItems: [alternate], kind: .jellyfin, serverName: "Jellyfin library", userName: "Bob"
+        )
+        let vm = ItemDetailViewModel(
+            provider: first, itemID: "movie", sourceAccountID: "first",
+            onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+            initialSources: [
+                .init(accountID: "first", itemID: "movie", serverName: " \n", accountName: "\t"),
+                .init(accountID: "second", itemID: "movie", serverName: "Known server label", accountName: "Known user"),
+                .init(accountID: "disabled", itemID: "movie", serverName: "Disabled account")
+            ],
+            alternateProviderResolver: { $0 == "second" ? second : nil }
+        )
+        defer { vm.suspendEnrichment() }
+        await vm.load()
+
+        XCTAssertEqual(vm.sources.map(\.accountID), ["first", "second"])
+        XCTAssertEqual(vm.sources.map(\.displayName), ["Plex library", "Known server label"])
+        XCTAssertEqual(vm.sources.map(\.accountName), ["Alice", "Known user"])
+        XCTAssertEqual(vm.sources.map(\.providerKind), [.plex, .jellyfin])
+    }
+
+    func testSnapshotSourceLabelsAreRepairedBeforeLiveDetailReturns() async {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("plozz-server-labels-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = DetailSnapshotCache(directory: directory)
+        let primary = MediaItem(id: "movie", title: "Movie", kind: .movie, sourceAccountID: "first")
+        let alternate = primary.taggingSource("second")
+        await cache.store(
+            .init(item: primary, children: [], seasonEpisodes: [:], sources: [
+                .init(accountID: "first", itemID: "movie"),
+                .init(accountID: "second", itemID: "movie")
+            ]),
+            for: "first|movie"
+        )
+        let first = FakeMediaProvider(
+            allItems: [primary], kind: .plex, accountID: "shared-server", serverName: "Family library"
+        )
+        let second = FakeMediaProvider(
+            allItems: [alternate], kind: .plex, accountID: "shared-server",
+            serverName: "Family library", userName: "Bob"
+        )
+        let release = AsyncGate()
+        first.itemGate = ["movie": { await release.wait() }]
+        let vm = ItemDetailViewModel(
+            provider: first, itemID: "movie", sourceAccountID: "first",
+            onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+            alternateProviderResolver: { $0 == "second" ? second : nil },
+            snapshotCache: cache
+        )
+        defer { release.open(); vm.suspendEnrichment() }
+        let loading = Task { await vm.load() }
+        await waitUntil { vm.sources.count == 2 }
+        XCTAssertEqual(vm.sources.map(\.displayName), ["Family library", "Family library"])
+        XCTAssertEqual(vm.sources.map(\.accountName), ["Alice", "Bob"])
+        XCTAssertEqual(vm.sources.map(\.providerKind), [.plex, .plex])
+        release.open()
+        await loading.value
+        XCTAssertEqual(vm.currentSourceForDisplay?.displayName, "Family library")
+        XCTAssertEqual(vm.sources.map(\.accountID), ["first", "second"])
+    }
+
+    func testRediscoveryFillsMissingLabelsWithoutReplacingLiveSourceState() async {
+        let primary = MediaItem(
+            id: "movie", title: "Movie", kind: .movie, resumePosition: 90,
+            sourceAccountID: "first", versions: [.init(id: "current-file")]
+        )
+        let alternate = primary.taggingSource("second")
+        let first = FakeMediaProvider(allItems: [primary], serverName: "", userName: "")
+        let second = FakeMediaProvider(allItems: [alternate], serverName: "", userName: "")
+        let gate = AsyncGate()
+        let discovered = [
+            MediaSourceRef(accountID: "first", itemID: "movie"),
+            MediaSourceRef(
+                accountID: "first", itemID: "movie", serverName: "First server", accountName: "Alice",
+                locality: .local, versions: [.init(id: "stale-file")], resumePosition: 1
+            ),
+            MediaSourceRef(accountID: "second", itemID: "movie", serverName: "Second server", accountName: "Bob")
+        ]
+        let vm = ItemDetailViewModel(
+            provider: first, itemID: "movie", sourceAccountID: "first",
+            onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+            initialSources: [
+                .init(accountID: "first", itemID: "movie", locality: .local),
+                .init(accountID: "second", itemID: "movie")
+            ],
+            alternateProviderResolver: { $0 == "second" ? second : nil },
+            crossServerSourceResolver: { _ in
+                await gate.wait()
+                return .init(sources: discovered)
+            }
+        )
+        defer { gate.open(); vm.suspendEnrichment() }
+        await vm.load()
+        gate.open()
+        await waitUntil { vm.sources.first?.serverName == "First server" }
+        XCTAssertEqual(vm.sources.map(\.displayName), ["First server", "Second server"])
+        XCTAssertEqual(vm.sources.map(\.accountName), ["Alice", "Bob"])
+        XCTAssertEqual(vm.sources.first?.versions.map(\.id), ["current-file"])
+        XCTAssertEqual(vm.sources.first?.resumePosition, 90)
+        XCTAssertEqual(vm.sources.first?.locality, .local)
+        XCTAssertEqual(vm.state.value?.item.sourceAccountID, "first")
     }
 
     func testAsyncDiscoveryOnlyEnrichesPickerWithoutRetargetingMovie() async {
@@ -2859,13 +3801,85 @@ final class ItemDetailViewModelTests: XCTestCase {
 
         let enriched = await vm.enrichEpisodeBadgesIfNeeded(sparse)
         XCTAssertEqual(enriched?.technicalBadges.map(\.label),
-                       ["4K", "Dolby Vision", "Dolby Atmos", "HDR10"],
+                       ["4K", "Dolby Vision", "Dolby Digital+", "Dolby Atmos"],
                        "Focused episode must badge from the full fetch's real metadata")
+        XCTAssertEqual(enriched?.technicalBadges[1].detail, "HDR10")
         XCTAssertEqual(
             vm.seasonEpisodes["s1"]?.first?.technicalBadges.map(\.label),
             before,
             "Hero-only enrichment must not replace the visible episode array"
         )
+    }
+
+    func testSeriesHeroResolvesEpisodeVersionsWithoutChangingSeriesOrWatchState() async throws {
+        for versions: [MediaVersion] in [[], [.init(id: "hd"), .init(id: "4k")]] {
+            let show = series("show")
+            var sparse = episode("e1", number: 1)
+            sparse.sourceAccountID = "server"
+            sparse.resumePosition = 600
+            sparse.versions = [.init(id: "stale-one"), .init(id: "stale-two")]
+            var rich = sparse
+            rich.resumePosition = 0
+            rich.versions = versions
+            let full = rich
+            let provider = FakeMediaProvider(allItems: [show, sparse])
+            provider.childrenByParent = ["show": []]
+            provider.playbackInventoryRequiresEnrichment = true
+            provider.playbackItemHandler = { id in
+                XCTAssertEqual(id, "e1", "Resolve the playable episode, not its series container.")
+                return full
+            }
+            let vm = ItemDetailViewModel(provider: provider, itemID: "show", sourceAccountID: "server")
+            await vm.load()
+            let passive = await vm.enrichEpisodeBadgesIfNeeded(sparse)
+            XCTAssertEqual(passive?.versions, sparse.versions, "Hero enrichment uses only presentation metadata.")
+            _ = try await vm.loadPlaybackVersions(for: sparse)
+            let target = vm.episodeWithEnrichedBadges(sparse)
+            XCTAssertEqual(target.versions, versions)
+            XCTAssertEqual(target.resumePosition, 600)
+            XCTAssertEqual(target.sourceAccountID, "server")
+            XCTAssertEqual(vm.state.value?.item.kind, .series)
+            XCTAssertTrue(vm.state.value?.item.versions.isEmpty == true)
+            let menuVersions = DetailPlaybackSelection.versions(
+                for: target,
+                sources: [.init(accountID: "server", itemID: "show", kind: .series)],
+                activeAccountID: "server"
+            )
+            XCTAssertEqual(Set(menuVersions.map(\.id)), Set(versions.map(\.id)))
+            XCTAssertEqual(provider.itemCallCount(for: "e1"), 1)
+            vm.suspendEnrichment()
+        }
+    }
+
+    func testEpisodeInventoryFailureAndWrongIdentityCannotPoisonHeroCache() async {
+        let show = series("show")
+        let sparse = episode("e1", number: 1)
+        var full = sparse
+        full.versions = [.init(id: "hd"), .init(id: "4k")]
+        let provider = FakeMediaProvider(allItems: [show])
+        provider.childrenByParent = ["show": []]
+        provider.playbackInventoryRequiresEnrichment = true
+        let vm = ItemDetailViewModel(provider: provider, itemID: "show", sourceAccountID: "server")
+        await vm.load()
+        provider.playbackItemHandler = { _ in throw StreamingQualityError.sourceUnavailable }
+        do { _ = try await vm.loadPlaybackVersions(for: sparse); XCTFail("Expected failure.") }
+        catch { XCTAssertEqual(error as? StreamingQualityError, .sourceUnavailable) }
+        for mismatch in ["kind", "account", "id"] {
+            var wrong = full
+            if mismatch == "kind" { wrong.kind = .series }
+            if mismatch == "account" { wrong.sourceAccountID = "another-server" }
+            if mismatch == "id" { wrong.id = "another-episode" }
+            let response = wrong
+            provider.playbackItemHandler = { _ in response }
+            do { _ = try await vm.loadPlaybackVersions(for: sparse); XCTFail("Reject mismatched inventory.") }
+            catch { XCTAssertEqual(error as? StreamingQualityError, .sourceUnavailable) }
+        }
+        let response = full
+        provider.playbackItemHandler = { _ in response }
+        do { _ = try await vm.loadPlaybackVersions(for: sparse) }
+        catch { XCTFail("Expected inventory recovery: \(error)") }
+        XCTAssertEqual(vm.episodeWithEnrichedBadges(sparse).versions, full.versions)
+        vm.suspendEnrichment()
     }
 
     /// Enrichment is idempotent: a second focus of the same episode returns the
@@ -3107,6 +4121,40 @@ final class ItemDetailViewModelTests: XCTestCase {
         XCTAssertEqual(vm.state.value?.children.map(\.id), ["b-s1"])
     }
 
+    func testLateResumeCannotOverwriteAReplacementSourceAfterSeasonsPublished() async {
+        let primary = SeriesResumeFakeProvider(allItems: [series("showA")])
+        primary.childrenByParent = ["showA": [season("a-s1", "Season A")]]
+        let release = AsyncGate()
+        primary.resumeHandler = { _ in
+            await release.wait()
+            return MediaItem(
+                id: "old-resume", title: "Old resume", kind: .episode,
+                seriesID: "showA", seasonID: "a-s1", resumePosition: 100
+            )
+        }
+        let alternate = FakeMediaProvider(allItems: [series("showB")])
+        alternate.childrenByParent = ["showB": [season("b-s1", "Season B")]]
+        let vm = ItemDetailViewModel(
+            provider: primary, itemID: "showA", sourceAccountID: "jelly",
+            onlineTrailerResolver: { _ in [] }, playableVideoIDResolver: { _ in nil },
+            initialSources: [
+                MediaSourceRef(accountID: "jelly", itemID: "showA"),
+                MediaSourceRef(accountID: "plex", itemID: "showB")
+            ],
+            alternateProviderResolver: { $0 == "plex" ? alternate : primary }
+        )
+        let load = Task { await vm.load() }
+        await waitUntil { vm.state.value?.childrenLoaded == true }
+        XCTAssertTrue(vm.isResolvingServerResume)
+        await vm.switchToSource(accountID: "plex")
+        release.open()
+        await load.value
+        XCTAssertEqual(vm.state.value?.item.id, "showB")
+        XCTAssertEqual(vm.state.value?.children.map(\.id), ["b-s1"])
+        XCTAssertNil(vm.serverResumeEpisode)
+        vm.suspendEnrichment()
+    }
+
     func testResumeDuringSourceSwitchCannotLoadAnOldSeasonFromNewProvider() async {
         let primary = FakeMediaProvider(allItems: [series("showA")])
         primary.childrenByParent = ["showA": [season("a-s1", "Season A")]]
@@ -3182,12 +4230,12 @@ final class ItemDetailViewModelTests: XCTestCase {
     }
 
 
-    /// of yields elapse), so a test can observe an optimistic state set before a
-    /// later `await` resumes.
+    /// Waits for asynchronous publication with a wall-clock deadline.
     private func waitUntil(_ condition: @MainActor () -> Bool) async {
-        for _ in 0..<10_000 {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline {
             if condition() { return }
-            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(10))
         }
         XCTFail("Condition not met before timeout")
     }

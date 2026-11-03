@@ -16,6 +16,10 @@ python3 tools/performance.py list
 Use a simulator you own. Select an explicit platform and UUID; an iPad is an
 `iOS` simulator. The runner verifies platform, runtime build, and device type
 before booting, never selects a different simulator or discovers physical devices.
+The runner inherits `DEVELOPER_DIR`. If the selected toolchain cannot launch
+hosted tests, select a compatible installed Xcode for the lane rather than
+changing the global selection or resetting shared developer services. Keep the
+same toolchain for both sides of a comparison.
 
 ```sh
 export GIT_CONFIG_PARAMETERS="'safe.bareRepository=all'"
@@ -53,6 +57,107 @@ Cancellation/timeout stops only the owned process group and preserves evidence.
 
 ## Baseline → attribution → candidate → regression
 
+`skeletons-idle` observes 24 production `SkeletonCardView` placeholders over
+2.3-second idle windows on either platform. It verifies all placeholders mounted
+and captures changing visible pixels before timing, so removing the animation
+cannot count as an optimization. `skeletons-static` uses the same content with
+implicit animations disabled and verifies stable pixels; it is an animation-cost
+control, not a simulated system Reduce Motion setting. `cards-idle` separately
+covers settled artwork. These fixtures are not the complete Home screen or a
+multi-server account. CPU measurements include the app process only; resident
+snapshots do not measure GPU/render-server memory or physical-device energy.
+
+The iOS `mobile-preference-sync` scenario applies 24 cloud batches through the
+real mobile app model, updating active Hero preferences and an inactive profile's
+preferred version in each batch. It verifies all 48 applied values and counts
+account invalidations, index resets, and download-model replacements. With no
+accounts or external services, it isolates synchronous configuration-apply work;
+it does not measure full network/indexing completion, CloudKit delivery, rendered
+frames, or physical-device temperature and battery use.
+
+The iOS `mobile-profile-selection` scenario activates sixteen synthetic profiles
+through the real app model. It reports synchronous selection time separately
+from a fixed 5 ms Plex metadata delay, checks that every selection reaches the
+PIN gate, and verifies tokens remain denied. It measures activation work, not
+rendered frame pacing or physical-device network latency.
+
+`mobile-profile-picker-entrance` mounts the production sixteen-profile touch
+picker in an iPad-sized window. It verifies the heading appears before avatars,
+a visible stagger, and substantially settled avatars within 1.5 seconds (450 ms
+for the heading, then one second for the cascade, after the starting frame). CPU measurements include
+hosting, native presentation, rendered captures, and heading recognition.
+This is repeated fresh-view presentation, not a cold process launch, connected
+startup workload, GPU measurement, or physical-device frame-pacing verdict.
+
+`mobile-home-loading-scroll` replaces eight production skeleton rails with
+20-item media rails while UIKit animates the production Home vertical scroll
+view. It requires all rows to finish, the final scroll destination to be reached,
+and no page-height change. It uses synthetic items without remote artwork:
+this is loading-layout and app-process CPU evidence, not provider/network,
+image-decoding, full Home startup, or presented-frame/FPS evidence.
+`HomeLoadingLayoutTests` separately checks empty-row removal, insertion, content
+insets, library/featured placeholders, and existing heading geometry.
+
+`mobile-home-rail-prefetch` updates the real mobile Continue Watching rail 24
+times with the same 180 metadata-rich episodes across twelve synthetic account
+identities. Artwork is preloaded into the test cache and online providers are
+disabled. It counts series-source construction while preserving every item and
+waiting for each hosting-graph update. It isolates repeated layout/prefetch-key
+work, not twelve connected servers, profile-transition frame pacing or hardware
+scrolling. `watchlist-artwork-rehydration` separately exercises the production
+Plex/Jellyfin credential-restoration path, checking every title and cast image.
+
+`mobile-video-glow` measures the light inline video preview in 2.3-second
+windows against the existing 160-by-90 continuity fixture. Require the same
+surface and advancing playback; it isolates preview overhead, not HD decoding.
+`mobile-video-glow-hd` and `mobile-video-glow-hd-disabled` use the same
+1920-by-1080, 30 fps synthetic video with and without the color glow. The enabled
+case must complete new samples, capped at five per window; the disabled case
+must have no sampling task. These report app-process CPU and resident memory,
+not GPU/render-server cost or physical-device energy and frame pacing.
+
+The `active-picture-1-enabled`, `active-picture-1-disabled`,
+`active-picture-4-enabled`, and `active-picture-4-disabled` scenarios use the same
+1080p30 `glow-hd.mp4`, stream-copied to finite loopback HLS, with one or four
+visible Aether-backed native players. HLS exercises AVPlayer even on simulators
+that correctly reject hardware H.264 and route ordinary files to software.
+Players pause during setup and start together from zero. Each window
+requires advancing playback; enabled windows require new presentation-timestamp
+samples at no more than 2 Hz per player, and disabling must detach native output
+taps. The four-player case checks aggregate admission stays at or below four.
+These are app-process CPU/resident-memory comparisons, not GPU, physical-device
+energy, HDR, or four simultaneous 4K decoder benchmarks.
+The `active-picture-hls` fixtures are generated with FFmpeg `-c copy -f hls
+-hls_time 2 -hls_list_size 0 -hls_playlist_type vod -hls_segment_type fmp4` from
+`active-picture.mp4` and `glow-hd.mp4`; no video is re-encoded. Native SDR output
+materialization is included in the comparison, not bounded by the CPU sampler's
+2 Hz limit. Independent subtitle outputs are preserved when the video tap stops.
+Native analysis requests 320x180 output while retaining the original display
+canvas separately. This reduces the requested analysis surface, not necessarily
+AVFoundation's internal decode/render allocations. In an isolated tvOS simulator
+four-player pair, enabled analysis added approximately 16 MiB resident memory;
+CPU medians were 935 versus 952 ms per 2.3-second window, within the measured
+dispersion. These are one controlled SDR comparison, not a hardware or HDR
+performance guarantee.
+
+The glow fixtures in `Tests/SubtitlePresentationSupport/Fixtures` are synthetic:
+`live-continuity-dim.mp4` is the first 30 seconds of `live-continuity.mp4`,
+scaled by `colorchannelmixer=rr=0.18:gg=0.18:bb=0.18` and encoded with
+libx264 CRF 24. `glow-software.mkv` is its first eight seconds, encoded as MPEG-2
+at quality 3 to require the software route. `glow-hd.mp4` uses FFmpeg
+`testsrc2=size=1920x1080:rate=30:duration=35`, libx264, preset `veryfast`, CRF 28.
+All omit audio and use yuv420p. The dim fixture changes decoded pixels, not an
+overlay above the video, so it actually exercises color extraction on dark input.
+
+`mobile-profile-pin-handoff` unlocks a local profile in a sixteen-profile
+household using the production 120,000-round verifier. It separates verification
+duration from the largest 2 ms main-actor heartbeat gap. Initialization settles
+before sampling, and all repetitions reuse one household; the warmup covers
+first-entry settings migrations. Each measured switch first leaves the locked
+profile and proves its PIN again. Fixture-owned settings are removed afterward.
+Moving verification off the UI executor should preserve its cost and result,
+not reduce the verifier rounds. Heartbeat gaps are not rendered FPS.
+
 1. Select the scenario matching the suspected work and capture a baseline
    **before** editing production code. Keep the printed run path. Record the
    symptom and configuration; do not replace a reported failure with an easier
@@ -88,6 +193,14 @@ Noise above the larger of 20% of baseline or 1 ms is inconclusive.
 Do not repeatedly rerun until a favorable sample passes. Diagnose contention or
 capture a deliberately new controlled experiment, retaining the failed/noisy one.
 
+`playback-journal-disabled` and `playback-journal-enabled` are an explicit
+off/on control for the new persistent journal, not a historical baseline.
+Each sample handles 10,000 synthetic lifecycle notifications. The enabled case
+awaits encoding and persistence and verifies retained plus discarded counts;
+`enqueueMicroseconds` separately measures synchronous notification handling.
+Both retain the same notification/UUID workload. Wall/CPU include completion;
+neither is a rendered-frame or physical-device energy measurement.
+
 `within-budget` is **not** proof of improvement. Read the deltas and their
 dispersion. Work counts are reported separately and bounded by XCTest
 assertions, not statistical timing allowances. Resident snapshots/deltas are
@@ -95,11 +208,86 @@ informational: allocator caches and framework lifetime make them unsuitable
 for a blanket byte threshold. Lifecycle scenarios additionally assert weak
 references actually release.
 
+`player-card-first-visits` prioritizes the first Info, Chapters and Cast opening
+in a fresh production-controls hierarchy for every sample, including the
+discarded warmup. It uses twenty local chapters and cast members, with no artwork
+URLs, network requests or video decoding. It checks actual native tab focus,
+rejects intermediate wrong-tab focus, and requires focusable content inside the
+card. The separate hosted
+`testProductionCardContentAndNativeEntryOnFirstVisits` checks rendered text and
+native entry into each card with both normal and reduced glass; an empty or
+obscured card must not count as a faster presentation.
+
+Each first opening records its largest 2 ms main-actor heartbeat gap. Chapters
+and Cast additionally record the synchronous native focus-update duration; that
+is not input-to-presented-frame latency. CPU covers the full hierarchy setup,
+first openings and teardown; fixed settling intervals dominate wall time.
+Framework, shader and process caches remain warm between samples, so this is a
+first visit per playback hierarchy, not repeated cold app launches or proof of
+second-generation Apple TV performance. Prefer this workload over repeated tab
+round trips when assessing first-use responsiveness.
+
 `native-poster-indicators` exercises the actual native-poster coordinator's
 foreground path: 72 completed overlays across 24 posters, three visible episode
 badges, and changing playback progress. Each sample uses cold geometry. The
 distinct-bitmap counter exposes redundant synchronous rendering separately from
 wall/CPU time; `native-poster-composition` covers source artwork, not this path.
+
+`portrait-reflection-cold` prepares twelve Detailed portrait reflections through
+the native coordinator using the production 960-pixel poster cap and fresh
+geometry in every sample. It measures completed
+bitmap preparation and the longest synchronous preparation, not frame pacing.
+`portrait-reflection-warm` recreates 288 coordinators and requires all requests to
+reuse the same twelve finished bitmaps. These isolate first-seen artwork cost
+from reuse; neither establishes physical Apple TV smoothness or cache behavior
+under unrelated memory pressure.
+
+`poster-preview-admission` exercises the shared preview gate used by media rows
+and mobile Home. It visits overlapping 16-item look-ahead windows three times per
+position, traversing 181 posters forward and backward for each of Jellyfin,
+Emby, Plex, and TMDB URL shapes. Every sample verifies the complete nearest-first
+queue of 1,448 previews; counters distinguish 70,584 candidate visits from actual
+URL comparisons. This isolates synchronous admission/URL work, without network
+requests, image decoding, UI layout, or a claim about the duration of a reported
+device hang.
+
+`player-controls-cold-reveal` creates a fresh production TV controls hierarchy
+for every sample, requests its first reveal without a settling delay, and
+completes three show/hide cycles. It includes local synopsis metadata and track
+options but no artwork requests or video decoding. First/last main-actor heartbeat
+gaps distinguish initial layout work from settled repeats; they are not rendered
+frame timings. The process and framework caches are warm after the discarded
+warmup, so this is cold view construction, not cold app launch.
+`player-controls-first-card` adds the first Info-card opening and verifies its
+visible bounds and focus readiness. Compare both when deferring optional content:
+less transport-entry work can increase first-card initialization cost without
+reducing total CPU. Hosted lifecycle, OCR, focus and fade tests separately
+protect the fixed card stage, first content, retained state and native materials.
+
+`player-controls-hidden-clock` advances the mounted TV transport's playback and
+buffered positions 32 times at the production 250 ms cadence after hiding it.
+`player-controls-hidden-static` observes the same settled hierarchy without
+clock mutations; `player-controls-visible-clock` repeats the advancing workload
+with controls visible. Each eight-second sample verifies the completed updates
+and timeline collision-region visibility. These isolate clock-driven UI work
+without video decoding, network traffic, or thumbnail extraction. They measure
+app-process CPU, not second-generation Apple TV GPU cost or rendered frame pacing.
+
+`player-controls-reveal` mounts the production TV transport with sixteen audio
+tracks and thirty-two subtitle tracks, then shows and hides it four times per
+sample. `player-controls-reveal-contended` repeats the same interaction with a
+controlled 180 ms synchronous preference read through the real system-audio
+backend's reader seam. Both require four completed reads and visible timeline
+geometry on every reveal. They report main-thread read counts and the largest
+2 ms main-actor heartbeat gap separately from app CPU.
+
+These isolate the controls' preference synchronization, not remux decoding,
+network throughput, GPU presentation or second-generation Apple TV performance.
+The separate `PlayerControlsRevealRenderingHostedTests` retains hidden,
+intermediate and fully visible screenshots while a preference read is still
+blocked, so removing the fade cannot count as the fix. Run the existing native
+audio-menu and controls-rendering regressions alongside it to preserve focus,
+confirmed settings, hidden/background polling and both glass/fallback materials.
 
 ## Native Home navigation attribution
 
@@ -108,6 +296,8 @@ fixture with real `XCUIRemote` directional input:
 
 ```sh
 python3 tools/performance.py profile --platform tvOS --sim-id "$PLOZZ_SIM_ID"
+python3 tools/performance.py profile --platform tvOS --sim-id "$PLOZZ_SIM_ID" --workload detail-return
+python3 tools/performance.py profile --platform tvOS --sim-id "$PLOZZ_SIM_ID" --workload horizontal-navigation
 python3 tools/performance.py report .build/performance/runs/RUN_ID
 ```
 
@@ -117,6 +307,25 @@ starts recording, and only then sends navigation input. The driver attaches to
 that same app without relaunching it. Three traversals must return focus to the
 hero. The runner stops its recorder, terminates its fixture, restores its
 temporary scheme and shuts down the simulator even on failure.
+
+The `detail-return` workload uses native top tabs and eight populated library
+rows. It opens a poster in a deeper row and returns with three rapid Left presses
+for three visits, preserving the profiled app process. The native focus journal
+is retained with the sample; return-stage `at` values use the main-thread
+monotonic clock rather than the journal writer's asynchronous timestamps.
+Animation callbacks do not establish exact presented-frame timing.
+
+The `horizontal-navigation` workload traverses the custom top bar with real
+library pages available: fifteen Right presses to library ten and fifteen Left presses
+back to Home, repeated three times without per-key accessibility polling.
+Each endpoint must have actual native focus, while the open page remains Home.
+Only Select opens a different page. It retains the transition journal
+and three round-trip durations, which include UI-driver overhead and are not
+input latency or FPS. The fixture creates isolated library models/settings;
+it does not measure connected-server latency. Keep this exact input cadence for
+before/after attribution. Captures from the former focus-preview behavior include
+page construction and are not equivalent page-work benchmarks. Hosted focus checks
+separately verify that rapid and settled focus never change or rebuild the open page.
 
 `Process Sample` is the default backend and uses macOS's installed `sample`
 tool. The report separates main-thread frames, app-owned main-thread frames and
@@ -160,6 +369,35 @@ without pretending a sample count measures frame smoothness.
 | `matrix` | Full 16-case factorial: 1/4 resolved fixture-provider accounts × Plozz automatic channels off/on × cached Live TV data off/on × local cloud-sync processing off/on. Uses account resolution, `LiveTVLibraryRuntime`, source/portable sync bridges, and ledger persistence, with isolated defaults, in-memory credentials, local catalogues and provider doubles. |
 | `diagnostics` | 10,000 operation attempts with recording disabled/enabled, plus 100 bounded snapshot encodes. Measures recorder and event-time serialization overhead without starting Sentry or creating uploads. |
 | `network` | `catalog-cached-refresh`: 1,000-channel loopback M3U import with a 100-ms header delay, then an expired-catalog refresh held while three cached reads complete. Verifies one refresh and actual replacement visibility. Cold/cached foreground timings are separate counters; whole-cycle wall time includes setup, controlled waiting and settling. No external playlist or stream links are fetched. |
+
+`live-tv-schedule-sync` uses the real automatic planner for 4,000 films and five
+distinct channels, then changes only genre/studio spelling. It measures retained
+snapshot records while checking that published broadcasts are preserved.
+`live-tv-schedule-capture` captures 12,000 items, advances the published horizon
+five times, then changes the inputs; full encoding count must fall without
+suppressing that final change. Neither scenario measures CloudKit delivery.
+`guide-large-batches` downloads a generated 23.8 MB, 48,000-programme XMLTV file
+for two 2,000-channel batches. Request/byte reductions must preserve all 32,000
+requested rows; parse count is separate. It now includes encrypted indexing of
+all 6,000 candidate channels, with separate cold-first-batch and warm-second-batch
+timings. Generation identity verifies one completed import across both queries.
+The older fixture parsed twice without persistence; comparing total time includes
+the new full-catalog write cost, not just a warm-cache speedup. It uses loopback,
+not a real provider, and does not measure rendered scrolling or physical devices.
+
+`collection-discovery` runs the production Jellyfin collection provider over
+356 native collections, with 5-ms synthetic request latency. The fixture retains
+10,000 library slots and sparse membership data to expose accidental fanout, but
+each sample must return all 356 server-listed groups in one request, with zero
+library-ID or member requests. A subsequent cached grid page must do no network work.
+`firstItemsNanoseconds` measures the first nonempty progress update (or the final
+return without progressive support); request counts distinguish library ID
+paging from member probes. This native-listing contract intentionally replaces
+the older 24-result client-filtered scenario; results from those different
+workloads are not compatible automated performance baselines. Correctness
+coverage separately requires a cold 356-item list to finish within one second
+with 200-ms synthetic request latency. Neither fixture establishes real-server
+or physical-device latency.
 
 For network-file startup and seek overhead, select `network-file-read-ahead`.
 It exercises the production transport reader with four scattered metadata probes
@@ -332,6 +570,25 @@ presented-frame hitches or memory-pressure limits. Do not describe a sleeping
 idle window's wall time as work; its comparison gates CPU only.
 
 ## Adding a scenario
+
+`seek-generated-80ms` and `seek-generated-180ms` exercise the production scrub
+coordinator at all eight remote scan speeds in both directions. Each sample
+delivers 384 inputs at 33-ms intervals through a paced synthetic extractor and
+requires every final target to arrive. Motion-frame, starvation, cancellation,
+concurrency, blank-publication, publication-gap and settle-latency counters
+distinguish a responsive preview from one that only appears after input stops.
+The synthetic delay is controlled fixture latency, not a decoder benchmark;
+these scenarios do not establish Plex-network or physical-device performance.
+Both require zero starved stages, zero motion cancellations, one in-flight
+extraction, no blank publications, and publication/settle gaps below 500 ms.
+This budget allows two 180-ms extractions plus scheduling overhead; the
+two-second thumbnail grid limits visible frame changes at the slowest speed.
+
+`seek-plex-bif` uses a real loopback HTTP server with 100-ms response latency
+and a 3,601-frame, 320-pixel BIF fixture. Cold and warm passes cover both
+directions at every speed, verify the final JPEG's pixel identity, require
+frames during every moving stage, and permit only one index download.
+This is controlled HTTP/JPEG coverage, not the reporter's Plex server.
 
 Reuse existing production fixtures and helpers first. Add an opt-in XCTest
 method that calls `PerformanceProbe.requireEnabled()` **before setup**, then

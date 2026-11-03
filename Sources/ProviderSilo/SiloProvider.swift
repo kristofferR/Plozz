@@ -138,37 +138,56 @@ public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFi
         guard !scopes.isEmpty else { return [] }
         var result: [MediaItem] = []
         var seen = Set<String>()
+        var requested = Set<String>()
         for scope in scopes {
             var cursor: String?
             var cursors = Set<String>()
+            var scopeIDs = Set<String>()
+            var scopeCount = 0
+            let pageSize = min(limit, 200)
             repeat {
                 var query = [URLQueryItem(name: "status", value: "in_progress"),
-                             URLQueryItem(name: "limit", value: "200")]
+                             URLQueryItem(name: "limit", value: String(pageSize))]
                 if let scope { query.append(URLQueryItem(name: "library_id", value: scope)) }
                 if let cursor { query.append(URLQueryItem(name: "cursor", value: cursor)) }
                 let page: SiloCollection<SiloProgressEntry> = try await client.request("/progress", query: query)
-                for start in stride(from: 0, to: page.items.count, by: 4) {
-                    let batch = Array(page.items[start..<min(start + 4, page.items.count)])
-                    let items = try await withThrowingTaskGroup(of: MediaItem.self) { group in
+                // Progress is newest-first. Fill each library's window without
+                // hydrating the rest of a page or refetching overlapping entries.
+                var start = 0
+                while start < page.items.count, scopeCount < limit {
+                    try Task.checkCancellation()
+                    let end = min(start + min(4, limit - scopeCount), page.items.count)
+                    let batch = page.items[start..<end].filter { progress in
+                        guard scopeIDs.insert(progress.media_item_id).inserted else { return false }
+                        if seen.contains(progress.media_item_id) {
+                            scopeCount += 1
+                            return false
+                        }
+                        return requested.insert(progress.media_item_id).inserted
+                    }
+                    start = end
+                    let items = try await withThrowingTaskGroup(of: MediaItem?.self) { group in
                         for progress in batch {
                             group.addTask { [self] in
-                                var item = try await item(id: progress.media_item_id)
-                                item.resumePosition = progress.position_seconds
-                                item.runtime = progress.duration_seconds > 0 ? progress.duration_seconds : item.runtime
+                                guard var item = try await existingHomeItem(id: progress.media_item_id) else { return nil }
+                                Self.applyResume(position: progress.position_seconds, duration: progress.duration_seconds, to: &item)
                                 item.lastPlayedAt = Self.date(progress.updated_at)
                                 item.libraryID = scope
                                 return item
                             }
                         }
                         var items: [MediaItem] = []
-                        for try await item in group { items.append(item) }
+                        for try await item in group {
+                            if let item { items.append(item) }
+                        }
                         return items
                     }
+                    scopeCount += items.count
                     for item in items where seen.insert(item.id).inserted { result.append(item) }
                 }
                 cursor = try page.nextCursor()
                 if let cursor, (page.items.isEmpty || !cursors.insert(cursor).inserted) { throw AppError.invalidResponse }
-            } while cursor != nil && result.count < limit
+            } while cursor != nil && scopeCount < limit
         }
         let sections: SiloSections = try await client.request("/home/sections")
         var parentSeries: [String: MediaItem] = [:]
@@ -181,9 +200,16 @@ public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFi
                     parent.providerIDs.merge(summary.providerIDs) { first, _ in first }
                     parentSeries[summary.id] = parent
                 }
-                guard !seen.contains(dto.play_content_id ?? dto.content_id) else { continue }
+                let playableID = dto.play_content_id ?? dto.content_id
+                guard !seen.contains(playableID), !requested.contains(playableID) else { continue }
                 var candidate = summary
-                if let target = dto.play_content_id, target != dto.content_id { candidate = try await item(id: target) }
+                if let target = dto.play_content_id, target != dto.content_id {
+                    guard requested.insert(target).inserted,
+                          let existing = try await existingHomeItem(id: target) else { continue }
+                    candidate = existing
+                    Self.applyResume(position: dto.position_seconds, duration: dto.duration_seconds, to: &candidate)
+                    candidate.lastPlayedAt = dto.progress_updated_at.flatMap(Self.date) ?? candidate.lastPlayedAt
+                }
                 if let libraryIDs {
                     guard let membership = try await homeLibraryID(for: candidate, in: libraryIDs) else { continue }
                     candidate.libraryID = membership
@@ -200,6 +226,16 @@ public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFi
         return Array(result.prefix(limit))
     }
 
+    func existingHomeItem(id: String) async throws -> MediaItem? {
+        do {
+            return try await item(id: id)
+        } catch AppError.notFound {
+            try Task.checkCancellation()
+            PlozzLog.networking.info("Skipping a Silo Home entry whose catalog item no longer exists.")
+            return nil
+        }
+    }
+
     public func search(query: String, limit: Int) async throws -> [MediaItem] {
         try await search(query: query, limit: limit, excludingLibraries: [])
     }
@@ -208,7 +244,11 @@ public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFi
         guard limit > 0 else { return [] }
         var result: [MediaItem] = []
         var seen = Set<String>()
-        for library in try await libraries() where !disabled.contains(library.id) {
+        let available = try await libraries()
+        let diagnostic = SearchDiagnosticJournal.currentSource
+        diagnostic?.libraries(available: available.count, excluded: available.filter { disabled.contains($0.id) }.count)
+        for (index, library) in available.enumerated() where !disabled.contains(library.id) {
+            diagnostic?.beginLibrary(index: index)
             let matches = try await catalogItems(
                 [URLQueryItem(name: "library_id", value: library.id),
                  URLQueryItem(name: "q", value: query)],
@@ -289,15 +329,28 @@ public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFi
 
     func catalogDTOs(_ query: [URLQueryItem], limit: Int) async throws -> [SiloItem] {
         guard limit > 0 else { return [] }
+        // Silo binds the page size into its cursor scope, including the final page.
+        let pageLimit = min(200, limit)
         var result: [SiloItem] = []
         var cursor: String?
         var seen = Set<String>()
         repeat {
             try Task.checkCancellation()
-            var parameters = query + [URLQueryItem(name: "limit", value: String(min(200, limit - result.count)))]
+            var parameters = query + [URLQueryItem(name: "limit", value: String(pageLimit))]
             if let cursor { parameters.append(URLQueryItem(name: "cursor", value: cursor)) }
+            let diagnostic = SearchDiagnosticJournal.currentSource
+            diagnostic?.beginPage(limit: pageLimit, usedCursor: cursor != nil)
             let page: SiloCatalogPage = try await client.request("/catalog", query: parameters)
             result += page.items
+            let needsMore = page.page?.has_more == true && result.count < limit
+            let next = page.page?.next_cursor
+            let failure: SearchDiagnosticJournal.PagingFailure?
+            if needsMore && page.items.isEmpty { failure = .emptyPage }
+            else if needsMore && (next?.isEmpty != false) { failure = .missingCursor }
+            else if needsMore, let next, seen.contains(next) { failure = .repeatedCursor }
+            else { failure = nil }
+            diagnostic?.finishPage(rows: page.items.count, hasMore: page.page?.has_more == true,
+                                   hasNextCursor: next?.isEmpty == false, failure: failure)
             guard page.page?.has_more == true, result.count < limit else { break }
             guard !page.items.isEmpty, let next = page.page?.next_cursor, !next.isEmpty,
                   seen.insert(next).inserted else { throw AppError.invalidResponse }
@@ -323,8 +376,9 @@ public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFi
             return MediaVersion(id: file.file_id, fileName: file.file_name, edition: file.edition_raw,
                                 width: info.video?.width, height: info.video?.height, bitrate: info.video?.bitrate,
                                 sizeBytes: file.file_size, duration: file.duration, isDefault: index == 0,
-                                videoCodec: file.codec_video, videoRange: info.video?.videoRangeType,
-                                audioCodec: file.codec_audio, audioChannels: info.audio?.channels,
+                                videoCodec: info.video?.codec,
+                                videoRange: info.video?.videoRangeType ?? info.video?.videoRange,
+                                audioCodec: info.audio?.codec, audioChannels: info.audio?.channels,
                                 audioProfile: info.audio?.profile, container: file.container,
                                 sourceMetadata: info)
         }
@@ -336,6 +390,31 @@ public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFi
         let anchor = SiloCatalogIdentity.parse(dto.content_id, kind: itemKind)
         if let anchor, dto.series_id == nil || dto.series_id == anchor.seriesID {
             ids.merge(anchor.providerIDs) { declared, _ in declared }
+        }
+        let isContainer = itemKind == .series || itemKind == .season
+        let runtime = dto.duration_seconds ?? dto.user_data?.duration_seconds ?? dto.runtime.map { $0 * 60 }
+        let position = dto.position_seconds ?? dto.user_data?.position_seconds
+        let played = dto.user_state?.played ?? dto.user_data?.played ?? false
+        var unwatchedCount = isContainer ? dto.user_data?.unplayed_count : nil
+        var watchedCount = isContainer ? dto.user_data?.watched_count : nil
+        if let count = unwatchedCount, count < 0 {
+            PlozzLog.networking.error("Silo returned a negative unplayed episode count.")
+            unwatchedCount = nil
+        }
+        if let count = watchedCount, count < 0 {
+            PlozzLog.networking.error("Silo returned a negative watched episode count.")
+            watchedCount = nil
+        }
+        let progress: Double?
+        if isContainer {
+            // unplayed_count already includes in-progress episodes.
+            if let watchedCount, let unwatchedCount, watchedCount > 0 {
+                progress = Double(watchedCount) / (Double(watchedCount) + Double(unwatchedCount))
+            } else {
+                progress = dto.sort_metrics?.progress_ratio
+            }
+        } else {
+            progress = Self.playbackFraction(position: position, duration: runtime) ?? dto.sort_metrics?.progress_ratio
         }
         return MediaItem(
             id: dto.content_id, title: dto.title, originalTitle: dto.original_title,
@@ -350,10 +429,9 @@ public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFi
                 MediaPerson(id: $0.person_id ?? $0.name, name: $0.name, role: $0.character,
                             imageURL: resourceURL($0.photo_url))
             }, studios: dto.studios ?? [], seriesID: dto.series_id ?? anchor?.seriesID,
-            runtime: dto.duration_seconds ?? dto.user_data?.duration_seconds ?? dto.runtime.map { $0 * 60 },
-            resumePosition: dto.position_seconds ?? dto.user_data?.position_seconds,
-            playedPercentage: dto.sort_metrics?.progress_ratio,
-            isPlayed: dto.user_state?.played ?? dto.user_data?.played ?? false,
+            runtime: runtime, resumePosition: position,
+            playedPercentage: progress, unwatchedEpisodeCount: unwatchedCount,
+            isPlayed: played, hasBeenPlayed: played || (watchedCount ?? 0) > 0,
             posterURL: resourceURL(dto.poster_url ?? dto.still_url),
             backdropURL: resourceURL(dto.backdrop_url), logoURL: resourceURL(dto.logo_url),
             ratings: displayRatings(dto.ratings ?? []), usesProviderRatings: dto.ratings != nil,
@@ -376,6 +454,23 @@ public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFi
                     }
                 }
             ))
+    }
+
+    static func playbackFraction(position: Double?, duration: Double?) -> Double? {
+        guard let position, let duration else { return nil }
+        guard position.isFinite, duration.isFinite, position >= 0, duration >= 0 else {
+            PlozzLog.networking.error("Silo returned an invalid playback position or duration.")
+            return nil
+        }
+        guard duration > 0 else { return nil }
+        return min(1, position / duration)
+    }
+
+    static func applyResume(position: Double?, duration: Double?, to item: inout MediaItem) {
+        guard position != nil || duration != nil else { return }
+        if let position { item.resumePosition = position }
+        if let duration, duration > 0 { item.runtime = duration }
+        item.playedPercentage = playbackFraction(position: item.resumePosition, duration: item.runtime)
     }
 
     private func displayRatings(_ ratings: [SiloRating]) -> [ExternalRating] {
@@ -437,19 +532,16 @@ public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFi
             videoInfo.width = video.width
             if let height = video.height { videoInfo.height = height }
             if let range = video.video_range { videoInfo.videoRange = range }
-            videoInfo.dolbyVisionProfile = video.dv_profile
-            if let profile = video.dv_profile, profile > 0 {
-                videoInfo.videoRangeType = "DOVI"
-            } else if video.hdr10_plus == true {
-                videoInfo.videoRangeType = "HDR10Plus"
-            } else {
-                videoInfo.videoRangeType = video.video_range_type
+            if video.dv_config_present != false, let profile = video.dv_profile, profile > 0 {
+                videoInfo.dolbyVisionProfile = profile
             }
+            videoInfo.videoRangeType = Self.normalizedVideoRangeType(video)
+            videoInfo.colorTransfer = video.color_transfer
         }
         var audioInfo = MediaSourceMetadata.AudioStream(codec: file.codec_audio)
         if let audio = file.audio_tracks?.first(where: { $0.default }) ?? file.audio_tracks?.first {
             if let codec = audio.codec { audioInfo.codec = codec }
-            audioInfo.profile = audio.profile
+            audioInfo.profile = MediaSourceMetadata.audioProfile(audio.profile, displayTitles: [audio.title])
             audioInfo.channels = audio.channels
             audioInfo.channelLayout = audio.layout
             audioInfo.language = audio.language
@@ -459,6 +551,36 @@ public final class SiloProvider: MediaProvider, CapabilityReporting, MediaSortFi
             fileName: file.file_name,
             video: videoInfo, audio: audioInfo,
             audioLanguages: file.audio_tracks?.compactMap(\.language))
+    }
+
+    static func normalizedVideoRangeType(_ video: SiloVideoTrack) -> String? {
+        let explicit = video.video_range_type?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = (explicit ?? "").uppercased().replacingOccurrences(of: "+", with: "PLUS")
+        let explicitDV = normalized.hasPrefix("DOVI") || normalized.hasPrefix("DOLBYVISION")
+        let hasDV = explicitDV || (video.dv_config_present ?? ((video.dv_profile ?? 0) > 0))
+        let hasPlus = video.hdr10_plus == true || normalized.contains("HDR10PLUS")
+        guard hasDV else { return hasPlus ? "HDR10Plus" : explicit }
+        if hasPlus { return "DOVIWithHDR10Plus" }
+        if explicitDV, normalized != "DOVI", normalized != "DOLBYVISION" { return explicit }
+
+        // A present zero can be omitted from Silo's JSON. A false presence
+        // flag must not turn legacy/default numeric fields into evidence.
+        if video.dv_bl_compat_id_present == true
+            || (video.dv_bl_compat_id_present == nil && video.dv_bl_compat_id != nil) {
+            switch video.dv_bl_compat_id ?? 0 {
+            case 1: return "DOVIWithHDR10"
+            case 2: return "DOVIWithSDR"
+            case 4: return "DOVIWithHLG"
+            case 0: return "DOVI"
+            default: return "DOVI"
+            }
+        }
+        switch normalized {
+        case "HDR10": return "DOVIWithHDR10"
+        case "HLG": return "DOVIWithHLG"
+        case "SDR": return "DOVIWithSDR"
+        default: return video.dv_profile == 7 ? "DOVIWithHDR10" : "DOVI"
+        }
     }
 }
 
@@ -484,7 +606,7 @@ extension SiloProvider: SeriesResumeProviding, SeriesIdentityProviding {
 
 extension SiloProvider: WatchStateProviding, ResumeStateWriting, WatchlistProviding {
     public func setPlayed(_ played: Bool, itemID: String) async throws {
-        try await client.send("/watched/\(try SiloAPI.pathComponent(itemID))", method: played ? .put : .delete)
+        try await client.send("/watched/\(try SiloAPI.pathComponent(itemID))", method: played ? .post : .delete)
     }
 
     public func setResumePosition(_ seconds: TimeInterval, itemID: String, capturedAt: Date) async throws {

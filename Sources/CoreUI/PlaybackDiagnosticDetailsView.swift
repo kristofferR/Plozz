@@ -25,11 +25,21 @@ public struct PlaybackDiagnosticDetailsView: View {
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                #if !os(iOS)
                 Text("Details")
                     .font(.largeTitle.bold())
                     .accessibilityAddTraits(.isHeader)
+                #endif
                 if let message = report.message {
                     Text(message).font(.body).fixedSize(horizontal: false, vertical: true)
+                }
+                if case .library(let diagnostic) = report {
+                    ForEach(Array(diagnostic.failures.enumerated()), id: \.offset) { _, failure in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(failure.section.title).font(.headline)
+                            InlineErrorMessage(Text(failure.error.userMessage))
+                        }
+                    }
                 }
                 if case .onDemand(let error, _, _, _, _, _) = report,
                    case .playback(let failure) = error,
@@ -66,6 +76,10 @@ public struct PlaybackDiagnosticDetailsView: View {
             .frame(maxWidth: .infinity)
         }
         .background { SettingsPageBackground() }
+        #if os(iOS)
+        .navigationTitle("Details")
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
     }
 }
 
@@ -79,9 +93,17 @@ public struct PlaybackDiagnosticDetailsSheet: View {
         NavigationStack {
             PlaybackDiagnosticDetailsView(report: report)
                 .toolbar {
+                    #if os(iOS)
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close", systemImage: "xmark") { dismiss() }
+                            .labelStyle(.iconOnly)
+                            .accessibilityIdentifier("playback-diagnostics-close")
+                    }
+                    #else
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done") { dismiss() }
                     }
+                    #endif
                 }
         }
     }

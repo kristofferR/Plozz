@@ -11,6 +11,7 @@ actor IPTVTestHTTPServer {
         var headerDelay: Duration = .zero
         var delay: Duration = .zero
         var range: Range<Int>?
+        var chunkSize = 65_536
     }
 
     private let listener: NWListener
@@ -157,7 +158,8 @@ actor IPTVTestHTTPServer {
                 try Task.checkCancellation()
                 try await beforeBodyChunk?()
                 if response.delay != .zero { try await Task.sleep(for: response.delay) }
-                let end = min(limit, offset + 65_536)
+                guard response.chunkSize > 0 else { throw URLError(.badServerResponse) }
+                let end = min(limit, offset + response.chunkSize)
                 let chunk: Data
                 if let file { chunk = try file.read(upToCount: end - offset) ?? Data() }
                 else { chunk = response.data.subdata(in: offset..<end) }

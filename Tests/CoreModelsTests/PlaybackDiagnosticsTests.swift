@@ -1,6 +1,53 @@
 import XCTest
 @testable import CoreModels
 
+final class PlaybackDiagnosticsAudioEncodingTests: XCTestCase {
+    func testEncodingDescribesTheActiveEncoderRatherThanTheSourceCodecOrChannelCount() {
+        let cases: [(String, LocalizedStringResource)] = [
+            ("DTS → FLAC bridge", "Lossless encoding"),
+            ("DTS → EAC3 bridge", "Lossy encoding"),
+            ("TRUEHD → FLAC bridge", "Lossless encoding"),
+            ("TRUEHD → EAC3 bridge", "Lossy encoding"),
+            ("AAC → FLAC bridge (timestamp correction)", "Lossless encoding"),
+            ("AAC → EAC3 bridge (timestamp correction)", "Lossy encoding"),
+            ("TRUEHD Atmos → APAC 7.1.4", "Lossy encoding"),
+            ("DTS:X → APAC 9.1.6", "Lossy encoding"),
+            ("TRUEHD Atmos → PCM 9.1.6", "Rendered to PCM"),
+            ("DTS:X → PCM 7.1.4", "Rendered to PCM"),
+            ("Stream-copy (EAC3+JOC Atmos)", "No re-encoding"),
+            ("EAC3 Atmos → renderer (compressed)", "No re-encoding"),
+            ("Stream-copy (FLAC)", "No re-encoding"),
+            ("libavcodec DTS → CoreAudio", "Decoded to PCM")
+        ]
+        for (pipeline, expected) in cases {
+            for channels in [nil, 2, 6, 8] as [Int?] {
+                let diagnostics = PlaybackDiagnostics(
+                    audioCodec: "DTS-HD MA", audioChannels: channels,
+                    audioPipelineDescription: pipeline, mode: .plozzigen
+                )
+                XCTAssertEqual(diagnostics.audioEncodingDescription, expected, pipeline)
+                XCTAssertEqual(diagnostics.audioPipelineDescription, pipeline)
+            }
+        }
+    }
+
+    func testUnknownOrUnsupportedPathsDoNotAcquireAnEncodingClaim() {
+        for pipeline in [nil, "", "AVPlayer", "DTS", "Stream-copy ()", "DTS → unknown bridge",
+                         "FLAC → unknown bridge", " → FLAC bridge", "DTS → FLAC bridge → unknown",
+                         "DTS Atmos → renderer (compressed)", "EAC3 → renderer (compressed)"] {
+            let diagnostics = PlaybackDiagnostics(
+                audioCodec: "FLAC", audioChannels: 8,
+                audioPipelineDescription: pipeline, mode: .plozzigen
+            )
+            XCTAssertNil(diagnostics.audioEncodingDescription, pipeline ?? "nil")
+        }
+        for mode: PlaybackDiagnostics.PlaybackMode in [.directPlay, .remux, .transcode] {
+            let diagnostics = PlaybackDiagnostics(audioPipelineDescription: "DTS → FLAC bridge", mode: mode)
+            XCTAssertNil(diagnostics.audioEncodingDescription)
+        }
+    }
+}
+
 final class PlaybackDiagnosticsEngineMetricsTests: XCTestCase {
     func testPlayerBufferEngineCacheAndStallCountRemainDistinctFacts() {
         let diagnostics = PlaybackDiagnostics(
@@ -229,6 +276,7 @@ final class PlaybackDiagnosticsFormattingTests: XCTestCase {
 
     func testModeAndHDRDisplayNames() {
         XCTAssertEqual(PlaybackDiagnostics.PlaybackMode.directPlay.displayName, "Direct Play")
+        XCTAssertEqual(PlaybackDiagnostics.PlaybackMode.plozzigen.displayName, "Direct Play")
         XCTAssertEqual(PlaybackDiagnostics.PlaybackMode.remux.displayName, "Remux (server, lossless)")
         XCTAssertEqual(PlaybackDiagnostics.PlaybackMode.transcode.displayName, "Transcode (server)")
         XCTAssertEqual(PlaybackDiagnostics.HDRFormat.dolbyVision.displayName, "Dolby Vision")
@@ -312,7 +360,7 @@ final class PlaybackDiagnosticsFormattingTests: XCTestCase {
         XCTAssertEqual(d.sourceProviderText, "Plex")
         XCTAssertEqual(d.videoCodecTagText, "dvh1")
         XCTAssertEqual(d.dolbyVisionProfile, 5)
-        XCTAssertEqual(d.dolbyVisionText, "Profile 5 (single-layer · no HDR10 fallback)")
+        XCTAssertEqual(d.videoFormatText, "Dolby Vision P5 · 10-bit · PQ (ST 2084) · DOVI")
         XCTAssertEqual(d.colorText, "10-bit · PQ (ST 2084) · DOVI")
     }
 
@@ -352,20 +400,29 @@ final class PlaybackDiagnosticsEnrichedTests: XCTestCase {
         XCTAssertNil(PlaybackDiagnostics.seekWindowFacts(start: nil, end: nil, duration: 7104))
     }
 
-    func testDolbyVisionDescription() {
-        XCTAssertEqual(
-            PlaybackDiagnostics.dolbyVisionDescription(profile: 5),
-            "Profile 5 (single-layer · no HDR10 fallback)"
+    func testVideoFormatDescribesSourceWithoutClaimingFELProcessing() {
+        for profile in [5, 7, 8, 10] {
+            let diagnostics = PlaybackDiagnostics(hdr: .dolbyVision, videoBitDepth: 10, dolbyVisionProfile: profile)
+            XCTAssertEqual(diagnostics.videoFormatText, "Dolby Vision P\(profile) · 10-bit")
+        }
+    }
+
+    func testVideoFormatPreservesReportedColorFactsWithoutInferringCompatibility() {
+        let diagnostics = PlaybackDiagnostics(
+            hdr: .dolbyVision, videoBitDepth: 10, dolbyVisionProfile: 8,
+            colorTransfer: "arib-std-b67", videoRangeType: "DOVIWITHHLG"
         )
-        XCTAssertEqual(
-            PlaybackDiagnostics.dolbyVisionDescription(profile: 8),
-            "Profile 8 (single-layer · HDR10-compatible)"
-        )
-        XCTAssertEqual(
-            PlaybackDiagnostics.dolbyVisionDescription(profile: 7),
-            "Profile 7 (dual-layer · hybrid engine)"
-        )
-        XCTAssertNil(PlaybackDiagnostics.dolbyVisionDescription(profile: nil))
+        XCTAssertEqual(diagnostics.videoFormatText, "Dolby Vision P8 · 10-bit · HLG · DOVIWITHHLG")
+        XCTAssertEqual(PlaybackDiagnostics(hdr: .hdr10Plus, videoBitDepth: 10).videoFormatText, "HDR10+ · 10-bit")
+        XCTAssertEqual(PlaybackDiagnostics(hdr: .sdr, videoBitDepth: 8).videoFormatText, "SDR · 8-bit")
+    }
+
+    func testVideoFormatKeepsPartialFactsAndOmitsUnknownValues() {
+        XCTAssertEqual(PlaybackDiagnostics(hdr: .dolbyVision).videoFormatText, "Dolby Vision")
+        XCTAssertEqual(PlaybackDiagnostics(videoBitDepth: 10).videoFormatText, "10-bit")
+        XCTAssertEqual(PlaybackDiagnostics(dolbyVisionProfile: 7).videoFormatText, "P7")
+        XCTAssertEqual(PlaybackDiagnostics(videoBitDepth: 0).videoFormatText, "—")
+        XCTAssertEqual(PlaybackDiagnostics().videoFormatText, "—")
     }
 
     func testTransferFunctionLabel() {

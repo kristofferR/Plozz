@@ -30,11 +30,12 @@ public struct ContinueWatchingArtworkSource: Sendable {
     var variant: ArtworkImageVariant { style == .poster ? .posterCard : .landscapeCard }
     var aspectGuard: CGFloat? { style == .poster ? 0.9 : nil }
     var logoReferences: [ArtworkReference] { item.artworkReferences(for: .logo) }
+    var prefersTextlessBackdrop: Bool { style == .landscape && policy.prefersTextlessArtwork }
 
     public var identity: String {
         [
             pinIdentity, style == .poster ? "poster" : "landscape",
-            policy.identity, policy.settings.preference(in: .continueWatching).rawValue,
+            policy.forPlacement(.logo).identity, policy.settings.preference(in: .continueWatching).rawValue,
             allowsFallback ? "fallback" : "local-only",
             MetadataQuery(item.kind == .episode ? ArtworkRouter.seriesArtworkItem(for: item) : item).cacheKey(for: .hero),
             references(textlessBackdrop: nil).map(\.privacySafeIdentity).joined(separator: "\n"),
@@ -43,7 +44,8 @@ public struct ContinueWatchingArtworkSource: Sendable {
     }
 
     func primaryReference(textlessBackdrop: URL?) -> ArtworkReference? {
-        PosterCardPresentation.continueWatchingPrimaryReference(
+        guard style == .landscape else { return nil }
+        return PosterCardPresentation.continueWatchingPrimaryReference(
             for: item, policy: policy,
             textlessBackdrop: policy.prefersTextlessArtwork ? textlessBackdrop : nil
         )
@@ -74,15 +76,19 @@ public struct ContinueWatchingArtworkSource: Sendable {
     func logoFallback(background: Bool = false) -> HeroLogoFallback? {
         guard allowsFallback else { return nil }
         let target = item.kind == .episode ? ArtworkRouter.seriesArtworkItem(for: item) : item
-        return HeroLogoFallback(for: target) {
+        return HeroLogoFallback(for: target, localizedResolve: { language in
             await ArtworkSession.resolveArtwork(background: background) {
-                await router.artworkURL(.logo, for: target)
+                await router.artworkURL(.logo, for: target, language: language)
             }
-        }
+        })
     }
 
     @MainActor
     public func prepare(store: TextlessBackdropStore = .shared) async {
+        guard style == .landscape else {
+            await prepareBackground(store: store)
+            return
+        }
         async let logo: Void = HeroLogoPreloader.prepare(
             references: logoReferences, fallback: logoFallback(background: true), policy: policy
         )
@@ -92,11 +98,11 @@ public struct ContinueWatchingArtworkSource: Sendable {
 
     @MainActor
     private func prepareBackground(store: TextlessBackdropStore) async {
-        if allowsFallback, policy.prefersTextlessArtwork {
+        if allowsFallback, prefersTextlessBackdrop {
             await store.prepare(for: item, variant: variant, background: true)
         }
         guard !Task.isCancelled else { return }
-        let textless = policy.prefersTextlessArtwork ? store.backdrop(for: item) : nil
+        let textless = prefersTextlessBackdrop ? store.backdrop(for: item) : nil
         await ArtworkFirstPaintResolver.prepare(
             references: references(textlessBackdrop: textless),
             prefersPrimaryReference: primaryReference(textlessBackdrop: textless) != nil,

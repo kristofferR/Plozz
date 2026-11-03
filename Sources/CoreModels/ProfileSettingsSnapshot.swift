@@ -32,18 +32,26 @@ public enum ProfileSettingsTransfer {
     ///  - `com.plozz.uiDensity` (touch vs. TV density — platform-specific)
     ///  - `navigationStyle` (tab bar vs. sidebar — platform-specific)
     ///  - `preventsAccidentalExit` (tvOS remote behavior — platform-specific)
+    ///  - `detailZoomEnabled` (retired title-transition preference)
     ///  - `com.plozz.diagnosticsSettings` (device-local debugging)
     ///  - `com.plozz.syncSetup.enabled` (the sync flag itself — must not propagate)
     ///  - `com.plozz.musicAvailability` (a per-device capability, not a preference)
+    ///  - `com.plozz.deviceExternalPlayer` (shared by viewers on this device only)
+    ///  - `com.plozz.deviceTopShelf` (shared Top Shelf preferences on this Apple TV only)
+    ///  - `com.plozz.losslessSurround` (connected audio setup, shared by viewers on this device)
+    ///  - `com.plozz.spatialAudioLayout` (retired device-local rendering layout)
     public static let transferableBaseKeys: [String] = [
         "com.plozz.appTheme",
         ThemeSettingsStore.gradientStorageKey,
+        ContentRatingSettingsStore.storageKey,
         "transparencyPreference",
         "com.plozz.cardStyle",
         CardCaptionSettingsStore.storageKey,
         ArtworkSettingsStore.storageKey,
         "com.plozz.watchStatusIndicator",
         WatchStatusIndicatorSettingsStore.episodeCountStorageKey,
+        WatchStatusIndicatorSettingsStore.progressBarsStorageKey,
+        WatchStatusIndicatorSettingsStore.episodeCountStyleStorageKey,
         WatchStatusIndicatorSettingsStore.colorStorageKey,
         "com.plozz.nightShift",
         "com.plozz.playbackSettings",
@@ -60,6 +68,8 @@ public enum ProfileSettingsTransfer {
         "com.plozz.heroSettings",
         "com.plozz.homeLibraryVisibility",
         LibraryBrowsePreferencesStore.storageKey,
+        WatchlistBrowsePreferencesStore.storageKey,
+        LibraryPresentationSettingsStore.storageKey,
         "com.plozz.homeLayout.v2",
         "home-content",
         "com.plozz.musicLandingLayout",
@@ -92,7 +102,7 @@ public enum ProfileSettingsTransfer {
             // producing the "works maybe once, then wildly inconsistent" behavior.
             // Wrap in an array so scalar values (Bool/Int/String) are valid
             // top-level property-list roots too.
-            let canonical = canonicalize(value)
+            let canonical = canonicalize(value, baseKey: base)
             if let data = try? PropertyListSerialization.data(
                 fromPropertyList: [canonical], format: .binary, options: 0
             ) {
@@ -105,14 +115,25 @@ public enum ProfileSettingsTransfer {
     /// Normalize a persisted settings value into a byte-stable form. A `Data` blob
     /// that is really JSON (the common case — most settings stores persist
     /// `JSONEncoder().encode(...)` output) is re-serialized with SORTED keys so
-    /// dictionary ordering can't vary run-to-run. Everything else is returned
+    /// dictionary ordering can't vary run-to-run. Known set-valued fields are
+    /// sorted without changing ordered arrays. Everything else is returned
     /// unchanged: property-list scalars/strings/arrays already serialize
     /// deterministically, and a non-JSON `Data` blob is left as its (stable) bytes.
-    static func canonicalize(_ value: Any) -> Any {
+    static func canonicalize(_ value: Any, baseKey: String? = nil) -> Any {
         guard let data = value as? Data else { return value }
-        guard let object = try? JSONSerialization.jsonObject(
-            with: data, options: [.fragmentsAllowed]),
-              let canonical = try? JSONSerialization.data(
+        guard var object = try? JSONSerialization.jsonObject(
+            with: data, options: [.fragmentsAllowed]) else { return value }
+        if baseKey == "com.plozz.playbackSettings", var playback = object as? [String: Any] {
+            // Old clients/snapshots still contain the retired profile field.
+            playback.removeValue(forKey: "externalPlayer")
+            object = playback
+        }
+        if baseKey == "com.plozz.heroSettings", var hero = object as? [String: Any],
+           let libraries = hero["randomLibraryKeys"] as? [String] {
+            hero["randomLibraryKeys"] = Set(libraries).sorted()
+            object = hero
+        }
+        guard let canonical = try? JSONSerialization.data(
                 withJSONObject: object, options: [.sortedKeys, .fragmentsAllowed])
         else { return value }
         return canonical
@@ -129,7 +150,7 @@ public enum ProfileSettingsTransfer {
             guard let unwrapped = try? PropertyListSerialization.propertyList(
                 from: data, options: [], format: nil
             ) as? [Any], let value = unwrapped.first else { continue }
-            defaults.set(value, forKey: SettingsKey.scoped(base, namespace: namespace))
+            defaults.set(canonicalize(value, baseKey: base), forKey: SettingsKey.scoped(base, namespace: namespace))
         }
     }
 
@@ -142,7 +163,7 @@ public enum ProfileSettingsTransfer {
         guard transferableBaseKeys.contains(baseKey) else { return }
         guard let unwrapped = try? PropertyListSerialization.propertyList(
             from: blob, options: [], format: nil) as? [Any], let value = unwrapped.first else { return }
-        defaults.set(value, forKey: SettingsKey.scoped(baseKey, namespace: namespace))
+        defaults.set(canonicalize(value, baseKey: baseKey), forKey: SettingsKey.scoped(baseKey, namespace: namespace))
     }
 
     /// Remove ONE setting key from a profile namespace (a synced deletion → this

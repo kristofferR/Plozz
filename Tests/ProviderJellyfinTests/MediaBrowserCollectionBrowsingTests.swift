@@ -29,6 +29,12 @@ final class MediaBrowserCollectionBrowsingTests: XCTestCase {
             let libraries = try await provider.libraries()
             XCTAssertEqual(libraries.map(\.id), ["boxsets"])
             XCTAssertEqual(libraries.map(\.kind), [.collection])
+            XCTAssertFalse(libraries[0].isServerCollectionDirectory)
+            XCTAssertEqual(libraries[0].hasCollections, true)
+            XCTAssertEqual(http.sentPaths, ["/Users/user/Views", "/Users/user/Items"])
+            let existenceQuery = try XCTUnwrap(http.queryItems(forPathSuffix: "/Users/user/Items"))
+            XCTAssertTrue(existenceQuery.contains(URLQueryItem(name: "Limit", value: "1")))
+            XCTAssertTrue(existenceQuery.contains(URLQueryItem(name: "ParentId", value: "boxsets")))
             let page = try await provider.items(
                 in: "boxsets", kind: .collection, page: PageRequest(startIndex: 60, limit: 1)
             )

@@ -3,6 +3,33 @@ import XCTest
 
 @MainActor
 final class HomeSectionCatalogModelTests: XCTestCase {
+    func testCurrentCatalogUsesAuthorizedLocalChoicesBeforeLoadingAndAfterIdentityChanges() async throws {
+        let suite = "HomeCatalogImmediate.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let visibility = HomeLibraryVisibilityModel(store: HomeLibraryVisibilityStore(defaults: defaults))
+        visibility.useRowDefaults(.combined)
+        let provider = HomeCatalogProvider()
+        let account = ResolvedAccount(account: Account(from: provider.session), provider: provider)
+        let library = AggregatedLibrary(
+            accountID: account.account.id, accountName: "Viewer", serverName: "Server", providerKind: .plex,
+            library: .init(id: "movies", title: "Movies", kind: .movie)
+        )
+        let model = HomeSectionCatalogModel()
+        let immediate = model.currentCatalog(libraries: [library], accounts: [account], visibility: visibility)
+        XCTAssertTrue(immediate.choices.contains { $0.library?.key == library.key })
+        await model.load(libraries: [library], accounts: [account], visibility: visibility)
+        XCTAssertEqual(model.currentCatalog(libraries: [library], accounts: [account], visibility: visibility), model.catalog)
+        let changed = model.currentCatalog(libraries: [library], accounts: [], visibility: visibility)
+        XCTAssertFalse(changed.choices.contains { $0.library != nil || $0.serverRow != nil })
+        let child = ResolvedAccount(
+            account: account.account, provider: provider, plexHomeUserID: "child", credentialRevision: account.credentialRevision
+        )
+        let newIdentity = model.currentCatalog(libraries: [library], accounts: [child], visibility: visibility)
+        XCTAssertFalse(newIdentity.choices.contains { $0.serverRow != nil })
+        XCTAssertFalse(newIdentity.choices.contains { $0.id == .library(key: library.key, section: "recommended") })
+    }
+
     func testVisiblePagesShareDiscoveryWhenTheRootTaskIsCancelled() async throws {
         let suite = "HomeCatalogConsumers.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

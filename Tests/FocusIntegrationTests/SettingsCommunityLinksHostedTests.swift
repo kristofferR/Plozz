@@ -8,6 +8,17 @@ import XCTest
 
 @MainActor
 final class SettingsCommunityLinksHostedTests: XCTestCase {
+    func testPrivacyPolicyCodeOpensThePublicPolicyInBothThemes() async throws {
+        for scheme in [ColorScheme.light, .dark] {
+            _ = try await renderCodes(
+                PrivacyPolicyQRCodeView(),
+                scheme: scheme,
+                name: "privacy-policy-\(scheme)",
+                expectedURLs: [AppLinks.privacyPolicy.absoluteString]
+            )
+        }
+    }
+
     func testUpdateDialogShowsScannableFocusableDiscordCardInBothThemes() async throws {
         let suite = "ReleaseNotesCommunity.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -215,7 +226,10 @@ final class SettingsCommunityLinksHostedTests: XCTestCase {
         for code in codes {
             XCTAssertGreaterThan(code.bounds.width, minimumCodeWidth, "Keep the expected scan size.")
         }
-        return decoded.sorted { ($0.messageString ?? "") < ($1.messageString ?? "") }
+        return decoded.sorted {
+            $0.messageString == AppLinks.discord.absoluteString
+                && $1.messageString != AppLinks.discord.absoluteString
+        }
     }
 
     private func focusItems(in window: UIWindow) -> [any UIFocusItem] {

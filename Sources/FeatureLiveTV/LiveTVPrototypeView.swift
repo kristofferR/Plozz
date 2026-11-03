@@ -20,6 +20,12 @@ public struct LiveTVPrototypePlayback {
     public let canToggleFavorite: Bool
     public let onToggleFavorite: () -> Void
     public let isExpanded: Bool
+    public let isPreviewVisible: Bool
+    public let expandPreview: () -> Void
+    public let previewReflectionHeight: CGFloat
+    public let previewTopReflectionHeight: CGFloat
+    public let previewLeadingReflectionWidth: CGFloat
+    public let previewTrailingReflectionWidth: CGFloat
     public let returnToGuide: () -> Void
     public let playPauseRequest: Int
     public let playbackStarted: () -> Void
@@ -27,7 +33,6 @@ public struct LiveTVPrototypePlayback {
     public let playbackUpdate: @MainActor (LiveTVPlaybackUpdate) -> Void
     public let playbackFailed: @MainActor (LiveChannelFailureReport) -> Void
     public let videoAspectRatioChanged: @MainActor (Double?) -> Void
-    public let preparingChannelName: String?
     public let isMultiview: Bool
     public let isAudible: Bool
     public let openMultiview: () -> Void
@@ -58,14 +63,11 @@ private struct PrototypeExternalPlayback: Equatable {
 }
 
 private struct PrototypeSearchBookmark {
+    let category: String?
     let row: LiveTVGuideRowID?
     let guideOffset: TimeInterval
     let timeAnchor: Date
     let timelineOffset: CGFloat
-}
-
-private enum PrototypeSearchScope: Hashable {
-    case channels, programs
 }
 
 public struct LiveTVPrototypeView<PlayerContent: View>: View {
@@ -87,14 +89,23 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
     @State private var selectedChannelID: String?
     @State private var selectedRowID: LiveTVGuideRowID?
     @State private var isSearching = false
+    #if os(iOS)
+    @State private var searchRetainsToolbar = false
+    #endif
+    #if os(tvOS)
     @State private var searchScope: PrototypeSearchScope = .channels
+    #endif
     @State private var searchFocusRequest = 0
     @State private var searchOrigin: PrototypeSearchBookmark?
+    @State private var pendingSearchCategory: String?
+    @State private var showsCategoryDirectory: Bool
+    @State private var startsWithCategories: Bool
+    @State private var categoryDirectoryReturnID: String?
     @State private var topRequest = 0
     @State private var nowRequest = 0
     @State private var channelSequence = LiveTVChannelSequence(channels: [])
     @State private var controlsActive = false
-    @State private var categorySidebarCollapsed = false
+    @State private var toolbarControlsBottom: CGFloat?
     @State private var categoryFocusRequest = 0
     @State private var sidebarRestoresCategoryFocus = false
     @State private var guideHasFocus = false
@@ -128,6 +139,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
     @State private var previewAfterWatching = true
     @Environment(\.themePalette) private var palette
     @Environment(\.plozzNavigationContentInset) private var navigationInset
+    @Environment(\.plozzTopNavigationContentInsets) private var topNavigationInsets
     @Environment(\.plozzReduceTransparency) private var reduceTransparency
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.scenePhase) private var scenePhase
@@ -161,9 +173,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
     private let connectServer: (() -> Void)?
     private let onExpandedChange: (Bool) -> Void
     private let onOpenTitle: ((MediaItem) -> Void)?
-    /// Touch: what sits at the trailing end of the guide's top row, opposite
-    /// the browse controls — the host's profile avatar.
-    private let topBarAccessory: AnyView?
+    private let onShowSettings: (() -> Void)?
     private let player: (LiveTVPrototypePlayback) -> PlayerContent
 
     public init(
@@ -199,7 +209,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         homeModel: HomeLiveTVModel? = nil,
         homeAuthorizationID: String? = nil,
         onOpenTitle: ((MediaItem) -> Void)? = nil,
-        topBarAccessory: AnyView? = nil,
+        onShowSettings: (() -> Void)? = nil,
         @ViewBuilder player: @escaping (LiveTVPrototypePlayback) -> PlayerContent
     ) {
         self.isActive = isActive
@@ -210,6 +220,10 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         self.restoreDestination = restoreDestination
         self.usesNativeFullscreen = usesNativeFullscreen
         self.viewSettingsStore = viewSettingsStore
+        let initialViewSettings = viewSettingsStore?.load()
+        let startsWithCategories = initialViewSettings?.startsWithCategories ?? LiveTVViewSettings().startsWithCategories
+        _startsWithCategories = State(initialValue: startsWithCategories)
+        _showsCategoryDirectory = State(initialValue: startsWithCategories)
         self.sourceStore = sourceStore
         self.enrollmentSuppression = LiveTVServerEnrollmentSuppressionStore(
             profileID: profileID, namespace: preferencesNamespace
@@ -253,7 +267,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         _imports = State(initialValue: imports)
         self.onExpandedChange = onExpandedChange
         self.onOpenTitle = onOpenTitle
-        self.topBarAccessory = topBarAccessory
+        self.onShowSettings = onShowSettings
         self.player = player
         #if DEBUG
         let isLargeCatalog = ProcessInfo.processInfo.arguments.contains("--live-tv-5000")
@@ -266,6 +280,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             channels: [], preferencesStore: preferencesStore
         )
         _model = State(initialValue: model)
+        if startsWithCategories { model.category = nil }
         let scanBinding = LiveTVScanCatalogBinding(
             profileID: profileID, model: model,
             coordinator: LiveTVChannelScanCoordinator(store: LiveTVChannelHealthStore(
@@ -275,7 +290,6 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         )
         _scanBinding = State(initialValue: scanBinding)
         #if os(tvOS)
-        let initialViewSettings = viewSettingsStore?.load()
         _needsPreviewChoice = State(initialValue: initialViewSettings?.hasChosenAutoPreview == false)
         let preview = LiveTVPreviewController(
             model: model, followsFocus: initialViewSettings?.allowsAutomaticPreview ?? true
@@ -353,12 +367,22 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             let layout = PrototypePreviewLayout(
                 size: geometry.size, safeAreaInsets: geometry.safeAreaInsets,
                 navigationInset: navigationInset, nativeNavigation: usesNativeFullscreen,
+                topNavigationInsets: topNavigationInsets,
                 largeText: typeSize.isAccessibilitySize,
-                isSearching: isSearching, hidesSidebar: categorySidebarCollapsed
+                isSearching: isSearching, showsCategories: showsCategoryDirectory,
+                showsVideoPreview: playback.preparation.current != nil || playback.pendingWatchChannelID != nil,
+                toolbarControlsBottom: toolbarControlsBottom.map { $0 - geometry.frame(in: .global).minY }
             )
             let expanded = multiviewSelection == nil && (preview.isExpanded || multiview.isEnabled)
+            #if os(iOS)
+            let playerTransition: Animation? = reduceMotion ? nil : .smooth(duration: 0.35)
+            #else
+            let playerTransition: Animation? = reduceMotion ? nil : .easeInOut(duration: 0.32)
+            #endif
             ZStack(alignment: .topLeading) {
+                #if !os(tvOS)
                 AppBackground(palette: palette)
+                #endif
 
                 // Stable pane IDs retain renderers through single/multiple layouts and promotion.
                 ForEach(multiview.panes) { pane in
@@ -375,13 +399,28 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                             )
                             .offsetBy(dx: layout.bounds.minX, dy: layout.bounds.minY)
                             : (expanded ? layout.bounds : layout.videoFrame)
-                        player(playbackInput(for: pane, prepared: prepared))
+                        let reflectionHeight = !expanded && !showingMultiview && !reduceTransparency
+                            ? layout.videoReflectionHeight : 0
+                        let topReflectionHeight = reflectionHeight > 0 ? layout.videoTopReflectionHeight : 0
+                        let leadingReflectionWidth = reflectionHeight > 0 ? layout.videoLeadingReflectionWidth : 0
+                        let trailingReflectionWidth = reflectionHeight > 0 ? layout.videoTrailingReflectionWidth : 0
+                        player(playbackInput(for: pane, prepared: prepared, reflectionHeight: reflectionHeight,
+                                             topReflectionHeight: topReflectionHeight,
+                                             leadingReflectionWidth: leadingReflectionWidth,
+                                             trailingReflectionWidth: trailingReflectionWidth,
+                                             isPreviewVisible: !expanded && layout.heroHeight > 0))
+                    .environment(\.playbackReflectionColorScheme, palette.isLight ? .light : .dark)
                     .environment(\.themePalette, ThemePalette.dark)
                     .environment(\.colorScheme, .dark)
                     .frame(width: videoFrame.width, height: videoFrame.height)
-                    .clipShape(RoundedRectangle(
+                    .clipShape(PrototypeVideoClip(
+                        reflectionHeight: reflectionHeight,
+                        topReflectionHeight: topReflectionHeight,
+                        leftReflectionWidth: layoutDirection == .rightToLeft ? trailingReflectionWidth : leadingReflectionWidth,
+                        rightReflectionWidth: layoutDirection == .rightToLeft ? leadingReflectionWidth : trailingReflectionWidth,
                         cornerRadius: showingMultiview && multiview.isEditingLayout ? 10 : 0))
                     .overlay {
+                        #if os(tvOS)
                         LinearGradient(
                             stops: [
                                 .init(color: palette.backgroundBase, location: 0),
@@ -393,22 +432,38 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                         .opacity(expanded || layout.compact ? 0 : 1)
                         .allowsHitTesting(false)
                         .accessibilityHidden(true)
+                        #endif
                     }
                     .position(
                         x: !showingMultiview && layoutDirection == .rightToLeft
                             ? geometry.size.width - videoFrame.midX : videoFrame.midX,
                         y: videoFrame.midY
                     )
-                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.32), value: preview.isExpanded)
+                    #if os(iOS)
+                    .animation(playerTransition, value: videoFrame)
+                    #else
+                    .animation(playerTransition, value: preview.isExpanded)
+                    #endif
+                    #if os(iOS)
+                    .zIndex(showingMultiview
+                        ? (pane.id != multiview.primaryPaneID ? 1 : 0) : (expanded ? 1 : 0))
+                    #else
                     .zIndex(showingMultiview && pane.id != multiview.primaryPaneID ? 1 : 0)
+                    #endif
                     .opacity(multiviewSelection != nil
                         ? (pane.id == multiview.audiblePaneID ? 1 : 0)
                         : (multiview.expandedPaneID == nil || multiview.expandedPaneID == pane.id ? 1 : 0))
                     .allowsHitTesting(!multiview.isEnabled)
                     .accessibilityHidden(multiview.isEnabled)
+                    #if os(iOS)
+                    .opacity(expanded || layout.heroHeight > 0 ? 1 : 0)
+                    .allowsHitTesting(expanded || layout.heroHeight > 0)
+                    .accessibilityHidden(!expanded && layout.heroHeight == 0)
+                    #endif
                     }
                 }
 
+                #if os(tvOS)
                 PrototypePreviewScrim(layout: layout, reduceTransparency: reduceTransparency)
                     .frame(width: layout.bounds.width, height: layout.bounds.height)
                     .position(
@@ -416,20 +471,33 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                             ? geometry.size.width - layout.bounds.midX : layout.bounds.midX,
                         y: layout.bounds.midY
                     )
-                    .opacity(expanded ? 0 : 1)
+                    .opacity(expanded || model.channels.isEmpty ? 0 : 1)
                     .animation(reduceMotion ? nil : .easeInOut(duration: 0.32), value: preview.isExpanded)
+                #endif
 
                 guideContent(layout, canvasWidth: geometry.size.width)
                 #if os(tvOS)
                 .focusSection()
+                #else
+                .environment(\.prototypeScrollTopBoundary, geometry.frame(in: .global).minY + layout.bounds.minY)
                 #endif
                 .frame(width: geometry.size.width, height: geometry.size.height)
+                #if os(iOS)
+                .contentShape(PrototypeGuideHitRegion(
+                    top: layout.heroHeight > 0 ? max(0, layout.videoFrame.maxY) : 0,
+                    sidebarWidth: layout.sidebarWidth > 0 ? max(0, layout.videoFrame.minX) : 0,
+                    sidebarOnTrailing: layoutDirection == .rightToLeft))
+                #endif
                 .opacity(expanded ? 0 : 1)
+                #if os(iOS)
+                .offset(y: expanded && !reduceMotion ? 24 : 0)
+                #else
                 .offset(y: expanded && !reduceMotion ? geometry.size.height * 0.55 : 0)
+                #endif
                 .disabled(expanded || !isActive || showsPreviewIntroduction)
                 .allowsHitTesting(!expanded && isActive && !showsPreviewIntroduction)
                 .accessibilityHidden(expanded || !isActive || showsPreviewIntroduction)
-                .animation(reduceMotion ? nil : .easeInOut(duration: 0.32), value: preview.isExpanded)
+                .animation(playerTransition, value: preview.isExpanded)
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: isSearching)
                 if showingMultiview {
                     LiveTVMultiviewOverlay(
@@ -449,18 +517,58 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                     .zIndex(2)
                 }
             }
+            #if os(tvOS)
+            .settingsPageBackground()
+            #elseif os(iOS)
+            .background(PrototypeToolbarBottomReader {
+                if !expanded, $0 > 0 { toolbarControlsBottom = $0 }
+            })
+            .toolbar {
+                PrototypeTouchBrowseToolbar(
+                    model: model, configuration: imports.configuration,
+                    isSearching: isSearching || searchRetainsToolbar,
+                    showsDirectory: usesCategoryDirectory(layout),
+                    hasSidebar: layout.sidebarWidth > 0,
+                    isDisabled: blocksBrowseControls || !isActive || expanded,
+                    showGuide: { showCategory(nil) }, showCategories: showCategories,
+                    selectSource: selectBrowseSource,
+                    addSource: { sheet = .addSource },
+                    selectCategory: { showCategory($0, enteringGuide: layout.sidebarWidth == 0) },
+                    filters: { sheet = .filters },
+                    search: openSearch,
+                    sources: { sheet = .sources },
+                    multiviews: multiviewSelection == nil ? { sheet = .multiviewFavorites } : nil,
+                    cancelSelection: multiviewSelection == nil ? nil : finishMultiviewSelection,
+                    settings: onShowSettings
+                )
+            }
+            .navigationTitle(Text(verbatim: ""))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar(expanded ? .hidden : .visible, for: .navigationBar)
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .modifier(PrototypeToolbarSearch(
+                query: $model.query,
+                isPresented: Binding(
+                    get: { isSearching },
+                    set: { presented in
+                        guard presented != isSearching else { return }
+                        if presented {
+                            guard !blocksBrowseControls, isActive, !expanded else { return }
+                            openSearch()
+                        } else {
+                            closeSearch()
+                        }
+                    }
+                ),
+                focusRequest: searchFocusRequest, submit: enterGuide,
+                focusChanged: { if $0 { controlsActive = true } },
+                dismissed: { searchRetainsToolbar = false }
+            ))
+            #endif
         }
         .environment(\.themePalette, palette)
         .tint(palette.accent)
         .environment(\.colorScheme, palette.isLight ? .light : .dark)
-        .overlay(alignment: .topTrailing) {
-            if let id = playback.pendingWatchChannelID, !preview.isExpanded || playback.preparation.current == nil {
-                PrototypeWatchPreparationStatus(
-                    channelName: model.channel(id: id)?.name ?? "",
-                    cancel: playback.cancelWatch
-                )
-            }
-        }
         .overlay(alignment: .bottomLeading) {
             if isActive, !allowsPlayback, !model.channels.isEmpty, let playbackUnavailableReason {
                 Label {
@@ -485,7 +593,9 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
     }
 
     private func playbackInput(
-        for pane: LiveTVMultiviewPane, prepared: LiveTVPreparedStream
+        for pane: LiveTVMultiviewPane, prepared: LiveTVPreparedStream, reflectionHeight: CGFloat = 0,
+        topReflectionHeight: CGFloat = 0, leadingReflectionWidth: CGFloat = 0,
+        trailingReflectionWidth: CGFloat = 0, isPreviewVisible: Bool = false
     ) -> LiveTVPrototypePlayback {
         let presentationID = playback.presentationID
         return LiveTVPrototypePlayback(
@@ -498,6 +608,15 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             canToggleFavorite: model.preferencesIssue != .loadFailed,
             onToggleFavorite: { model.toggleFavoriteWithFeedback(prepared.channel.id) },
             isExpanded: preview.isExpanded && !multiview.isEnabled,
+            isPreviewVisible: isPreviewVisible && !multiview.isEnabled,
+            expandPreview: {
+                guard activity.acceptsInteraction, !multiview.isEnabled else { return }
+                playback.expandPreview(presentationID: presentationID, preparedID: prepared.id)
+            },
+            previewReflectionHeight: reflectionHeight,
+            previewTopReflectionHeight: topReflectionHeight,
+            previewLeadingReflectionWidth: leadingReflectionWidth,
+            previewTrailingReflectionWidth: trailingReflectionWidth,
             returnToGuide: {
                 guard playback.ownsPlayerPresentation(presentationID) else { return }
                 leavePlaybackForGuide()
@@ -521,9 +640,6 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             },
             videoAspectRatioChanged: {
                 multiview.updateVideoAspectRatio($0, paneID: pane.id, preparedID: prepared.id)
-            },
-            preparingChannelName: pane.preparation.preparingChannelID.flatMap {
-                model.channel(id: $0)?.name
             },
             isMultiview: multiview.isEnabled,
             isAudible: pane.id == multiview.audiblePaneID,
@@ -651,6 +767,9 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                 connectServer?()
             } else if let id = pendingTuneID {
                 pendingTuneID = nil
+                #if os(iOS)
+                leaveSearchForChannel(id)
+                #endif
                 tune(id)
             }
         }) { destination in
@@ -936,13 +1055,9 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         .onChange(of: model.favoritesOnly) { _, _ in persistViewFilters() }
         .onChange(of: model.guideOnly) { _, _ in persistViewFilters() }
         .onChange(of: controlsActive) { _, active in
-            if active { categorySidebarCollapsed = false }
             updatePreviewAvailability()
         }
         .onChange(of: guideHasFocus) { _, focused in
-            #if os(tvOS)
-            if focused && !isSearching { categorySidebarCollapsed = true }
-            #endif
             updatePreviewAvailability()
         }
         .onChange(of: sheet?.id) { _, _ in
@@ -1149,10 +1264,14 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
 
     @ViewBuilder
     private func sourceSetupDestination(_ destination: PrototypeSheet) -> some View {
+        let presentation: LiveTVSourcesView.Presentation = switch destination {
+        case .addSource: .addSource
+        default: .page
+        }
         if let sources {
             switch destination {
             case .addPlaylist:
-                LiveTVSourceAccessGate(model: sources) {
+                LiveTVSourceAccessGate(model: sources) { _ in
                     LiveTVPlaylistEditor { input in
                         let previous = Set(sources.configuration.playlists.map(\.id))
                         try sources.savePlaylist(input: input)
@@ -1163,7 +1282,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                     }
                 }
             case .serverSetup:
-                LiveTVSourceAccessGate(model: sources) {
+                LiveTVSourceAccessGate(model: sources) { _ in
                     LiveTVServerSetupView(
                         sources: sources, choices: serverChoices,
                         resolver: serverProviderResolver,
@@ -1174,14 +1293,19 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                 LiveTVSourcesView(
                     model: sources, imports: imports, refresh: requestCatalogRefresh,
                     refreshSource: { try await imports.reloadSource($0, into: model) },
+                    presentation: presentation,
                     serverChoices: serverChoices, serverProviderResolver: serverProviderResolver,
                     connectServer: connectServer == nil ? nil : requestServerConnection,
                     connectIPTV: providerSetupRouter == nil ? nil : requestIPTVConnection,
                     sourceFilterID: model.configuredSourceID,
                     browseSource: { sourceID in
+                        #if os(iOS)
+                        selectBrowseSource(sourceID)
+                        #else
                         model.source = nil
                         model.configuredSourceID = sourceID
                         topRequest &+= 1
+                        #endif
                         sheet = nil
                     },
                     didConfigurePlaylist: didConfigurePlaylist,
@@ -1195,25 +1319,25 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                         LibraryChannelManagementView(
                             service: libraryService, history: libraryHistory,
                             prepareLibraries: prepareLibraryChannels, automaticChannels: automaticChannels)
-                        .navigationDestination(isPresented: $showsScanSources) {
-                            LiveTVSourceAccessGate(model: sources) {
-                                if scanBinding.issue != nil {
-                                    LiveTVSettingsPage(title: "Check channels") {
-                                        SettingsSectionGroup {
-                                            Text("Channel checks are unavailable. Your channel preferences are unchanged.")
-                                            Button("Retry", action: scanBinding.retry)
-                                                .buttonStyle(PrototypeButtonStyle())
-                                        }
-                                    }
-                                } else {
-                                    LiveTVScanSourcesView(
-                                        coordinator: scanBinding.coordinator,
-                                        sourceNames: Dictionary(uniqueKeysWithValues: imports.configuration.playlists.map {
-                                            ($0.id, $0.name)
-                                        })
-                                    )
+                    }
+                }
+                .navigationDestination(isPresented: $showsScanSources) {
+                    LiveTVSourceAccessGate(model: sources) { _ in
+                        if scanBinding.issue != nil {
+                            LiveTVSettingsPage(title: "Check channels") {
+                                SettingsSectionGroup {
+                                    Text("Channel checks are unavailable. Your channel preferences are unchanged.")
+                                    Button("Retry", action: scanBinding.retry)
+                                        .buttonStyle(PrototypeButtonStyle())
                                 }
                             }
+                        } else {
+                            LiveTVScanSourcesView(
+                                coordinator: scanBinding.coordinator,
+                                sourceNames: Dictionary(uniqueKeysWithValues: imports.configuration.playlists.map {
+                                    ($0.id, $0.name)
+                                })
+                            )
                         }
                     }
                 }
@@ -1442,34 +1566,18 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         .disabled(blocksBrowseControls)
     }
 
-    /// Touch: the page's own top row — browse controls leading, the host's
-    /// avatar trailing — where a navigation bar would sit, so the controls
-    /// cost the guide no height of their own.
-    @ViewBuilder
-    private func touchTopBar(_ layout: PrototypePreviewLayout) -> some View {
+    private func usesCategoryDirectory(_ layout: PrototypePreviewLayout) -> Bool {
         #if os(iOS)
-        HStack(spacing: PrototypeLayout.gap) {
-            if layout.sidebarWidth == 0 {
-                PrototypeTouchBrowseBar(
-                    model: model, isSearching: isSearching,
-                    search: { if isSearching { closeSearch() } else { openSearch() } },
-                    filters: { sheet = .filters },
-                    multiviews: multiviewSelection == nil ? { sheet = .multiviewFavorites } : nil,
-                    goToNow: { nowRequest += 1 }
-                )
-                .modifier(LiveTVMultiviewGuideExit(
-                    cancel: multiviewSelection == nil ? nil : finishMultiviewSelection))
-                .disabled(blocksBrowseControls)
-            }
-            Spacer(minLength: 0)
-            topBarAccessory
-        }
-        .frame(height: 44)
+        showsCategoryDirectory && layout.availableSidebarWidth == 0
+        #else
+        false
         #endif
     }
 
     private func browsingContent(_ layout: PrototypePreviewLayout) -> some View {
-        PrototypeBrowseLayout(layout: layout) {
+        PrototypeBrowseLayout(
+            layout: layout, extendsGuideToEdges: !usesCategoryDirectory(layout) && !isSearching
+        ) {
             browsingHeader(layout)
         } sidebar: {
             browsingSidebar
@@ -1480,16 +1588,26 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                     browseToolbar(layout)
                 }
                 #endif
-                if isSearching {
+                if usesCategoryDirectory(layout) && !isSearching {
+                    if isInitialCatalogLoading || model.categoryChannelCount(nil) == 0 {
+                        guideBrowser(closeSearch: closeSearch)
+                    } else {
+                        PrototypeCategoryDirectory(
+                            categories: model.browsingCategories, totalCount: model.categoryChannelCount(nil),
+                            returnCategory: categoryDirectoryReturnID, select: { showCategory($0) }
+                        )
+                    }
+                } else if isSearching {
+                    #if os(tvOS)
                     searchScopePicker
+                    #endif
                     searchResults(closeSearch: closeSearch)
                 } else {
                     guideBrowser(
                         closeSearch: closeSearch,
-                        leadingExit: layout.availableSidebarWidth > 0 && categorySidebarCollapsed
-                            ? revealCategories : nil
+                        leadingExit: layout.availableSidebarWidth > 0 ? revealCategories : nil
                     )
-                    .disabled(usesNativeFullscreen && controlsActive && !categorySidebarCollapsed)
+                    .disabled(usesNativeFullscreen && controlsActive)
                 }
             }
         }
@@ -1508,6 +1626,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                     restoresCategoryFocus: sidebarRestoresCategoryFocus,
                     search: { if isSearching { closeSearch() } else { openSearch() } },
                     enterGuide: enterGuide,
+                    selectCategory: { showCategory($0, enteringGuide: false) },
                     multiviews: multiviewSelection == nil ? { sheet = .multiviewFavorites } : nil,
                     manageChannels: { sheet = .organization }
                 )
@@ -1516,11 +1635,21 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             }
         }
         .disabled(blocksBrowseControls)
+        #if os(tvOS)
+        .disabled(!controlsActive && !model.guideChannels.isEmpty)
+        #endif
     }
 
     @ViewBuilder
     private func browsingHeader(_ layout: PrototypePreviewLayout) -> some View {
-        touchTopBar(layout)
+        #if os(iOS)
+        if layout.heroHeight > 0 {
+            Color.clear
+                .frame(height: layout.heroHeight)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        #else
         ZStack(alignment: .bottomLeading) {
             PrototypePreviewHero(
                 channel: heroChannel, program: heroProgram, layout: layout,
@@ -1531,21 +1660,9 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             .opacity(isSearching ? 0 : 1)
             .allowsHitTesting(!isSearching)
             .accessibilityHidden(isSearching)
-            #if os(iOS)
-                if isSearching {
-                    PrototypeSearchHeader(
-                        query: $model.query, channelCount: model.visibleChannels.count,
-                        category: model.category, focusRequest: searchFocusRequest,
-                        browse: enterGuide, close: closeSearch,
-                        focusChanged: { if $0 { controlsActive = true } }
-                    )
-                    .frame(maxWidth: min(layout.contentFrame.width, 1_200), alignment: .leading)
-                    .disabled(blocksBrowseControls)
-                    .transition(.opacity)
-                }
-            #endif
         }
         .frame(height: layout.heroHeight, alignment: layout.heroAlignment)
+        #endif
         if let multiviewSelection {
             LiveTVMultiviewGuideSelectionHeader(
                 selection: multiviewSelection, cancel: finishMultiviewSelection)
@@ -1610,7 +1727,6 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                 }
                 controlsActive = true
                 sidebarRestoresCategoryFocus = false
-                categorySidebarCollapsed = false
                 toolbarFocusRequest &+= 1
             },
             isLoading: isInitialCatalogLoading,
@@ -1623,19 +1739,31 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             libraryCatalog: libraryCatalogRevision,
             loadLibraryGuide: publishLibraryGuide,
             openLibraryItem: onOpenTitle == nil ? nil : openLibraryItem,
-            leadingExit: leadingExit
+            leadingExit: leadingExit,
+            previewChannel: previewChannelSelection
         )
+    }
+
+    private var previewChannelSelection: ((LiveTVGuideRowID) -> Void)? {
+        #if os(iOS)
+        { row in
+            leaveSearchForChannel(row.channelID)
+            tune(row.channelID, origin: row, expandsPlayer: false)
+        }
+        #else
+        nil
+        #endif
     }
 
     private func revealCategories() {
         guard activity.acceptsInteraction, !isSearching, !preview.isRestoringGuideFocus,
               sheet == nil, !needsPreviewChoice else { return }
-        categorySidebarCollapsed = false
         sidebarRestoresCategoryFocus = true
         controlsActive = true
         categoryFocusRequest &+= 1
     }
 
+    #if os(tvOS)
     private var searchScopePicker: some View {
         Picker("Search in", selection: $searchScope) {
             Text("Channels").tag(PrototypeSearchScope.channels)
@@ -1649,11 +1777,40 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             playback.focus(nil)
         }
     }
+    #endif
 
     @ViewBuilder
     private func searchResults(closeSearch: @escaping () -> Void) -> some View {
-        if searchScope == .channels {
+        #if os(iOS)
+        if isInitialCatalogLoading || model.channels.isEmpty {
             guideBrowser(closeSearch: closeSearch)
+        } else {
+            PrototypeMobileSearchResults(
+                model: model, imports: imports,
+                selectCategory: { category in
+                    guard model.matchingCategories.contains(category) else { return }
+                    showCategory(category)
+                },
+                watch: { channel in
+                    guard model.programmeSearchChannelIDs.contains(channel.id) else { return }
+                    leaveSearchForChannel(channel.id)
+                    tune(channel.id, expandsPlayer: false)
+                },
+                details: { sheet = .program($0) }
+            )
+        }
+        #else
+        if searchScope == .channels {
+            VStack(alignment: .leading, spacing: PrototypeLayout.smallGap) {
+                if !model.matchingCategories.isEmpty {
+                    PrototypeCategorySearchResults(categories: model.matchingCategoryResults) { category in
+                        guard model.matchingCategories.contains(category) else { return }
+                        pendingSearchCategory = category
+                        closeSearch()
+                    }
+                }
+                guideBrowser(closeSearch: closeSearch)
+            }
         } else if model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             ContentUnavailableView {
                 Label("Search programs", systemImage: "magnifyingglass")
@@ -1671,6 +1828,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             }
             .accessibilityIdentifier("live-tv-program-search-results")
         }
+        #endif
     }
 
     private var hidesAppNavigation: Bool {
@@ -1728,6 +1886,14 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
 
     private func focusInitialChannelIfNeeded() {
         #if os(tvOS)
+        if startsWithCategories && preview.requestInitialCategoryFocus(
+            isActive: isActive, hasOverlay: isSearching || sheet != nil || needsPreviewChoice
+        ) {
+            controlsActive = true
+            sidebarRestoresCategoryFocus = true
+            categoryFocusRequest &+= 1
+            return
+        }
         guard let row = preview.requestInitialGuideFocus(
             isActive: isActive, hasOverlay: isSearching || sheet != nil || needsPreviewChoice
         ) else { return }
@@ -1905,8 +2071,13 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         onExpandedChange(true)
         #endif
         searchOrigin = PrototypeSearchBookmark(
-            row: selectedRowID, guideOffset: guideOffset, timeAnchor: timeAnchor, timelineOffset: timelineOffset
+            category: model.category, row: selectedRowID,
+            guideOffset: guideOffset, timeAnchor: timeAnchor, timelineOffset: timelineOffset
         )
+        #if os(iOS)
+        searchRetainsToolbar = true
+        model.category = nil
+        #endif
         guideOffset = 0
         timelineOffset = 0
         timeAnchor = Date(timeIntervalSince1970: floor(model.now.timeIntervalSince1970 / 1_800) * 1_800)
@@ -1922,20 +2093,97 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
 
     private func closeSearch() {
         playback.cancelWatch()
-        guard isSearching else { return }
+        guard isSearching else {
+            #if os(iOS)
+            model.query = ""
+            #endif
+            return
+        }
+        let selectedCategory = pendingSearchCategory.flatMap {
+            model.matchingCategories.contains($0) ? $0 : nil
+        }
+        pendingSearchCategory = nil
+        if let selectedCategory {
+            showCategory(selectedCategory)
+            return
+        }
         model.query = ""
         if let bookmark = searchOrigin {
+            #if os(iOS)
+            model.category = bookmark.category.flatMap { category in
+                model.browsingCategories.contains(where: { $0.name == category }) ? category : nil
+            }
+            #endif
             guideOffset = bookmark.guideOffset
             timeAnchor = bookmark.timeAnchor
             timelineOffset = bookmark.timelineOffset
-        }
-        if let origin = searchOrigin?.row, let row = model.guideRow(for: origin.channelID, preferring: origin.section) {
-            selectedRowID = row
-            selectedChannelID = row.channelID
+            if let origin = bookmark.row, let row = model.guideRow(for: origin.channelID, preferring: origin.section) {
+                selectedRowID = row
+                selectedChannelID = row.channelID
+            }
         }
         searchOrigin = nil
         enterGuide()
         isSearching = false
+    }
+
+    private func showCategory(_ category: String?, enteringGuide: Bool = true) {
+        playback.cancelWatch()
+        model.query = ""
+        model.category = category
+        categoryDirectoryReturnID = category
+        showsCategoryDirectory = false
+        isSearching = false
+        searchOrigin = nil
+        guideOffset = 0
+        timelineOffset = 0
+        selectedRowID = model.guideChannels.first?.id
+        selectedChannelID = selectedRowID?.channelID
+        focusedProgram = nil
+        topRequest &+= 1
+        if enteringGuide { enterGuide() }
+    }
+
+    #if os(iOS)
+    private func leaveSearchForChannel(_ id: String) {
+        guard isSearching else { return }
+        closeSearch()
+        // A result outside the previous category needs a guide sequence containing that channel.
+        if !model.visibleChannels.contains(where: { $0.id == id }) {
+            model.category = nil
+        }
+    }
+
+    private func selectBrowseSource(_ sourceID: String?) {
+        guard isActive, scenePhase == .active, isProfileAuthorized(), !sourceApplicationFailed,
+              sources == nil || applySourceConfiguration(),
+              sourceID == nil || imports.configuration.playlists.contains(where: { $0.id == sourceID && $0.isEnabled })
+                || imports.configuration.servers.contains(where: { $0.id == sourceID && $0.isEnabled }) else { return }
+        model.source = nil
+        model.configuredSourceID = sourceID
+        if let category = model.category, !model.browsingCategories.contains(where: { $0.name == category }) {
+            model.category = nil
+            categoryDirectoryReturnID = nil
+        }
+        searchOrigin = nil
+        guideOffset = 0
+        timelineOffset = 0
+        selectedRowID = model.guideChannels.first?.id
+        selectedChannelID = selectedRowID?.channelID
+        focusedProgram = nil
+        topRequest &+= 1
+    }
+    #endif
+
+    private func showCategories() {
+        playback.cancelWatch()
+        model.query = ""
+        model.category = nil
+        isSearching = false
+        searchOrigin = nil
+        showsCategoryDirectory = true
+        searchFocusRequest = 0
+        controlsActive = true
     }
 
     private func enterGuide() {
@@ -1963,6 +2211,11 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
 
     private func applyViewSettings() {
         guard let settings = viewSettingsStore?.load() else { return }
+        if startsWithCategories != settings.startsWithCategories {
+            startsWithCategories = settings.startsWithCategories
+            showsCategoryDirectory = settings.startsWithCategories
+            if settings.startsWithCategories { model.category = nil }
+        }
         model.sort = settings.sortByName ? .name : .channelNumber
         model.favoritesOnly = settings.favoritesOnly
         model.guideOnly = settings.guideOnly
@@ -2004,7 +2257,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         if settings != current { viewSettingsStore.save(settings) }
     }
 
-    private func tune(_ id: String, origin: LiveTVGuideRowID? = nil) {
+    private func tune(_ id: String, origin: LiveTVGuideRowID? = nil, expandsPlayer: Bool = true) {
         guard activity.acceptsInteraction else {
             let phase = scenePhase == .active ? "active" : scenePhase == .background ? "background" : "inactive"
             HandoffDiagnostics.emit(
@@ -2016,6 +2269,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             )
             return
         }
+        showsCategoryDirectory = false
         if let selection = multiviewSelection {
             guard let channel = model.channel(id: id) else {
                 multiviewFavoriteIssue = "This channel is no longer available."
@@ -2027,20 +2281,30 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         }
         if !preview.isExpanded {
             let channels: [LiveTVPrototypeChannel]
+            #if os(tvOS)
             if isSearching && searchScope == .programs {
                 let allowed = model.programmeSearchChannelIDs
                 channels = model.unhiddenCatalogChannels.filter { allowed.contains($0.id) }
             } else {
                 channels = model.guideChannels.map(\.channel)
             }
+            #else
+            channels = model.guideChannels.map(\.channel)
+            #endif
             channelSequence = LiveTVChannelSequence(channels: channels)
         }
         let selectedOrigin = !preview.isExpanded && selectedRowID?.channelID == id ? selectedRowID : nil
-        playback.watch(id, origin: origin ?? selectedOrigin)
+        playback.watch(id, origin: origin ?? selectedOrigin, expandsPlayer: expandsPlayer)
     }
 
     private func handleWatchAcceptance() {
-        guard isActive, preview.isExpanded, let current = playback.preparation.current else { return }
+        guard isActive, let current = playback.preparation.current else { return }
+        if preview.isWatchingInline {
+            selectedChannelID = current.channel.id
+            if selectedRowID?.channelID != current.channel.id { selectedRowID = preview.watchOrigin }
+            return
+        }
+        guard preview.isExpanded else { return }
         #if os(tvOS)
         onExpandedChange(true)
         #endif
@@ -2055,24 +2319,11 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             of: playback.pendingWatchChannelID ?? playback.preparation.current?.channel.id,
             offset: offset, visibleChannels: model.visibleChannels
         ) else { return }
+        #if os(iOS)
+        tune(id, expandsPlayer: preview.isExpanded)
+        #else
         tune(id)
-    }
-}
-
-private struct PrototypeWatchPreparationStatus: View {
-    let channelName: String
-    let cancel: () -> Void
-    @Environment(\.themePalette) private var palette
-
-    var body: some View {
-        HStack {
-            ProgressView()
-            Text("Opening \(channelName)")
-            Button("Cancel", role: .cancel, action: cancel)
-        }
-        .padding()
-        .background(palette.backgroundBase, in: RoundedRectangle(cornerRadius: 12))
-        .padding()
+        #endif
     }
 }
 

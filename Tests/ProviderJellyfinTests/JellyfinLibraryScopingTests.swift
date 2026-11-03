@@ -8,7 +8,7 @@ import CoreNetworking
 /// and Home-filters — items by fetching **scoped per library** via `ParentId`
 /// and stamping each result's `libraryID`. These pin down: the scoped path sends
 /// `ParentId`, stamps `libraryID`, the unscoped path (nil) leaves it nil
-/// (fail-open) and sends no `ParentId`, and an empty scope short-circuits.
+/// (fail-open) and sends no `ParentId`, and an empty scope never requests history.
 final class JellyfinLibraryScopingTests: XCTestCase {
     private func makeSession() -> UserSession {
         UserSession(
@@ -171,6 +171,114 @@ final class JellyfinLibraryScopingTests: XCTestCase {
         }
     }
 
+    func testMalformedRecommendationsKeepTheDecodeFailureAndSafeRouteDetails() async throws {
+        for kind: ProviderKind in [.jellyfin, .emby] {
+            let stub = StubHTTPClient()
+            stub.stub(pathSuffix: "/Movies/Recommendations", json: """
+            [{"RecommendationType":false,"BaselineItemName":"Private title","CategoryId":"private-id"}]
+            """)
+            var session = makeSession()
+            session.server.provider = kind
+            let provider = JellyfinProvider(session: session, http: stub)
+            let captured = await HTTPResponseDiagnostics.capture {
+                try await provider.libraryHubs(libraryID: "private-library", kind: .movie, limit: 20)
+            }
+            guard case .failure(let error) = captured.result else { return XCTFail("Malformed data must still fail") }
+            XCTAssertEqual(error as? AppError, .decoding)
+            let response = try XCTUnwrap(captured.responses.first)
+            XCTAssertEqual(response.route, .movieRecommendations)
+            XCTAssertEqual(response.reason, .wrongType)
+            XCTAssertEqual(response.path, "[0].RecommendationType")
+            XCTAssertEqual(response.expected, .string)
+            let report = PlaybackDiagnosticReport.library(.init(
+                provider: kind, failures: [.init(section: .recommendations, error: .decoding, responses: captured.responses)]
+            ))
+            for secret in ["TOKEN", "Alice", "private", "Private", "http://host"] {
+                XCTAssertFalse(report.supportText.contains(secret))
+            }
+        }
+    }
+
+    func testVerifiedEmptyRecommendationEnvelopeSucceedsWithoutSuppressingLaterCategories() async throws {
+        for kind: ProviderKind in [.jellyfin, .emby] {
+            let stub = StubHTTPClient()
+            stub.stubSequence(pathSuffix: "/Movies/Recommendations", jsons: [
+                #"{"Items":[],"TotalRecordCount":0,"StartIndex":0}"#,
+                """
+                [{"Items":[{"Id":"movie","Type":"Movie"}],
+                  "RecommendationType":"SimilarToRecentlyPlayed","CategoryId":"category","BaselineItemName":"Favorite"}]
+                """
+            ])
+            var session = makeSession()
+            session.server.provider = kind
+            let provider = JellyfinProvider(session: session, http: stub)
+            let empty = await HTTPResponseDiagnostics.capture {
+                try await provider.libraryHubs(libraryID: "LIB1", kind: .movie, limit: 20)
+            }
+            XCTAssertTrue(try empty.result.get().isEmpty)
+            XCTAssertTrue(empty.responses.isEmpty, "Recognized empty results must not manufacture a decode warning.")
+            let refreshed = try await provider.libraryHubs(libraryID: "LIB1", kind: .movie, limit: 20)
+            XCTAssertEqual(refreshed.map(\.id), ["category"])
+            XCTAssertEqual(refreshed.first?.items.map(\.id), ["movie"])
+            XCTAssertEqual(stub.sentPaths.filter { $0.hasSuffix("/Movies/Recommendations") }.count, 2)
+            let query = try XCTUnwrap(stub.queryItems(forPathSuffix: "/Movies/Recommendations"))
+            XCTAssertEqual(query.first { $0.name == "parentId" }?.value, "LIB1")
+            XCTAssertEqual(query.first { $0.name == "userId" }?.value, "u1")
+            XCTAssertEqual(query.first { $0.name == "itemLimit" }?.value, "20")
+            XCTAssertEqual(query.first { $0.name == "categoryLimit" }?.value, "5")
+            XCTAssertEqual(stub.method(forPathSuffix: "/Movies/Recommendations"), .get)
+        }
+    }
+
+    func testMovieRecommendationResponseRejectsUnknownMalformedAndNonemptyEnvelopes() throws {
+        for json in [
+            "{}", "null", "true", "42", #""error""#, "<html>error</html>",
+            #"{"Items":[]}"#,
+            #"{"Items":[],"TotalRecordCount":0}"#,
+            #"{"Items":[],"TotalRecordCount":0,"StartIndex":0,"Error":"unavailable"}"#,
+            #"{"Items":[],"TotalRecordCount":1,"StartIndex":0}"#,
+            #"{"Items":[],"TotalRecordCount":-1,"StartIndex":0}"#,
+            #"{"Items":[],"TotalRecordCount":0,"StartIndex":1}"#,
+            #"{"Items":[],"TotalRecordCount":0,"StartIndex":-1}"#,
+            #"{"Items":null,"TotalRecordCount":0,"StartIndex":0}"#,
+            #"{"Items":{},"TotalRecordCount":0,"StartIndex":0}"#,
+            #"{"Items":[],"TotalRecordCount":null,"StartIndex":0}"#,
+            #"{"Items":[],"TotalRecordCount":false,"StartIndex":0}"#,
+            #"{"Items":[],"TotalRecordCount":"0","StartIndex":0}"#,
+            #"{"Items":[],"TotalRecordCount":0,"StartIndex":null}"#,
+            #"{"Items":[],"TotalRecordCount":0,"StartIndex":false}"#,
+            #"{"Items":[],"TotalRecordCount":0,"StartIndex":"0"}"#,
+            #"{"Items":[{"Id":"movie"}],"TotalRecordCount":1,"StartIndex":0}"#,
+            #"{"Items":[{"RecommendationType":"SimilarToRecentlyPlayed"}],"TotalRecordCount":1,"StartIndex":0}"#,
+            #"[{"RecommendationType":false}]"#,
+            #"[{"RecommendationType":"SimilarToRecentlyPlayed","Items":{}}]"#
+        ] {
+            XCTAssertThrowsError(try JSONDecoder().decode(MovieRecommendationsResponse.self, from: Data(json.utf8)), json) {
+                XCTAssertTrue($0 is DecodingError)
+            }
+        }
+        XCTAssertTrue(try JSONDecoder().decode(MovieRecommendationsResponse.self, from: Data("[]".utf8)).recommendations.isEmpty)
+    }
+
+    func testRecommendationEnvelopeCompatibilityDoesNotSwallowCancellationOrUnknownResponseErrors() async throws {
+        let stub = StubHTTPClient()
+        stub.stub(pathSuffix: "/Movies/Recommendations", json: #"{"Error":"temporarily unavailable"}"#)
+        let provider = JellyfinProvider(session: makeSession(), http: stub)
+        let malformed = await HTTPResponseDiagnostics.capture {
+            try await provider.libraryHubs(libraryID: "LIB1", kind: .movie, limit: 20)
+        }
+        guard case .failure(let error) = malformed.result else { return XCTFail("Unknown objects must still fail.") }
+        XCTAssertEqual(error as? AppError, .decoding)
+        XCTAssertEqual(malformed.responses.first?.route, .movieRecommendations)
+
+        stub.error = .cancelled
+        let cancelled = await HTTPResponseDiagnostics.capture {
+            try await provider.libraryHubs(libraryID: "LIB1", kind: .movie, limit: 20)
+        }
+        XCTAssertTrue(cancelled.isCancelled)
+        XCTAssertTrue(cancelled.responses.isEmpty)
+    }
+
     // MARK: Continue Watching
 
     func testScopedContinueWatchingSendsParentIDAndStampsLibrary() async throws {
@@ -216,13 +324,13 @@ final class JellyfinLibraryScopingTests: XCTestCase {
                       "Unscoped fetch must not send a ParentId")
     }
 
-    func testEmptyScopeReturnsNothingWithoutRequesting() async throws {
+    func testEmptyScopeReturnsNothingWithoutRequestingHistory() async throws {
         let stub = StubHTTPClient()
         let provider = JellyfinProvider(session: makeSession(), http: stub)
 
         let items = try await provider.continueWatching(limit: 10, inLibraries: [])
         XCTAssertTrue(items.isEmpty, "Hiding every library must yield an empty row")
-        XCTAssertTrue(stub.sentPaths.isEmpty, "An empty scope must short-circuit before any request")
+        XCTAssertTrue(stub.sentPaths.isEmpty, "An empty library scope must not make network requests.")
     }
 
     func testUnlimitedScopedContinueWatchingPagesWithinParentLibrary() async throws {

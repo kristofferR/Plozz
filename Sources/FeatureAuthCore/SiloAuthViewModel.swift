@@ -37,7 +37,7 @@ public final class SiloAuthViewModel {
     private let deviceID: String
     private let service: SiloAuthentication
     private let verificationOnly: Bool
-    private let onAuthenticated: (UserSession) -> Void
+    private let onAuthenticated: (UserSession) throws -> Void
     private var flow: Task<Void, Never>?
     private var generation = UUID()
     private var tokens: SiloTokenPair?
@@ -48,7 +48,7 @@ public final class SiloAuthViewModel {
 
     public init(server: MediaServer, deviceID: String, service: SiloAuthentication? = nil,
                 diagnostics: SiloSetupDiagnostics = .shared, verificationOnly: Bool = false,
-                onAuthenticated: @escaping (UserSession) -> Void) {
+                onAuthenticated: @escaping (UserSession) throws -> Void) {
         self.server = server
         self.deviceID = deviceID
         self.service = service ?? SiloAuthentication(baseURL: server.baseURL)
@@ -92,19 +92,37 @@ public final class SiloAuthViewModel {
                 codeLifetime = TimeInterval(challenge.expires_in)
                 phase = .pairing(code: challenge.user_code, match: challenge.match_code, url: url, expiresAt: deadline)
                 var interval = challenge.interval
+                var consecutivePollFailures = 0
+                var pollDelay = Double(interval)
                 stage = .poll
                 while Date() < deadline {
-                    try await Task.sleep(for: .seconds(min(Double(interval), max(0, deadline.timeIntervalSinceNow))))
+                    try await Task.sleep(for: .seconds(min(pollDelay, max(0, deadline.timeIntervalSinceNow))))
                     try Task.checkCancellation()
                     guard Date() < deadline else { break }
-                    let result = try await service.poll(challenge)
+                    let result: SiloDevicePoll
+                    do {
+                        result = try await service.poll(challenge)
+                    } catch let failure as SiloSetupFailure where failure.underlying == .serverUnreachable {
+                        try Task.checkCancellation()
+                        guard generation == current else { return }
+                        consecutivePollFailures += 1
+                        guard consecutivePollFailures < 3 else { throw failure }
+                        // Continue this challenge, never replay device-start. If
+                        // approval was consumed before the response was lost,
+                        // the next poll's terminal status still ends the flow.
+                        pollDelay = max(Double(interval), min(30, Double(interval) * pow(2, Double(consecutivePollFailures))))
+                        PlozzLog.auth.info("Silo approval polling interrupted; waiting to continue the existing challenge")
+                        continue
+                    }
                     guard !Task.isCancelled, generation == current else {
                         if let received = result.tokens { discardVerificationLogin(received) }
                         return
                     }
                     switch result.status {
                     case "pending":
+                        consecutivePollFailures = 0
                         interval = max(challenge.interval, result.poll_after)
+                        pollDelay = Double(interval)
                         if let expiry = result.expires_at {
                             guard let updated = Self.pairingDate(expiry) else {
                                 throw SiloSetupFailure(.init(stage: .poll, reason: .malformed))
@@ -232,10 +250,10 @@ public final class SiloAuthViewModel {
                 )
                 try Task.checkCancellation()
                 guard generation == current else { return }
+                try onAuthenticated(session)
                 self.tokens = nil
                 availableProfiles = []
                 reportFailure = nil
-                onAuthenticated(session)
             } catch SiloAuthenticationError.incorrectPIN {
                 guard generation == current, !Task.isCancelled else { return }
                 pinError = "That profile PIN did not match. Try again."

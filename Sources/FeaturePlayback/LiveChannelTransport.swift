@@ -1,6 +1,7 @@
 #if canImport(SwiftUI) && canImport(UIKit)
 import AVFoundation
 import CoreModels
+import CoreNetworking
 import CoreUI
 import SwiftUI
 
@@ -52,6 +53,7 @@ struct LiveChannelOverlay: View {
     let title: String // l10n:content — provider-supplied channel name
     let logoURL: URL?
     let plozzChannelID: String?
+    var plozzChannelMood: LibraryChannelArtworkMood? = nil
     let channelID: String
     let input: LiveChannelInput
     let program: LiveChannelProgramInfo?
@@ -100,6 +102,10 @@ struct LiveChannelOverlay: View {
     var hasTouchGestureSurface = false
     var touchBackgroundTapRevision = 0
     var touchTimelineOnly = false
+    var onTouchScrubbingChanged: (Bool) -> Void = { _ in }
+    var onExpandPreview: (() -> Void)?
+    var onCollapsePreview: (() -> Void)?
+    var previewStatus: LocalizedStringResource?
 
     @Environment(\.playerCardMetrics) private var metrics
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -113,8 +119,15 @@ struct LiveChannelOverlay: View {
     @State private var trackOptions = PlayerControlsModel()
     @State private var subtitleScreen: PlayerControls.SubtitleScreen = .tracks
     @State private var playbackScreen: PlayerControls.PlaybackScreen = .options
-    @State private var nativePlaybackMenuPresented = false
-    @State private var showsCustomZoom = false
+    @State private var audioScreen: PlayerControls.AudioScreen = .options
+    #if os(iOS)
+    private enum MobileSheet: String, Identifiable {
+        case zoom, subtitles, audioSync
+        var id: Self { self }
+    }
+    @State private var mobileMenu = PlayerMenuPresentation()
+    @State private var mobileSheet: MobileSheet?
+    #endif
     @State private var panelHeights: [PlayerControls.Category: CGFloat] = [:]
     @State private var panelBackRequest = 0
     @FocusState private var panelFocus: PlayerControls.FocusSlot?
@@ -133,8 +146,6 @@ struct LiveChannelOverlay: View {
     @State private var focusedPill: LiveChannelCardTab?
     @State private var badgesTop: CGFloat = 0
     @State private var layerBottom: CGFloat = 0
-    @State private var layerTop: CGFloat = 0
-    @State private var badgesBottom: CGFloat = 0
     /// Touch: the overlay's own box, which sizes the cards (see `touchMetrics`).
     @State private var availableSize: CGSize = .zero
     /// A swipe or drag through the rewind window: where it would land, drawn on
@@ -158,6 +169,10 @@ struct LiveChannelOverlay: View {
     /// The timeline's own native focus, from its button style. `focus` can lag
     /// it (the shared state follows the pills; see `tabFocused`).
     @State private var timelineFocused = false
+    #if os(iOS)
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var touchViewportSize: CGSize = .zero
+    #endif
 
     /// Touch, stood up: the cards take their compact, shorter forms.
     private var isTouchPortrait: Bool {
@@ -171,6 +186,18 @@ struct LiveChannelOverlay: View {
     var body: some View {
         layout
             .onChange(of: scrubBehind) { _, behind in scrubMoved(behind) }
+            #if os(iOS)
+            .onChange(of: scrubBehind != nil) { _, scrubbing in
+                if scrubbing { openMenu = nil }
+                onTouchScrubbingChanged(scrubbing)
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase != .active {
+                    resetScrub()
+                    mobileMenu.reset()
+                }
+            }
+            #endif
             // A finger held still is still scrubbing: keep the transport up
             // until it lifts, which is what confirms the position.
             .task(id: scrubBehind != nil) {
@@ -181,11 +208,13 @@ struct LiveChannelOverlay: View {
                 }
             }
         .environment(\.channelLogoPreservesSourceCorners, true)
+        .playerPlatformAppearance()
         .animation(.easeInOut(duration: 0.2), value: openMenu)
         .animation(.easeInOut(duration: 0.3), value: styleEditing)
         .onChange(of: trackOptionsSource, initial: true) { _, source in syncTrackOptions(source) }
+        .onChange(of: locale.identifier) { syncTrackOptions(trackOptionsSource) }
         .onChange(of: focus) { _, control in focusChanged(control) }
-        .onChange(of: openMenu != nil || cardOpen || nativePlaybackMenuPresented || showsCustomZoom) { _, pinned in
+        .onChange(of: openMenu != nil || cardOpen || mobileOptionsBusy) { _, pinned in
             onTracksPresentationChange(pinned)
         }
         .onChange(of: cardOpen && cardTab == .guide) { _, showing in onGuideCardChange(showing) }
@@ -203,39 +232,80 @@ struct LiveChannelOverlay: View {
             case .info: openCard(.info)
             case .onNow: openCard(.onNow)
             case .guide: openCard(.guide)
+            case .playback: toggleMenu(.playback)
             }
         }
-        .onChange(of: channelID) { _, _ in resetScrub() }
-        .onChange(of: input) { _, _ in resetScrub() }
+        .onChange(of: channelID) { _, _ in
+            resetScrub()
+            invalidateMobileMenu()
+        }
+        .onChange(of: input) { _, _ in
+            resetScrub()
+            invalidateMobileMenu()
+        }
         .onChange(of: seekWindowSeconds == nil) { _, unavailable in
             if unavailable { resetScrub() }
         }
         .onDisappear {
+            invalidateMobileMenu()
             resetScrub()
             onTracksPresentationChange(false)
+            #if os(iOS)
+            onTouchScrubbingChanged(false)
+            #endif
         }
         #if os(iOS)
-        .plozzSheet(isPresented: $showsCustomZoom) {
-            PlayerZoomSettingsSheet(model: tracks.videoZoom)
+        .task(id: mobileMenu.destination) { presentMobileDestination() }
+        .onChange(of: phase) { _, phase in
+            if phase == .loading { invalidateMobileMenu() }
+        }
+        .onChange(of: PlayerMoreMenu.hasOptions(trackOptions, availability: mobileMenuAvailability)) { _, available in
+            if !available { mobileMenu.reset() }
+        }
+        .plozzSheet(item: $mobileSheet) { sheet in
+            switch sheet {
+            case .zoom: PlayerZoomSettingsSheet(model: tracks.videoZoom)
+            case .subtitles: LiveSubtitleSettingsSheet(tracks: tracks, controls: trackOptions)
+            case .audioSync: LiveAudioSyncSheet(tracks: tracks, controls: trackOptions)
+            }
         }
         #endif
         #if os(tvOS)
+        .observingSystemPlaybackAudio(trackOptions.systemAudio, isVisible: true)
         .onExitCommand(perform: handleExit)
         .background(TVFocusActivityObserver(onActivity: onControlActivity))
+        #endif
+    }
+
+    private var mobileOptionsBusy: Bool {
+        #if os(iOS)
+        mobileMenu.isBusy || mobileSheet != nil
+        #else
+        false
+        #endif
+    }
+
+    private func invalidateMobileMenu() {
+        #if os(iOS)
+        mobileMenu.reset()
+        mobileSheet = nil
         #endif
     }
 
     @ViewBuilder
     private var layout: some View {
         #if os(iOS)
-        touchLayout
+        if let onExpandPreview {
+            inlinePreviewLayout(expand: onExpandPreview)
+        } else {
+            touchLayout
+        }
         #else
         ZStack(alignment: .top) {
             // Measured as a sibling so it is the same box the menu layer is laid
             // out in (VOD transport rule 1).
             Color.clear
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
-                    layerTop = $0.minY
                     layerBottom = $0.maxY
                     availableSize = $0.size
                 }
@@ -261,8 +331,8 @@ struct LiveChannelOverlay: View {
     private static let bottomMargin: CGFloat = 48
     private static let cardGap: CGFloat = 32
     #else
-    private static let horizontalMargin: CGFloat = 16
-    private static let bottomMargin: CGFloat = 18
+    private static let horizontalMargin: CGFloat = 0
+    private static let bottomMargin: CGFloat = 0
     private static let cardGap: CGFloat = 18
     #endif
     private static let stackSpacing: CGFloat = 18
@@ -326,17 +396,17 @@ struct LiveChannelOverlay: View {
             .buttonStyle(PlayerGlassCircleButtonStyle(diameter: 44))
             .accessibilityIdentifier("live-channel-close")
             .focused($focus, equals: .close)
+            .reportSubtitleControlsFrame(
+                in: tracks.subtitles.controlsLayout, region: .topControls, isVisible: !touchChromeHidden
+            )
             #endif
             Spacer(minLength: 0)
             #if os(iOS)
-            if isTouchPortrait {
-                // Opposite the host's PiP / AirPlay / Stop row, clear of the
-                // title; the library shortcut moves down beside the title.
-                touchTrackBadges
-                    .opacity(cardOpen ? 0 : 1)
-                    .allowsHitTesting(!cardOpen)
-            } else {
+            if !isTouchPortrait {
                 libraryButton
+                    .reportSubtitleControlsFrame(
+                        in: tracks.subtitles.controlsLayout, region: .topControls, isVisible: !touchChromeHidden
+                    )
             }
             #else
             libraryButton
@@ -348,7 +418,7 @@ struct LiveChannelOverlay: View {
         .padding(.top, 60)
         .opacity(cardOpen ? 0 : 1)
         #else
-        // Level with the host's PiP / AirPlay / Stop row, which is laid out
+        // Level with the host's PiP / AirPlay row, which is laid out
         // beside the close button (see `touchTopBarInset`). Stays up with a
         // card open: a finger has no Menu button to back out with.
         .padding(.top, Self.touchTopBarInset)
@@ -412,7 +482,7 @@ struct LiveChannelOverlay: View {
             HStack(spacing: 12) {
                 ChannelLogoArtwork(
                     name: title, logoURL: logoURL, size: Self.logoSize,
-                    cornerRadius: 8, plozzChannelID: plozzChannelID
+                    cornerRadius: 8, plozzChannelID: plozzChannelID, plozzChannelMood: plozzChannelMood
                 )
                 if program != nil {
                     Text(title)
@@ -497,14 +567,21 @@ struct LiveChannelOverlay: View {
     /// same labels, and an Off row for subtitles), with the live style.
     private func syncTrackOptions(_ source: TrackOptionsSource) {
         trackOptions.audioOptions = TrackMenuBuilder.audioOptions(
-            tracks: source.audio, selectedID: source.selectedAudio, preferred: []
+            tracks: source.audio, selectedID: source.selectedAudio, preferred: [], locale: locale
         )
         trackOptions.subtitleOptions = TrackMenuBuilder.subtitleOptions(
-            tracks: source.subtitles, selectedID: source.selectedSubtitle, preferred: [], detectedLanguages: [:]
+            tracks: source.subtitles, selectedID: source.selectedSubtitle, preferred: [], detectedLanguages: [:], locale: locale
         )
         trackOptions.subtitleStyle = source.style
         trackOptions.subtitlesRenderHDR = source.isHDR
         trackOptions.engineCapabilities = source.capabilities
+        trackOptions.secondarySubtitleImagePrimaryFormat = TrackMenuBuilder.imagePrimaryFormat(
+            selectedPrimaryID: source.selectedSubtitle, engineTracks: source.subtitles, providerTracks: []
+        )
+        #if os(iOS)
+        trackOptions.subtitleDelayAdjustable = tracks.subtitles.supportsPrimaryTimingOffset
+        trackOptions.subtitleDelaySeconds = tracks.subtitles.offset
+        #endif
         // A live channel has nothing to search.
         trackOptions.subtitleDownload.canSearch = false
     }
@@ -546,7 +623,7 @@ struct LiveChannelOverlay: View {
             // A live channel draws one subtitle line.
             offersDualSubtitles: false,
             playbackScreen: $playbackScreen, videoZoom: tracks.videoZoom,
-            offersPlaybackSpeed: false
+            offersPlaybackSpeed: false, audioScreen: $audioScreen
         )
         .reportSubtitleControlsFrame(in: tracks.subtitles.controlsLayout, region: .menu, isVisible: !styleEditing)
         .id(kind)
@@ -556,9 +633,19 @@ struct LiveChannelOverlay: View {
 
     // MARK: Badges
 
-    /// VOD's rule (`PlayerControlsModel.hasSelectableAudio`): Audio only when
-    /// there's more than one track to choose between.
-    private var showsAudio: Bool { tracks.audioTracks.count > 1 }
+    private var showsAudio: Bool {
+        #if os(tvOS)
+        Self.showsAudio(trackCount: tracks.audioTracks.count, systemAudio: trackOptions.systemAudio)
+        #else
+        !tracks.audioTracks.isEmpty
+        #endif
+    }
+
+    #if os(tvOS)
+    static func showsAudio(trackCount: Int, systemAudio: SystemPlaybackAudio) -> Bool {
+        trackCount > 1 || !systemAudio.availableSettings.isEmpty
+    }
+    #endif
 
     /// Subtitles once the stream offers any, as VOD.
     private var showsSubtitles: Bool { !tracks.subtitleTracks.isEmpty }
@@ -633,53 +720,32 @@ struct LiveChannelOverlay: View {
     @ViewBuilder
     private var menuLayer: some View {
         if let openMenu {
-            if menuHangsBelowBadges {
-                VStack(spacing: 0) {
-                    LiveChannelTrackPanel(kind: openMenu, model: tracks, focus: $focus, onSelect: closeMenu)
-                        .reportSubtitleControlsFrame(in: tracks.subtitles.controlsLayout, region: .menu)
-                    Spacer(minLength: 0)
-                }
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .padding(.horizontal, Self.horizontalMargin)
-                .padding(.top, menuTopInset)
-                .padding(.bottom, Self.horizontalMargin)
-                .transition(.scale(scale: 0.9, anchor: .topTrailing).combined(with: .opacity))
-            } else {
-                #if os(tvOS)
-                VStack(spacing: 0) {
-                    // Style pins to the TOP, as VOD's does, so its height changes
-                    // extend downward; every other menu rests above its buttons.
-                    if !styleEditing { Spacer(minLength: 0) }
-                    optionsPanel(openMenu)
-                    if styleEditing { Spacer(minLength: 0) }
-                }
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .padding(.horizontal, Self.horizontalMargin)
-                .padding(.top, Self.horizontalMargin)
-                .padding(.bottom, styleEditing ? Self.horizontalMargin : menuBottomInset)
-                .transition(.scale(scale: 0.9, anchor: .bottomTrailing).combined(with: .opacity))
-                #else
-                VStack(spacing: 0) {
-                    Spacer(minLength: 0)
-                    LiveChannelTrackPanel(kind: openMenu, model: tracks, focus: $focus, onSelect: closeMenu)
-                }
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .padding(.horizontal, Self.horizontalMargin)
-                .padding(.top, Self.horizontalMargin)
-                .padding(.bottom, menuBottomInset)
-                .transition(.scale(scale: 0.9, anchor: .bottomTrailing).combined(with: .opacity))
-                #endif
+            #if os(tvOS)
+            VStack(spacing: 0) {
+                // Style pins to the TOP, as VOD's does, so its height changes
+                // extend downward; every other menu rests above its buttons.
+                if !styleEditing { Spacer(minLength: 0) }
+                optionsPanel(openMenu)
+                if styleEditing { Spacer(minLength: 0) }
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .padding(.horizontal, Self.horizontalMargin)
+            .padding(.top, Self.horizontalMargin)
+            .padding(.bottom, styleEditing ? Self.horizontalMargin : menuBottomInset)
+            .transition(.scale(scale: 0.9, anchor: .bottomTrailing).combined(with: .opacity))
+            #else
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                LiveChannelTrackPanel(kind: openMenu, model: tracks, focus: $focus, onSelect: closeMenu)
+                    .reportSubtitleControlsFrame(in: tracks.subtitles.controlsLayout, region: .menu)
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .padding(.horizontal, Self.horizontalMargin)
+            .padding(.top, Self.horizontalMargin)
+            .padding(.bottom, menuBottomInset)
+            .transition(.scale(scale: 0.9, anchor: .bottomTrailing).combined(with: .opacity))
+            #endif
         }
-    }
-
-    /// Touch, stood up: the badges are in the top bar, so their menu drops
-    /// down from them rather than rising.
-    private var menuHangsBelowBadges: Bool { isTouchPortrait }
-
-    private var menuTopInset: CGFloat {
-        guard badgesBottom > layerTop, badgesBottom > 0 else { return 80 }
-        return badgesBottom - layerTop + Self.panelLift
     }
 
     private var menuBottomInset: CGFloat {
@@ -762,8 +828,17 @@ struct LiveChannelOverlay: View {
             scrubBehind: $scrubBehind,
             scrubThumbnail: scrubThumbnail,
             showsScrubThumbnail: tracks.offersScrubThumbnails,
+            previewAvailableSize: timelinePreviewSize,
             seekToBehindLive: seekWindowSeconds == nil ? nil : onSeekBehindLive
         )
+    }
+
+    private var timelinePreviewSize: CGSize {
+        #if os(iOS)
+        touchViewportSize
+        #else
+        availableSize
+        #endif
     }
 
     #if os(tvOS)
@@ -1007,7 +1082,8 @@ struct LiveChannelOverlay: View {
             switch cardTab {
             case .info:
                 LiveChannelInfoCard(
-                    title: title, logoURL: logoURL, plozzChannelID: plozzChannelID, program: program,
+                    title: title, logoURL: logoURL, plozzChannelID: plozzChannelID,
+                    plozzChannelMood: plozzChannelMood, program: program,
                     compact: isTouchPortrait,
                     diagnosticsEnabled: diagnosticsEnabled, toggleDiagnostics: toggleDiagnostics,
                     focus: $focus
@@ -1024,7 +1100,6 @@ struct LiveChannelOverlay: View {
             }
         }
         .frame(height: cardHeight)
-        .colorScheme(.dark)
     }
 
     /// The EPG grid in the Info card's container — the same panel surface,
@@ -1038,7 +1113,12 @@ struct LiveChannelOverlay: View {
             .clipShape(RoundedRectangle(
                 cornerRadius: max(0, metrics.panelCornerRadius - metrics.contentPadding), style: .continuous
             ))
-            .modifier(PanelGlassBackground(cornerRadius: metrics.panelCornerRadius))
+            .modifier(PanelGlassBackground(cornerRadius: metrics.panelCornerRadius, mediaGlass: true))
+            #if os(iOS)
+            .contentShape(Rectangle())
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("live-channel-guide-panel")
+            #endif
     }
 
     @ViewBuilder
@@ -1054,20 +1134,7 @@ struct LiveChannelOverlay: View {
         // A fresh grid when the Guide button asks for focus.
         .id(guideGrabsFocus)
         #if os(iOS)
-        if isTouchPortrait {
-            grid
-        } else {
-            // Across a wide screen the grid alone draws its roomy layout at a
-            // height that shows barely a row; beside an info column it keeps
-            // the phone's compact shape, which scrolls comfortably.
-            HStack(alignment: .top, spacing: 12) {
-                LiveChannelGuideInfoColumn(
-                    title: title, logoURL: logoURL, plozzChannelID: plozzChannelID, program: program
-                )
-                .frame(width: (availableSize.width * 0.36).rounded())
-                grid
-            }
-        }
+        grid
         #else
         // The grid runs on below the card; fade it out rather than cut it off.
         grid.mask {
@@ -1179,6 +1246,7 @@ struct LiveChannelOverlay: View {
         menuReturnFocus = focus ?? kind.control
         subtitleScreen = .tracks
         playbackScreen = .options
+        audioScreen = .options
         openMenu = kind
         // After tvOS's own default-focus pass over the new rows — see
         // `PlayerControls.restoreFocus`.
@@ -1194,18 +1262,24 @@ struct LiveChannelOverlay: View {
     }
 
     private func closeMenu() {
+        #if os(tvOS)
+        let returnFocus: LiveChannelControl? = menuReturnFocus == .audio && !showsAudio ? .timeline : menuReturnFocus
+        #else
         let returnFocus = menuReturnFocus
+        #endif
         openMenu = nil
         menuReturnFocus = nil
         subtitleScreen = .tracks
         playbackScreen = .options
+        audioScreen = .options
         DispatchQueue.main.async { focus = returnFocus }
     }
 
     private func handleExit() {
         if cancelPendingScrub() { return }
         if (openMenu == .subtitles && subtitleScreen != .tracks)
-            || (openMenu == .playback && playbackScreen != .options) {
+            || (openMenu == .playback && playbackScreen != .options)
+            || (openMenu == .audio && audioScreen != .options) {
             panelBackRequest &+= 1
         } else if openMenu != nil {
             closeMenu()
@@ -1224,7 +1298,7 @@ struct LiveChannelOverlay: View {
 /// The iPhone / iPad arrangement: the VOD touch player's shape
 /// (`PlozziOSPlayerControlsOverlay`) with the live transport's parts.
 ///
-/// Close at the top left with the host's PiP / AirPlay / Stop row beside it;
+/// Close at the top left with the host's PiP / AirPlay row beside it;
 /// channel down · play / pause · channel up centred between the top bar and the
 /// transport, where a thumb reaches; and at the foot, bottom-up, the card, the
 /// tab row, the timeline and the title with its badges. A card replaces the
@@ -1234,8 +1308,10 @@ struct LiveChannelOverlay: View {
 /// tap on the video puts away an open menu, then an open card, then the
 /// controls themselves.
 extension LiveChannelOverlay {
+    private var touchChromeHidden: Bool { touchTimelineOnly || scrubBehind != nil }
+
     /// Leaves the top row level with the host's presentation controls.
-    static let touchTopBarInset: CGFloat = 8
+    static let touchTopBarInset: CGFloat = 0
     /// The close button's width plus the row's spacing: where the host starts
     /// its presentation controls so they sit beside it.
     static let touchPresentationLeadingInset: CGFloat = horizontalMargin + 44 + 12
@@ -1269,51 +1345,82 @@ extension LiveChannelOverlay {
                 // laid out in (VOD transport rule 1).
                 Color.clear
                     .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
-                        layerTop = frame.minY
                         layerBottom = frame.maxY
                         availableSize = frame.size
                     }
                     .allowsHitTesting(false)
-                // Stood up, the video is a band across the middle with room
-                // all round, so the buttons sit on it, as VOD's do. On its
-                // side there's no such room: they take the gap between the top
-                // bar and the transport so they can't land on the title.
-                if isTouchPortrait, !cardOpen, openMenu == nil {
-                    centerTransport
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .opacity(touchTimelineOnly ? 0 : 1)
-                        .allowsHitTesting(!touchTimelineOnly)
-                        .accessibilityHidden(touchTimelineOnly)
-                        .transition(.opacity)
-                }
                 VStack(spacing: 0) {
                     topBar
-                        .opacity(touchTimelineOnly ? 0 : 1)
-                        .allowsHitTesting(!touchTimelineOnly)
-                        .accessibilityHidden(touchTimelineOnly)
-                    Spacer(minLength: 0)
-                    if !isTouchPortrait, !cardOpen, openMenu == nil {
-                        centerTransport
-                            .opacity(touchTimelineOnly ? 0 : 1)
-                            .allowsHitTesting(!touchTimelineOnly)
-                            .accessibilityHidden(touchTimelineOnly)
-                            .transition(.opacity)
-                    }
+                        .playerTouchChromeHidden(touchChromeHidden)
                     Spacer(minLength: 0)
                     touchBottomCluster
                 }
                 menuLayer
             }
-            .modifier(WindowSafeAreaPadding())
+            .modifier(PlayerTouchChromePadding())
+            if !cardOpen, openMenu == nil {
+                centerTransport
+                    .reportSubtitleControlsFrame(
+                        in: tracks.subtitles.controlsLayout, region: .centerTransport, isVisible: !touchChromeHidden
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .playerTouchChromeHidden(touchChromeHidden)
+                    .transition(.opacity)
+            }
         }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { touchViewportSize = $0 }
         .environment(\.playerCardMetrics, touchMetrics)
         .onChange(of: touchBackgroundTapRevision) { _, _ in backgroundTapped() }
+    }
+
+    private func inlinePreviewLayout(expand: @escaping () -> Void) -> some View {
+        ZStack {
+            if !hasTouchGestureSurface {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: backgroundTapped)
+            }
+            if let previewStatus {
+                Text(previewStatus)
+                    .font(.subheadline)
+            } else {
+                centerTransport
+                    .reportSubtitleControlsFrame(
+                        in: tracks.subtitles.controlsLayout, region: .centerTransport, isVisible: true
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                HStack(spacing: 12) {
+                    Text(program?.title ?? title)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    touchGoLiveBadge
+                    touchBadge(
+                        "Full Screen", systemImage: "arrow.up.left.and.arrow.down.right",
+                        action: expand
+                    )
+                    .accessibilityIdentifier("live-channel-fullscreen")
+                }
+                .reportSubtitleControlsFrame(
+                    in: tracks.subtitles.controlsLayout, region: .title, isVisible: true
+                )
+            }
+            .padding(12)
+        }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { touchViewportSize = $0 }
+        .onChange(of: touchBackgroundTapRevision) { _, _ in backgroundTapped() }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("live-channel-preview-controls")
     }
 
     private var touchScrim: some View {
         LinearGradient(
             colors: [
-                .black.opacity(touchTimelineOnly ? 0 : 0.65), .clear,
+                .black.opacity(touchTimelineOnly ? 0 : 0.65),
+                .black.opacity(touchTimelineOnly ? 0 : 0.35),
                 .black.opacity(touchTimelineOnly ? 0.45 : (cardOpen ? 0.9 : 0.82))
             ],
             startPoint: .top,
@@ -1337,13 +1444,13 @@ extension LiveChannelOverlay {
 
     /// VOD's skip · play · skip, as channel down · play / pause · channel up.
     private var centerTransport: some View {
-        HStack(spacing: 28) {
+        HStack(spacing: compactTransport ? 20 : PlayerTouchLayout.transportSpacing(in: touchViewportSize)) {
             Button(action: onPrevious) {
                 Label("Previous Channel", systemImage: "backward.end.fill")
                     .labelStyle(.iconOnly)
-                    .font(.system(size: 24))
+                    .font(.system(size: compactTransport ? 24 : 34))
             }
-            .buttonStyle(PlayerGlassCircleButtonStyle(diameter: 64))
+            .buttonStyle(PlayerGlassCircleButtonStyle(diameter: compactTransport ? 44 : PlayerTouchLayout.skipDiameter))
             .accessibilityIdentifier("live-channel-previous")
 
             playPauseButton
@@ -1351,12 +1458,22 @@ extension LiveChannelOverlay {
             Button(action: onNext) {
                 Label("Next Channel", systemImage: "forward.end.fill")
                     .labelStyle(.iconOnly)
-                    .font(.system(size: 24))
+                    .font(.system(size: compactTransport ? 24 : 34))
             }
-            .buttonStyle(PlayerGlassCircleButtonStyle(diameter: 64))
+            .buttonStyle(PlayerGlassCircleButtonStyle(diameter: compactTransport ? 44 : PlayerTouchLayout.skipDiameter))
             .accessibilityIdentifier("live-channel-next")
         }
         .shadow(color: .black.opacity(0.4), radius: 8, y: 2)
+    }
+
+    private var compactTransport: Bool {
+        onExpandPreview != nil || PlayerTouchLayout.usesCompactTransport(in: touchViewportSize)
+    }
+
+    private var playPauseDiameter: CGFloat {
+        guard onExpandPreview != nil else { return compactTransport ? 44 : PlayerTouchLayout.playDiameter }
+        // Keep the centered primary control clear of the 44 pt footer and its 12 pt inset.
+        return min(64, max(44, touchViewportSize.height - 2 * (44 + 12)))
     }
 
     /// Stands in for the host's activity panel while the controls are up, so
@@ -1367,7 +1484,7 @@ extension LiveChannelOverlay {
                 if isBusy {
                     ProgressView()
                         .controlSize(.large)
-                        .tint(.white)
+                        .tint(Color.primary)
                         .accessibilityLabel(Text(phase.activityLabel))
                 } else if phase == .paused {
                     Label("Play", systemImage: "play.fill")
@@ -1376,9 +1493,9 @@ extension LiveChannelOverlay {
                 }
             }
             .labelStyle(.iconOnly)
-            .font(.system(size: 32))
+            .font(.system(size: onExpandPreview != nil ? playPauseDiameter / 2 : (compactTransport ? 24 : 44)))
         }
-        .buttonStyle(PlayerGlassCircleButtonStyle(diameter: 76))
+        .buttonStyle(PlayerGlassCircleButtonStyle(diameter: playPauseDiameter))
         // A stream with no time-shift can't pause; the button stays put so the
         // row doesn't reflow, but says so.
         .disabled(isBusy || !(canPause || phase == .paused))
@@ -1396,21 +1513,22 @@ extension LiveChannelOverlay {
     // MARK: Bottom
 
     private var touchBottomCluster: some View {
-        VStack(alignment: .leading, spacing: Self.stackSpacing) {
+        VStack(alignment: .leading, spacing: 0) {
             if !cardOpen {
                 Group {
                     if isTouchPortrait {
-                        // The track badges are up in the top bar; only the
-                        // live-edge and library shortcuts stay by the title.
-                        HStack(alignment: .center, spacing: 12) {
-                            touchTitleBlock
-                            touchGoLiveBadge
-                            libraryButton
-                        }
-                    } else if isCompactWidth {
-                        VStack(alignment: .leading, spacing: 14) {
-                            touchTitleBlock
-                            touchBadges
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(alignment: .center, spacing: 12) {
+                                touchTitleBlock
+                                touchGoLiveBadge
+                                libraryButton
+                            }
+                            touchTrackBadges()
+                                .reportSubtitleControlsFrame(
+                                    in: tracks.subtitles.controlsLayout, region: .trackControls,
+                                    isVisible: !touchChromeHidden
+                                )
+                                .frame(maxWidth: .infinity, alignment: .trailing)
                         }
                     } else {
                         HStack(alignment: .bottom, spacing: 16) {
@@ -1420,23 +1538,31 @@ extension LiveChannelOverlay {
                         }
                     }
                 }
-                .opacity(touchTimelineOnly ? 0 : 1)
-                .allowsHitTesting(!touchTimelineOnly)
-                .accessibilityHidden(touchTimelineOnly)
+                .playerTouchChromeHidden(touchChromeHidden)
                 .transition(.opacity)
                 timeline
+                    .frame(height: PlayerTouchLayout.timelineRowHeight)
+                    .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("live-channel-timeline")
-                    .accessibilityElement(children: .combine)
                     .reportSubtitleControlsFrame(in: tracks.subtitles.controlsLayout, region: .timeline)
                     .transition(.opacity)
             }
-            touchTabRow
-                .opacity(touchTimelineOnly ? 0 : 1)
-                .allowsHitTesting(!touchTimelineOnly)
-                .accessibilityHidden(touchTimelineOnly)
+            HStack(spacing: 12) {
+                touchTabRow
+                if let onCollapsePreview {
+                    Spacer(minLength: 0)
+                    touchBadge(
+                        "Exit Full Screen", systemImage: "arrow.down.right.and.arrow.up.left",
+                        action: onCollapsePreview
+                    )
+                    .accessibilityIdentifier("live-channel-exit-fullscreen")
+                }
+            }
+                .playerTouchChromeHidden(touchChromeHidden)
             if cardOpen {
                 card
                     .reportSubtitleControlsFrame(in: tracks.subtitles.controlsLayout, region: .card)
+                    .padding(.top, PlayerTouchLayout.cardSpacing)
                     // Grows upward out of the tabs, as VOD's touch card does.
                     .transition(.scale(scale: 0.94, anchor: .bottom).combined(with: .opacity))
             }
@@ -1446,51 +1572,70 @@ extension LiveChannelOverlay {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// VOD's touch title block with the channel in front: logo, then the
-    /// status pill and channel over the programme.
     private var touchTitleBlock: some View {
-        HStack(spacing: 12) {
-            ChannelLogoArtwork(
-                name: title, logoURL: logoURL, size: CGSize(width: 56, height: 34),
-                cornerRadius: 6, plozzChannelID: plozzChannelID
-            )
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 8) {
-                    LiveChannelStatusPill(status: status, isLive: isAtLiveEdge && phase == .playing)
-                    if program != nil {
-                        Text(title)
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.85))
-                            .lineLimit(1)
-                    }
+        let compact = PlayerTouchLayout.usesCompactTitle(in: touchViewportSize)
+        return VStack(alignment: .leading, spacing: 4) {
+            if program != nil, !compact {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(title)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.85))
+                        .lineLimit(1)
+                        .accessibilityIdentifier("live-channel-name")
+                    touchPositionBadge
                 }
+            }
+            HStack(spacing: 8) {
                 Text(program?.title ?? title)
-                    .font(.title3.weight(.semibold))
+                    .font(compact ? .headline : .title3.weight(.semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
+                    .accessibilityIdentifier("live-channel-program-title")
+                if program == nil || compact {
+                    touchPositionBadge
+                }
             }
         }
-        .shadow(color: .black.opacity(0.4), radius: 4, y: 1)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("live-channel-title-block")
         .reportSubtitleControlsFrame(
             in: tracks.subtitles.controlsLayout, region: .title,
-            isVisible: !cardOpen && !touchTimelineOnly
+            isVisible: !cardOpen && !touchChromeHidden
         )
         .frame(maxWidth: .infinity, alignment: .leading)
-        // Hidden under an open track menu when it rises over it; stood up the
-        // menu hangs from the top bar instead and leaves the title alone.
-        .opacity(openMenu == nil || menuHangsBelowBadges ? 1 : 0)
+        .opacity(openMenu == nil ? 1 : 0)
         .animation(.easeInOut(duration: 0.28), value: openMenu == nil)
+    }
+
+    private var touchPositionBadge: some View {
+        let playing = LiveChannelPlaybackPhase.playing
+        let scheduled = plozzChannelID != nil
+        let showsPosition = phase == .playing || (phase == .paused && !isAtLiveEdge)
+        return ZStack(alignment: .leading) {
+            // Reserve both localized widths so changing position or hiding the badge cannot move the header.
+            ForEach([true, false], id: \.self) { atLiveEdge in
+                LiveChannelStatusPill(
+                    status: playing.statusLabel(isAtLiveEdge: atLiveEdge, isScheduledChannel: scheduled),
+                    isLive: false, compact: true
+                )
+                .hidden()
+            }
+            LiveChannelStatusPill(
+                status: playing.statusLabel(isAtLiveEdge: isAtLiveEdge, isScheduledChannel: scheduled),
+                isLive: isAtLiveEdge, compact: true
+            )
+            .accessibilityIdentifier("live-channel-position")
+            .playerTouchChromeHidden(!showsPosition)
+        }
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     /// The same actions as the tvOS badges, as VOD's touch glass circles.
     private var touchBadges: some View {
-        HStack(spacing: 12) {
-            touchGoLiveBadge
-            touchTrackBadges
-        }
+        touchTrackBadges(includesGoLive: true)
         .reportSubtitleControlsFrame(
-            in: tracks.subtitles.controlsLayout, region: .trackControls, isVisible: !touchTimelineOnly
+            in: tracks.subtitles.controlsLayout, region: .trackControls, isVisible: !touchChromeHidden
         )
     }
 
@@ -1500,63 +1645,89 @@ extension LiveChannelOverlay {
             touchBadge(
                 LibraryChannelPlaybackCopy.returnToCurrentTitle(isScheduledChannel: plozzChannelID != nil),
                 systemImage: plozzChannelID != nil ? "clock.arrow.circlepath" : "dot.radiowaves.left.and.right",
-                prominent: true, action: onGoLive
+                action: onGoLive
             )
             .accessibilityIdentifier("live-channel-go-live")
             .reportSubtitleControlsFrame(
-                in: tracks.subtitles.controlsLayout, region: .trackControls, isVisible: !touchTimelineOnly
+                in: tracks.subtitles.controlsLayout, region: .trackControls, isVisible: !touchChromeHidden
             )
         }
     }
 
-    /// Audio · Subtitles · Multiview: beside the title on its side, in the top
-    /// bar stood up.
-    private var touchTrackBadges: some View {
-        HStack(spacing: 12) {
-            if showsZoom {
-                PlayerOptionsMenuButton(
-                    makeMenu: {
-                        UIMenu(children: [PlayerZoomMenu.make(
-                            model: tracks.videoZoom, locale: locale,
-                            onCustomZoom: { showsCustomZoom = true }
-                        )])
-                    },
-                    onPresentationChange: { nativePlaybackMenuPresented = $0 }
-                )
-                .frame(width: 44, height: 44)
-                .background { PlayerGlassCircleSurface() }
-                .clipShape(Circle())
-            }
-            if showsAudio {
-                touchBadge(
-                    LiveChannelTrackMenuKind.audio.title, systemImage: LiveChannelTrackMenuKind.audio.icon,
-                    prominent: openMenu == .audio
-                ) { toggleMenu(.audio) }
-                    .accessibilityIdentifier("live-channel-audio")
-            }
-            if showsSubtitles {
-                touchBadge(
-                    LiveChannelTrackMenuKind.subtitles.title, systemImage: LiveChannelTrackMenuKind.subtitles.icon,
-                    prominent: openMenu == .subtitles
-                ) { toggleMenu(.subtitles) }
-                    .accessibilityIdentifier("live-channel-subtitles")
-            }
-            if let onMultiview {
-                touchBadge("Multiview", systemImage: "rectangle.split.2x2", action: onMultiview)
-                    .accessibilityIdentifier("live-channel-multiview")
-            }
+    /// Track actions stay above the timeline, below the title in portrait.
+    private func touchTrackBadges(includesGoLive: Bool = false) -> some View {
+        PlayerGlassControlGroup {
+            if includesGoLive { touchGoLiveBadge }
+            PlayerMoreMenuButton(
+                model: trackOptions, availability: mobileMenuAvailability, presentation: mobileMenu,
+                layout: .init(size: touchViewportSize),
+                accessibilityIdentifier: "live-channel-playback-options", actions: mobileMenuActions
+            )
         }
-        // GLOBAL, so the menu layer can rest the open menu just above (or,
-        // in the top bar, just below) them.
-        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
-            badgesTop = frame.minY
-            badgesBottom = frame.maxY
+        // GLOBAL, so the menu layer can rest the open menu just above them.
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { top in
+            badgesTop = top
+        }
+    }
+
+    private var mobileMenuAvailability: PlayerMoreMenuAvailability {
+        .init(video: showsZoom, videoModel: tracks.videoZoom, multiview: onMultiview != nil)
+    }
+
+    private var mobileMenuActions: PlayerMoreMenuActions {
+        let generation = mobileMenu.generation
+        var actions = PlayerMoreMenuActions()
+        actions.isCurrent = {
+            mobileMenu.generation == generation && tracks.matchesSource(channelID: channelID, input: input)
+        }
+        actions.selectAudio = { id in
+            guard let track = tracks.audioTracks.first(where: { $0.id == id }) else {
+                PlozzLog.playback.debug("Ignoring obsolete live audio menu selection.")
+                return
+            }
+            tracks.selectAudio(track)
+            onControlActivity()
+        }
+        actions.selectSubtitle = { id in
+            if id == PlayerTrackOption.offID {
+                tracks.selectSubtitle(nil)
+            } else if let track = tracks.subtitleTracks.first(where: { $0.id == id }) {
+                tracks.selectSubtitle(track)
+            } else {
+                PlozzLog.playback.debug("Ignoring obsolete live subtitle menu selection.")
+                return
+            }
+            onControlActivity()
+        }
+        actions.setDialogueEnhancement = { enabled in
+            tracks.engine.setDialogEnhanceEnabled(enabled)
+            trackOptions.dialogEnhanceEnabled = enabled
+            onControlActivity()
+        }
+        return actions
+    }
+
+    private func presentMobileDestination() {
+        guard let destination = mobileMenu.takeDestination() else { return }
+        guard scenePhase == .active, tracks.matchesSource(channelID: channelID, input: input) else {
+            mobileMenu.reset()
+            return
+        }
+        switch destination {
+        case .zoom: mobileSheet = .zoom
+        case .subtitleAdvanced: mobileSheet = .subtitles
+        case .audioSync: mobileSheet = .audioSync
+        case .multiview:
+            if let onMultiview { onMultiview() }
+            else { PlozzLog.playback.debug("Ignoring unavailable live multiview menu selection.") }
+        case .subtitleSearch, .speed, .quality, .versions:
+            PlozzLog.playback.error("Live menu requested an unavailable destination.")
         }
     }
 
     private func touchBadge(
         _ title: LocalizedStringResource, systemImage: String,
-        prominent: Bool = false, action: @escaping () -> Void
+        selected: Bool = false, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             Label { Text(title) } icon: { Image(systemName: systemImage) }
@@ -1564,12 +1735,7 @@ extension LiveChannelOverlay {
                 .font(.title3)
         }
         .buttonStyle(PlayerGlassCircleButtonStyle(diameter: 44))
-        .overlay {
-            if prominent {
-                Circle().strokeBorder(.white.opacity(0.9), lineWidth: 2)
-                    .allowsHitTesting(false)
-            }
-        }
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     /// VOD's touch tab row: tapping a tab opens its card, tapping it again
@@ -1584,10 +1750,10 @@ extension LiveChannelOverlay {
     }
 
     private var touchTabs: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             ForEach(availableTabs, id: \.self) { tab in
                 Button { toggleCard(tab) } label: { Text(tab.title) }
-                    .buttonStyle(PlayerTabButtonStyle(focused: false, selected: cardOpen && cardTab == tab))
+                    .playerTouchTab(selected: cardOpen && cardTab == tab)
                     // The whole pill takes the tap; see `PlayerTouchCardStrip.tab`.
                     .contentShape(Capsule(style: .continuous))
                     .disabled(openMenu != nil)
@@ -1612,17 +1778,21 @@ extension LiveChannelOverlay {
 /// view's identity) in place while padding by nothing.
 struct WindowSafeAreaPadding: ViewModifier {
     var isEnabled = true
+    var minimumInset: CGFloat = 0
+    var minimumHorizontalInset: CGFloat = 0
 
     @Environment(\.layoutDirection) private var layoutDirection
     @State private var window = WindowSafeArea()
 
     func body(content: Content) -> some View {
         let insets = isEnabled ? window.insets : .zero
+        let minimum = isEnabled ? minimumInset : 0
+        let horizontal = isEnabled ? minimumHorizontalInset : 0
         let rtl = layoutDirection == .rightToLeft
         content
             .padding(EdgeInsets(
-                top: insets.top, leading: rtl ? insets.right : insets.left,
-                bottom: insets.bottom, trailing: rtl ? insets.left : insets.right
+                top: max(minimum, insets.top), leading: max(horizontal, rtl ? insets.right : insets.left),
+                bottom: max(minimum, insets.bottom), trailing: max(horizontal, rtl ? insets.left : insets.right)
             ))
             .ignoresSafeArea()
             // Zero-sized: a full-size UIKit view here sat above the controls in
@@ -1690,6 +1860,7 @@ struct LiveChannelProgramArtwork: View {
     let channelName: String // l10n:content — provider-supplied channel name
     let logoURL: URL?
     let plozzChannelID: String?
+    var plozzChannelMood: LibraryChannelArtworkMood? = nil
     let size: CGSize
     var cornerRadius: CGFloat = 12
 
@@ -1716,7 +1887,7 @@ struct LiveChannelProgramArtwork: View {
     private var logo: some View {
         ChannelLogoArtwork(
             name: channelName, logoURL: logoURL, size: size,
-            cornerRadius: cornerRadius, plozzChannelID: plozzChannelID
+            cornerRadius: cornerRadius, plozzChannelID: plozzChannelID, plozzChannelMood: plozzChannelMood
         )
     }
 }
@@ -1729,6 +1900,7 @@ private struct LiveChannelInfoCard: View {
     let title: String // l10n:content — provider-supplied channel name
     let logoURL: URL?
     let plozzChannelID: String?
+    var plozzChannelMood: LibraryChannelArtworkMood? = nil
     let program: LiveChannelProgramInfo?
     /// A stood-up phone: the art stays but shrinks, and the synopsis goes so
     /// the title and timing have room to wrap instead.
@@ -1738,6 +1910,7 @@ private struct LiveChannelInfoCard: View {
     @FocusState.Binding var focus: LiveChannelControl?
 
     @Environment(\.playerCardMetrics) private var metrics
+    @Environment(\.playerControlForeground) private var foreground
 
     private var artHeight: CGFloat {
         (compact ? metrics.contentHeight * 0.8 : metrics.contentHeight).rounded()
@@ -1749,6 +1922,7 @@ private struct LiveChannelInfoCard: View {
                 LiveChannelProgramArtwork(
                     artworkURL: program?.artworkURL, channelName: title, logoURL: logoURL,
                     plozzChannelID: plozzChannelID,
+                    plozzChannelMood: plozzChannelMood,
                     size: CGSize(width: (artHeight * 16 / 9).rounded(), height: artHeight),
                     cornerRadius: PlozzTheme.Metrics.mediumMediaCornerRadius
                 )
@@ -1760,27 +1934,27 @@ private struct LiveChannelInfoCard: View {
                 if let subtitle = program?.subtitle {
                     Text(subtitle)
                         .font(metrics.captionFont)
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(foreground.opacity(0.75))
                         .lineLimit(1)
                 }
                 if let program {
                     LiveChannelProgramTiming(program: program)
                         .font(metrics.captionFont)
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(foreground.opacity(0.6))
                         .lineLimit(compact ? 2 : 1)
                     if !compact, let description = program.description {
                         Text(description)
                             .font(metrics.bodyFont)
-                            .foregroundStyle(.white.opacity(0.85))
+                            .foregroundStyle(foreground.opacity(0.85))
                             .lineLimit(metrics.overviewLineLimit)
                     }
                 } else {
                     Text("No guide information for this channel.")
                         .font(metrics.bodyFont)
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(foreground.opacity(0.6))
                 }
             }
-            .foregroundStyle(.white)
+            .foregroundStyle(foreground)
             .frame(maxWidth: metrics.textColumnMaxWidth, maxHeight: .infinity, alignment: .topLeading)
             Spacer(minLength: 0)
         }
@@ -1797,7 +1971,9 @@ private struct LiveChannelInfoCard: View {
             .padding(metrics.contentPadding)
             .plozzFocusSection()
         }
-        .modifier(PanelGlassBackground(cornerRadius: metrics.panelCornerRadius))
+        .modifier(PanelGlassBackground(cornerRadius: metrics.panelCornerRadius, mediaGlass: true))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("live-channel-info-panel")
     }
 }
 
@@ -1817,12 +1993,18 @@ extension LiveChannelInfoCard {
             .lineLimit(1)
             .animation(.easeOut(duration: 0.2), value: isFocused)
         }
+        #if os(iOS)
+        .playerTouchPanelAction()
+        .accessibilityAddTraits(diagnosticsEnabled ? .isSelected : [])
+        #else
         .buttonStyle(InfoActionButtonStyle(
             focused: isFocused,
             prominent: diagnosticsEnabled,
             hPadding: metrics.actionHPadding,
             vPadding: metrics.actionVPadding
         ))
+        #endif
+        .accessibilityLabel("Playback Info")
         .focused($focus, equals: .playbackInfo)
         .accessibilityIdentifier("live-channel-playback-info")
     }
@@ -1856,76 +2038,13 @@ private struct LiveChannelProgramTiming: View {
     }
 }
 
-#if os(iOS)
-/// The Guide card's left column on a wide touch screen: what is playing, so
-/// the grid beside it can take the phone's compact shape and stay navigable.
-struct LiveChannelGuideInfoColumn: View {
-    let title: String // l10n:content — provider-supplied channel name
-    let logoURL: URL?
-    let plozzChannelID: String?
-    let program: LiveChannelProgramInfo?
-
-    @Environment(\.playerCardMetrics) private var metrics
-
-    var body: some View {
-        GeometryReader { geometry in
-            let width = max(1, geometry.size.width - metrics.contentPadding * 2)
-            let artHeight = min(width * 9 / 16, geometry.size.height * 0.42).rounded()
-            VStack(alignment: .leading, spacing: 6) {
-                LiveChannelProgramArtwork(
-                    artworkURL: program?.artworkURL, channelName: title, logoURL: logoURL,
-                    plozzChannelID: plozzChannelID,
-                    size: CGSize(width: (artHeight * 16 / 9).rounded(), height: artHeight),
-                    cornerRadius: PlozzTheme.Metrics.mediumMediaCornerRadius
-                )
-                .padding(.bottom, 4)
-                Text(program?.title ?? title)
-                    .font(metrics.titleFont)
-                    .lineLimit(2)
-                if program != nil {
-                    Text(title)
-                        .font(metrics.captionFont)
-                        .foregroundStyle(.white.opacity(0.75))
-                        .lineLimit(1)
-                }
-                if let program {
-                    LiveChannelProgramTiming(program: program)
-                        .font(metrics.captionFont)
-                        .foregroundStyle(.white.opacity(0.6))
-                        .lineLimit(2)
-                    if let description = program.description {
-                        Text(description)
-                            .font(metrics.bodyFont)
-                            .foregroundStyle(.white.opacity(0.85))
-                            // Whatever height is left, truncated rather than clipped.
-                            .frame(maxHeight: .infinity, alignment: .top)
-                    }
-                } else {
-                    Text("No guide information for this channel.")
-                        .font(metrics.bodyFont)
-                        .foregroundStyle(.white.opacity(0.6))
-                }
-            }
-            .foregroundStyle(.white)
-            .padding(metrics.contentPadding)
-            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
-        }
-        .clipped()
-        .plozzSurface(
-            .raised, cornerRadius: max(0, metrics.panelCornerRadius - metrics.contentPadding)
-        )
-        .environment(\.themePalette, .dark)
-    }
-}
-#endif
-
 // MARK: - Timeline
 
-/// The live stand-in for VOD's scrub bar: the same track surface, fill and
-/// playhead, measuring the programme instead of a file.
+/// The live stand-in for VOD's scrub bar, measuring the programme instead of a
+/// file. Mobile uses fill-only progress; tvOS retains its playhead.
 ///
 /// The faint fill is what has aired so far (VOD's buffered fill); the bright
-/// fill and playhead are what is on screen, which trails it while paused or
+/// fill (and tvOS playhead) is what is on screen, which trails it while paused or
 /// time-shifted. The label riding the playhead is the clock time of the picture
 /// on screen. Without guide data the bar is simply full at the live edge.
 private struct LiveChannelTimeline: View {
@@ -1946,6 +2065,7 @@ private struct LiveChannelTimeline: View {
     var scrubThumbnail: CGImage?
     /// Scrubbing shows the preview box at once, as VOD does, filled when a frame lands.
     var showsScrubThumbnail = false
+    var previewAvailableSize: CGSize = .zero
     /// Touch: a drag along the bar seeks through the window.
     var seekToBehindLive: ((TimeInterval) -> Void)?
 
@@ -1970,6 +2090,30 @@ private struct LiveChannelTimeline: View {
             now: now, program: program, earlierPrograms: earlierPrograms,
             seekWindowSeconds: seekWindowSeconds, behindLiveSeconds: behind
         )
+        #if os(iOS)
+        let samples = PlayerClockTimes.clockWidthSamples(locale: locale)
+        return HStack(spacing: 4) {
+            touchTime(
+                clock(onScreen), samples: samples, alignment: .leading,
+                label: "Current time", identifier: "live-timeline-current-time"
+            )
+            bar(layout)
+                .frame(height: 44)
+                .contentShape(Rectangle())
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Playback position")
+                .accessibilityValue(Text(verbatim: clock(onScreen)))
+                .accessibilityIdentifier("live-channel-timeline-scrubber")
+                .modifier(LiveChannelTimelineDrag(
+                    layout: layout, now: now, windowSeconds: seekWindowSeconds,
+                    preview: $scrubBehind, seek: seekToBehindLive
+                ))
+            touchTime(
+                program == nil ? "--:--" : clock(layout.end), samples: samples, alignment: .trailing,
+                label: "Estimated end time", identifier: "live-timeline-end-time"
+            )
+        }
+        #else
         return VStack(spacing: Self.rowSpacing) {
             bar(layout)
                 .frame(height: Self.barRowHeight)
@@ -1982,7 +2126,33 @@ private struct LiveChannelTimeline: View {
             layout: layout, now: now, windowSeconds: seekWindowSeconds,
             preview: $scrubBehind, seek: seekToBehindLive
         ))
+        #endif
     }
+
+    #if os(iOS)
+    private func touchTime(
+        _ text: String, samples: [String], alignment: Alignment,
+        label: LocalizedStringResource, identifier: String
+    ) -> some View {
+        ZStack {
+            ForEach(samples, id: \.self) { Text(verbatim: $0).hidden() }
+        }
+        .overlay(alignment: alignment) {
+            Text(verbatim: text)
+                .foregroundStyle(.white.opacity(0.85))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+        .font(.caption.monospacedDigit())
+        .fixedSize()
+        .frame(minWidth: 44, minHeight: 44, alignment: alignment)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(label))
+        .accessibilityValue(Text(verbatim: text))
+        .accessibilityIdentifier(identifier)
+    }
+    #endif
 
     // Touch has no focused shape to make room for, and VOD's touch bar is a
     // slim line with small times, so the phone gets the compact row.
@@ -2001,10 +2171,7 @@ private struct LiveChannelTimeline: View {
     private static let rowSpacing: CGFloat = 2
     private static let barRowHeight: CGFloat = 18
     private static let labelRowHeight: CGFloat = 20
-    private static let restingBarHeight: CGFloat = 6
-    private static let restingKnobHeight: CGFloat = 14
-    private static let scrubbingKnobWidth: CGFloat = 6
-    private static let scrubbingKnobHeight: CGFloat = 32
+    private static let restingBarHeight: CGFloat = 8
     private static let pauseGlyphSize: CGFloat = 16
     private static let pauseGlyphOffset: CGFloat = 24
     private static let timeFont: Font = .caption.weight(.semibold)
@@ -2018,43 +2185,58 @@ private struct LiveChannelTimeline: View {
         GeometryReader { geometry in
             let width = geometry.size.width
             let knobX = width * CGFloat(layout.playing)
-            let fillStart = width * CGFloat(layout.seekableStart ?? 0)
             // Scrubbing takes VOD's touched shape on touch (`PlayerTouchScrubBar`)
             // and its focused shape with a lifted knob on the remote.
             let scrubbing = scrubBehind != nil
             let barHeight: CGFloat = focused || scrubbing ? 20 : Self.restingBarHeight
+            #if os(tvOS)
+            let fillStart = width * CGFloat(layout.seekableStart ?? 0)
             let knobWidth: CGFloat = scrubbing ? Self.scrubbingKnobWidth : focused ? 8 : 4
             let knobHeight: CGFloat = scrubbing ? Self.scrubbingKnobHeight
                 : focused ? 32 : Self.restingKnobHeight
+            #endif
             ZStack(alignment: .leading) {
+                #if os(iOS)
+                LiveChannelTouchTrack(
+                    layout: layout, width: width, height: barHeight, focused: focused, scrubbing: scrubbing
+                )
+                #else
                 ZStack(alignment: .leading) {
                     PlayerScrubTrackSurface(height: barHeight)
                     Rectangle()
-                        .fill(.white.opacity(layout.seekableStart == nil ? 0.14 : 0.24))
+                        .fill(Color.white.opacity(layout.seekableStart == nil ? 0.14 : 0.24))
                         .frame(width: max(0, width * CGFloat(layout.aired) - fillStart), height: barHeight)
                         .offset(x: fillStart)
                     // The bright fill means "you can go here": without a rewind
                     // window only the faint aired span shows.
                     if layout.seekableStart != nil {
                         Rectangle()
-                            .fill(.white.opacity(scrubbing ? 0.9 : focused ? 0.62 : 0.32))
+                            .fill(Color.white.opacity(scrubbing ? 0.9 : focused ? 0.62 : 0.32))
                             .frame(width: max(0, knobX - fillStart), height: barHeight)
                             .offset(x: fillStart)
                     }
                 }
                 .mask {
-                    LiveChannelProgrammeTrack(ranges: layout.maskRanges, height: barHeight)
-                        .equatable()
+                    LiveChannelProgrammeTrack(
+                        ranges: layout.maskRanges, height: barHeight, restingHeight: Self.restingBarHeight
+                    )
+                    .equatable()
                 }
+                #endif
                 if scrubbing, showsScrubThumbnail {
-                    LiveChannelScrubThumbnail(image: scrubThumbnail, knobX: knobX, barWidth: width)
+                    LiveChannelScrubThumbnail(
+                        image: scrubThumbnail, knobX: knobX, barWidth: width,
+                        availableSize: previewAvailableSize
+                    )
                         .transition(.opacity)
                 }
+                #if os(tvOS)
                 RoundedRectangle(cornerRadius: focused || scrubbing ? knobWidth / 2 : 0, style: .continuous)
-                    .fill(.white)
+                    .fill(Color.white)
                     .frame(width: knobWidth, height: knobHeight)
                     .offset(x: knobX - knobWidth / 2)
                     .shadow(radius: 4)
+                #endif
             }
             .frame(maxHeight: .infinity, alignment: .center)
             .animation(.easeOut(duration: 0.2), value: focused)
@@ -2121,6 +2303,37 @@ private struct LiveChannelTimeline: View {
     }
 }
 
+#if os(iOS)
+struct LiveChannelTouchTrack: View {
+    let layout: LiveChannelTimelineLayout
+    let width: CGFloat
+    let height: CGFloat
+    let focused: Bool
+    let scrubbing: Bool
+    var body: some View {
+        let fillStart = width * CGFloat(layout.seekableStart ?? 0)
+        ZStack(alignment: .leading) {
+            PlayerScrubTrackSurface(height: height)
+            Rectangle()
+                .fill(Color.white.opacity(layout.seekableStart == nil ? 0.14 : 0.24))
+                .frame(width: max(0, width * CGFloat(layout.aired) - fillStart), height: height)
+                .offset(x: fillStart)
+            if layout.seekableStart != nil {
+                Rectangle()
+                    .fill(Color.white.opacity(scrubbing ? 0.9 : focused ? 0.62 : 0.32))
+                    .frame(width: max(0, width * CGFloat(layout.playing) - fillStart), height: height)
+                    .offset(x: fillStart)
+            }
+        }
+        .mask {
+            LiveChannelProgrammeTrack(ranges: layout.maskRanges, height: height, minimumSectionWidth: 20)
+                .equatable()
+        }
+        .frame(width: width, height: height)
+    }
+}
+#endif
+
 /// The scrub preview floating above the playhead, in VOD's frame (`ScrubBar`):
 /// glass-bordered on 26, kept on the bar's span, centred on the playhead.
 private struct LiveChannelScrubThumbnail: View {
@@ -2128,6 +2341,7 @@ private struct LiveChannelScrubThumbnail: View {
     let image: CGImage?
     let knobX: CGFloat
     let barWidth: CGFloat
+    var availableSize: CGSize = .zero
     @Environment(\.plozzReduceTransparency) private var reduceTransparency
 
     #if os(tvOS)
@@ -2143,6 +2357,14 @@ private struct LiveChannelScrubThumbnail: View {
     #endif
 
     var body: some View {
+        #if os(iOS)
+        let size = PlayerTouchLayout.scrubPreviewSize(availableSize: availableSize)
+        PlayerTouchScrubPreview(image: image, availableSize: availableSize)
+            .position(
+                x: min(max(knobX, size.width / 2), max(size.width / 2, barWidth - size.width / 2)),
+                y: -(Self.lift + size.height / 2)
+            )
+        #else
         let aspect = image.map { $0.height > 0 ? CGFloat($0.width) / CGFloat($0.height) : 16.0 / 9.0 } ?? 16.0 / 9.0
         let height = Self.width / aspect
         let visualWidth = Self.width + 2 * Self.border
@@ -2163,7 +2385,11 @@ private struct LiveChannelScrubThumbnail: View {
             if #available(iOS 26.0, tvOS 26.0, *), !reduceTransparency {
                 content
                     .padding(Self.border)
-                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: Self.corner + Self.border, style: .continuous))
+                    .background {
+                        PlayerNativeGlassSurface(RoundedRectangle(
+                            cornerRadius: Self.corner + Self.border, style: .continuous
+                        ))
+                    }
             } else {
                 content.overlay(
                     RoundedRectangle(cornerRadius: Self.corner, style: .continuous)
@@ -2174,6 +2400,7 @@ private struct LiveChannelScrubThumbnail: View {
         .position(x: x, y: -(Self.lift + height / 2))
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+        #endif
     }
 }
 
@@ -2236,15 +2463,15 @@ private struct LiveChannelTimelineDrag: ViewModifier {
 private struct LiveChannelProgrammeTrack: View, Equatable {
     let ranges: [Range<Double>]
     let height: CGFloat
+    var minimumSectionWidth: CGFloat = 0
+    var restingHeight: CGFloat? = nil
 
     var body: some View {
         Canvas { context, size in
-            guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return }
-            var mask = Path()
-            for section in SkipMarkerTrackLayout.segmentedSections(ranges: ranges, size: size) {
-                let radius = min(section.width, section.height) / 2
-                mask.addRoundedRect(in: section, cornerSize: CGSize(width: radius, height: radius))
-            }
+            let mask = SkipMarkerTrackLayout.maskPath(
+                ranges: ranges, size: size, minimumSectionWidth: minimumSectionWidth,
+                restingHeight: restingHeight
+            )
             context.fill(mask, with: .color(.white))
         }
         .frame(height: height)
@@ -2279,14 +2506,15 @@ private struct FocusReporting<Content: View>: View {
 private struct LiveChannelStatusPill: View {
     let status: LocalizedStringResource
     let isLive: Bool
+    var compact = false
 
     var body: some View {
         Text(status)
             .font(.caption2.weight(.heavy))
             .tracking(0.6)
             .foregroundStyle(.white)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
+            .padding(.horizontal, compact ? 6 : 10)
+            .padding(.vertical, compact ? 2 : 4)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(isLive ? Color(uiColor: .systemRed) : Color.gray.opacity(0.75))
@@ -2372,7 +2600,7 @@ private struct LiveChannelTrackPanel: View {
     private var rows: [Row] {
         switch kind {
         case .playback:
-            return PlayerVideoZoom.Mode.allCases.map { mode in
+            return model.videoZoom.availableModes.map { mode in
                 Row(id: mode.rawValue, title: Text(mode.menuTitle), isSelected: model.videoZoom.settings.mode == mode) {
                     model.videoZoom.settings.mode = mode
                 }
@@ -2409,7 +2637,7 @@ private struct LiveChannelTrackPanel: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(kind.title)
                 .font(.headline)
-                .foregroundStyle(.white)
+                .foregroundStyle(Color.primary)
                 .padding(.horizontal, 18)
                 .padding(.top, 18)
             let rows = rows
@@ -2433,7 +2661,6 @@ private struct LiveChannelTrackPanel: View {
         .padding(.horizontal, 14)
         .frame(width: Self.width, alignment: .leading)
         .modifier(PanelGlassBackground())
-        .colorScheme(.dark)
         .plozzFocusSection()
     }
 
@@ -2487,14 +2714,16 @@ struct LiveChannelOnNowPanel: View {
     let select: (LiveChannelOnNowItem) -> Void
 
     @Environment(\.playerCardMetrics) private var metrics
+    @Environment(\.playerControlForeground) private var foreground
 
     var body: some View {
         if items.isEmpty {
             Text("Nothing else is on right now.")
                 .font(metrics.bodyFont)
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(foreground.opacity(0.7))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background { PlayerOverVideoSurface(cornerRadius: metrics.panelCornerRadius) }
+                .background { PlayerOverVideoSurface(cornerRadius: metrics.panelCornerRadius, mediaGlass: true) }
+                .accessibilityIdentifier("live-channel-on-now-empty")
         } else {
             TimelineView(.periodic(from: .now, by: 30)) { context in
                 row(now: context.date)
@@ -2548,7 +2777,7 @@ private struct LiveChannelCardButtonStyle: ButtonStyle {
         var body: some View {
             // The Cast cards' lift: small cards in a row barely register the
             // gentler default.
-            PlayerOverVideoCardStyle(focused: isFocused, cornerRadius: cornerRadius, focusScale: 1.10)
+            PlayerOverVideoCardStyle(focused: isFocused, cornerRadius: cornerRadius, focusScale: 1.10, mediaGlass: true)
                 .makeBody(configuration: configuration)
         }
     }
@@ -2562,6 +2791,7 @@ struct LiveChannelOnNowCard: View {
     let reservesDetailLine: Bool
 
     @Environment(\.playerCardMetrics) private var metrics
+    @Environment(\.playerControlForeground) private var foreground
     @Environment(\.isFocused) private var focused
 
     private static let spacing: CGFloat = 10
@@ -2618,11 +2848,11 @@ struct LiveChannelOnNowCard: View {
                 .overlay(alignment: .topLeading) { watchingBadge }
             VStack(alignment: .leading, spacing: 3) {
                 MarqueeText(text: headline, font: metrics.castNameFont, isFocused: focused)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(foreground)
                 if let detail = Self.detail(for: item, now: now) {
                     detail
                         .font(metrics.castRoleFont)
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(foreground.opacity(0.6))
                         .lineLimit(1)
                 }
             }
@@ -2642,7 +2872,7 @@ struct LiveChannelOnNowCard: View {
                 Image(systemName: "play.fill")
             }
             .font(metrics.castRoleFont.weight(.semibold))
-            .foregroundStyle(.white)
+            .foregroundStyle(Color.primary)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             // A capsule: the corner radius clamps to half its height.
@@ -2684,7 +2914,8 @@ struct LiveChannelOnNowCard: View {
     private var artwork: some View {
         LiveChannelProgramArtwork(
             artworkURL: item.program?.artworkURL, channelName: item.channelName, logoURL: item.logoURL,
-            plozzChannelID: item.plozzChannelID, size: CGSize(width: artWidth, height: artHeight),
+            plozzChannelID: item.plozzChannelID, plozzChannelMood: item.plozzChannelMood,
+            size: CGSize(width: artWidth, height: artHeight),
             cornerRadius: artCornerRadius
         )
     }

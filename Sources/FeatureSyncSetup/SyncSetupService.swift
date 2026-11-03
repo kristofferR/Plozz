@@ -297,12 +297,13 @@ public final class SyncSetupService {
         pairing: HostPairing,
         over link: PairingLink,
         existingAuthorizations: [String: LocalAuthorization] = [:],
-        presentSAS: @escaping @Sendable (String) -> Void = { _ in }
+        presentSAS: @escaping @Sendable (String) -> Void = { _ in },
+        progress: @escaping @Sendable (DeviceSetupDiagnostic.Stage) async -> Void = { _ in }
     ) async throws -> ReceivedSetup {
         let bundle = try await SyncPairingSession.hostReceiveSetup(
             identity: pairing.identity, context: pairing.invite.context,
             serviceName: pairing.invite.serviceName, over: link,
-            presentSAS: presentSAS
+            presentSAS: presentSAS, progress: progress
         )
         var application = coordinator.apply(
             snapshot: bundle.config,
@@ -330,8 +331,10 @@ public final class SyncSetupService {
         expectedPublicKey: Data?,
         configOnly: Bool = false,
         restrictToAccountIDs: Set<String>? = nil,
-        confirmSAS: @escaping @Sendable (String) async -> Bool = { _ in true }
+        confirmSAS: @escaping @Sendable (String) async -> Bool = { _ in true },
+        progress: @escaping @Sendable (DeviceSetupDiagnostic.Stage) async -> Void = { _ in }
     ) async throws {
+        await progress(.configuration)
         let cfg = try configProvider()
         // A per-server request (restrictToAccountIDs set) transfers ONLY the chosen
         // account(s) and no profiles/settings — the receiver just wants that one
@@ -364,7 +367,7 @@ public final class SyncSetupService {
         }
         let bundle = SyncTransferBundle(config: snapshot, secrets: (secrets?.isEmpty ?? true) ? nil : secrets)
         try await SyncPairingSession.guestSendSetup(
-            bundle, over: link, expectedPublicKey: expectedPublicKey, confirmSAS: confirmSAS
+            bundle, over: link, expectedPublicKey: expectedPublicKey, confirmSAS: confirmSAS, progress: progress
         )
     }
 }

@@ -2,6 +2,7 @@
 import AppRuntime
 import CoreModels
 import CoreUI
+import FeatureLiveTV
 import FeatureProfiles
 import FeatureSettings
 import Foundation
@@ -66,9 +67,12 @@ struct PlozziOSFirstRunView: View {
         }
         .scrollContentBackground(.hidden)
         .background { AppBackground(palette: palette) }
+        .guidePreparationOverlay(
+            model: appModel.guidePreparation, presenter: appModel.transientStatusPresenter,
+            palette: palette
+        )
         .environment(\.themePalette, palette)
         .environment(\.colorScheme, palette.isLight ? .light : .dark)
-        .preferredColorScheme(palette.isLight ? .light : .dark)
         .toolbarBackground(.hidden, for: .navigationBar)
         .interactiveDismissDisabled()
     }
@@ -80,18 +84,16 @@ struct PlozziOSFirstRunView: View {
             if let selection = appModel.plexHomeUsers.pendingPlexUserSelection
                 ?? lastPlexSelection {
                 PlozziOSPlexUserSelectionView(
+                    appModel: appModel,
                     selection: selection,
+                    onImportAll: appModel.importPlexHomeProfilesDuringOnboarding,
                     onSelect: appModel.selectPlexUserDuringOnboarding
                 )
             }
         case .libraries:
             if let selection = appModel.pendingLibrarySelection {
                 PlozziOSLibrarySelectionView(
-                    accounts: appModel.accountsProviders.resolvedAccounts(
-                        withIDs: selection.accountIDs
-                    ),
-                    visibility: appModel.settings.homeVisibility,
-                    onContinue: appModel.completeLibrarySelection
+                    appModel: appModel, accountIDs: selection.accountIDs, hostsGuideProgress: false
                 )
             }
         case .confirmProfile:

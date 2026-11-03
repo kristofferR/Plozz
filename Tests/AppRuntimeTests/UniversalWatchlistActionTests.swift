@@ -188,11 +188,12 @@ final class UniversalWatchlistActionTests: XCTestCase {
         coordinator.perform(.addToWatchlist, on: item, context: .none)
         await waitUntil { events.filter { $0 == "fanout" }.count == 1 }
         coordinator.perform(.removeFromWatchlist, on: item, context: .none)
+        XCTAssertEqual(feedback.last, "Removed from Watchlist")
         await waitUntil { events.filter { $0 == "fanout" }.count == 2 }
 
         XCTAssertEqual(
             feedback,
-            ["Added to Watchlist", "Removing from Watchlist…"]
+            ["Added to Watchlist", "Removed from Watchlist"]
         )
         XCTAssertEqual(
             events,
@@ -272,7 +273,7 @@ final class UniversalWatchlistActionTests: XCTestCase {
             feedback,
             [
                 "Added to Watchlist",
-                "Removing from Watchlist…",
+                "Removed from Watchlist",
                 "Couldn't update Watchlist",
             ]
         )

@@ -8,6 +8,7 @@ import FeatureAuth
 import FeatureDiscovery
 import FeatureDiscoveryCore
 import FeatureMusic
+import FeatureLiveTVCore
 import FeatureProfiles
 import FeatureSyncSetup
 import FeatureSyncCloud
@@ -47,6 +48,14 @@ import UIKit
 @Observable
 public final class AppState {
     public private(set) var state: SessionState = .launching
+    @ObservationIgnored public lazy var guidePreparation = LiveTVGuidePreparationModel { [weak self] id in
+        guard let self, !self.profileFlow.isChoosingProfile, !self.profileFlow.isForegroundLocked,
+              self.profileFlow.pendingLockedProfile == nil, self.profileFlow.pendingParentalSwitch == nil,
+              !self.profileFlow.activeProfileAwaitsUnlock,
+              self.plexHomeUsers.pendingPlexPINRequest == nil,
+              !self.accountsProviders.activeProfileAwaitsIdentity else { return nil }
+        return self.accountsProviders.liveTVProviderResolver()(id)
+    }
     private let appAdmission: AppAdmissionModel
     @ObservationIgnored private var accountSetupOriginProfileID: String?
 
@@ -77,9 +86,17 @@ public final class AppState {
     public var canEnterApp: Bool { admissionContext.canEnterApp }
     var isLiveTVProfileAuthorized: Bool { isActiveProfileAuthorized }
 
+    func lockBrowsingForForegroundIfNeeded() {
+        if !profileFlow.isForegroundLocked {
+            guard case .ready = rootPresentationState else { return }
+        }
+        profileFlow.lockForForegroundIfNeeded()
+    }
+
     var isActiveProfileAuthorized: Bool {
         guard canEnterApp, case .ready = state else { return false }
         return !profileFlow.isChoosingProfile
+            && !profileFlow.isForegroundLocked
             && profileFlow.pendingLockedProfile == nil
             && profileFlow.pendingParentalSwitch == nil
             && profileFlow.pendingIdentityAccountID == nil
@@ -100,10 +117,12 @@ public final class AppState {
     }
 
     /// Call only after a user-requested playlist/free-channel setup succeeds.
-    /// This records admission without changing the session or navigation.
+    /// Records admission and reveals Live TV without changing the current destination.
     @discardableResult
     public func recordSuccessfulIPTVSetup() -> Bool {
-        appAdmission.recordStandaloneChoice(isAvailable: Self.isStandalonePlaybackAvailable)
+        let accepted = appAdmission.recordStandaloneChoice(isAvailable: Self.isStandalonePlaybackAvailable)
+        if accepted { profileSettings.navigationStyleModel.showsLiveTV = true }
+        return accepted
     }
 
     /// Provider chosen for the add-account flow currently in progress, so that
@@ -126,7 +145,9 @@ public final class AppState {
     /// detail page each time, until the watchdog killed the app. A `let`
     /// reference is stable, so only the one leaf view that actually reads
     /// ``PendingPlayRequest/itemID`` takes the invalidation.
-    public let pendingPlay = PendingPlayRequest()
+    @ObservationIgnored public private(set) lazy var pendingPlay = PendingPlayRequest(
+        isAuthorized: { [weak self] in self?.isActiveProfileAuthorized == true }
+    )
 
     /// Drives the app to a named screen for an automated capture run. Held by
     /// reference for the same reason as ``pendingPlay``: only the leaf that
@@ -323,6 +344,9 @@ public final class AppState {
                     item: item
                 )
             },
+            watchlistProviderChange: { [unowned self] accountID in
+                self.watchlistProviderChange(for: accountID)
+            },
             resolveDurableWatchlist: { [unowned self] items in
                 self.resolvedUniversalWatchlistItems(candidates: items)
             },
@@ -476,7 +500,7 @@ public final class AppState {
                 try await boundTraktScrobbler.scrobbleResult(
                     item: intent.makeScrobbleItem(),
                     progress: intent.progress,
-                    event: .stop
+                    event: intent.playbackEvent
                 )
             },
             applySimkl: { intent in
@@ -1192,9 +1216,11 @@ public final class AppState {
         // per-profile settings sub-models + this rebuild lifecycle lives in
         // `ProfileSettingsModel`.
         let ns = (profilesModel ?? self.profilesModel).activeNamespace
+        let resolvedSeerService = seerService ?? Self.makeDefaultSeerService()
         self.profileSettings = ProfileSettingsModel(
             namespace: ns,
             allowsDiscovery: { !resolvedProfilesModel.activeProfile.isKids },
+            isSeerrConfigured: { resolvedSeerService.isConfigured },
             subtitleBehaviorModel: subtitleBehaviorModel,
             subtitleStyleModel: subtitleStyleModel,
             spoilerModel: spoilerModel,
@@ -1220,7 +1246,7 @@ public final class AppState {
         self.wetrakrService = wetrakrService ?? WetrakrServiceFactory.make(namespace: ns)
         // Seerr uses ONE shared household connection (user-independent Keychain);
         // profiles differ only by which Seerr user they request as (per request).
-        self.seerService = seerService ?? Self.makeDefaultSeerService()
+        self.seerService = resolvedSeerService
         // A Kids Profile with no mapped Seerr user would otherwise request as the
         // unrestricted admin. Live closure so it always reflects the CURRENT
         // profile — see `SeerService.refusesAdminRequests`.
@@ -1296,6 +1322,10 @@ public final class AppState {
         }
         accountsProviders.credentialRevision = { [weak self] account in
             self?.plexHomeUsers.effectiveCredentialRevision(for: account) ?? account.credentialRevision
+        }
+        accountsProviders.cloudTokenResolver = { [weak self] account, revision in
+            guard let self else { throw CancellationError() }
+            return try await self.plexHomeUsers.resolveCloudToken(for: account, expectedRevision: revision)
         }
         accountsProviders.onAccountsInvalidated = { [weak self] in
             self?.mediaItemActionHandler.invalidateAccountCaches()
@@ -1569,19 +1599,45 @@ public final class AppState {
     }
 
     /// Handles an incoming deep link. Recognised `plozz://item/<id>` links queue
-    /// the item for playback once the user is signed in.
+    /// playback or details once the user is signed in.
     public func handle(url: URL) {
+        if ExternalPlaybackRuntime.shared.receive(url) { return }
         // `plozz://shots/…` is the capture rig asking for a screen. Checked
         // first because it shares the scheme; outside DEBUG this always
         // declines, so a shipped build falls straight through to Top Shelf.
         if screenshotDirector.handle(url: url) { return }
         if let reference = TopShelf.itemReference(from: url) {
-            pendingPlay.itemID = reference.id
-            // Kept rather than discarded: the link knows which server the title
-            // came from, and throwing that away leaves the router guessing across
-            // every signed-in account for an id that is only unique within one.
-            pendingPlay.accountID = reference.accountID
+            pendingPlay.enqueue(reference)
         }
+    }
+
+    func externalPlaybackContext() -> ExternalPlaybackContext {
+        ExternalPlaybackContext(
+            profileID: profilesModel.activeProfileID,
+            authorizationID: accountsProviders.liveTVAuthorizationID,
+            accounts: accountsProviders.resolvedActiveAccounts,
+            isAuthorized: isActiveProfileAuthorized,
+            resolver: authenticatedHTTPResolver
+        )
+    }
+
+    func finishExternalPlayback(_ result: ExternalPlaybackCompletion) async throws {
+        guard isActiveProfileAuthorized else { throw CancellationError() }
+        guard var mutation = WatchMutationFactory.playbackStop(
+                item: result.item, position: result.position, watchedPercent: result.watchedPercent,
+                primaryAccountID: result.item.sourceAccountID,
+                additionalSources: identityIndex.identitySnapshotStore.current.sourceRefs(for: result.item),
+                crossServerSync: profileSettings.playbackModel.settings.syncWatchAcrossServers,
+                reportTraktProgress: true
+              )?.bindingServerScope(accountsProviders.watchMutationServerScope) else { return }
+        mutation.id = result.id
+        mutation.capturedAt = result.reportedAt
+        let identity = externalPlaybackContext().identity
+        guard try await result.enqueue(mutation, using: watchReconciler),
+              externalPlaybackContext().identity == identity else { return }
+        publishOptimisticWatchState(
+            itemID: result.item.id, mutation: mutation, watchedPercent: result.watchedPercent, item: result.item
+        )
     }
 
     /// Servers this device already has accounts on, grouped for the picker's
@@ -1639,29 +1695,30 @@ public final class AppState {
     @discardableResult
     public func didAuthenticate(_ session: UserSession, activateIPTVAccount: Bool = false) -> Bool {
         let isFirstRun = accountsProviders.accounts.isEmpty && !profilesModel.firstRunProfileSetupComplete
-        // Every provider now gets a STABLE, deterministic id derived from its
-        // (provider + server + user) identity — so re-adding the same server (e.g. to
-        // fix a password) updates the existing account in place instead of forking a
-        // duplicate, and the SAME server+user resolves to the SAME id on every device
-        // (so sync/pairing can't create cross-device duplicates). Media shares keep
-        // their existing deterministic id via the same helper.
-        let account = Account(id: Account.stableID(for: session), from: session)
-        let previousAccount = accountsProviders.accounts.first { $0.id == account.id }
+        let registration: AccountRegistration
         do {
-            try accountsProviders.accountStore.add(account, token: session.accessToken)
-            if previousAccount == nil || activateIPTVAccount {
-                try accountsProviders.includeIPTVAccountInActiveProfile(account)
+            registration = try accountsProviders.accountStore.registerAuthenticatedSession(session)
+            if registration.previousAccount == nil || activateIPTVAccount {
+                try accountsProviders.includeIPTVAccountInActiveProfile(registration.account)
+                if registration.account.server.provider == .iptv {
+                    profileSettings.navigationStyleModel.showsLiveTV = true
+                }
             }
         } catch {
+            PlozzLog.auth.error("Unable to save authenticated account")
             apply(.authenticationFailed(.unknown("")))
             return false
         }
         finalizeAddedAccount(
             session: session,
-            account: account,
-            previousAccount: previousAccount,
+            account: registration.account,
+            previousAccount: registration.previousAccount,
             isFirstRun: isFirstRun
         )
+        if registration.account.server.provider == .iptv,
+           registration.previousAccount == nil || activateIPTVAccount {
+            guidePreparation.start(accountID: registration.account.id)
+        }
         return true
     }
 
@@ -1746,19 +1803,22 @@ public final class AppState {
 
         let isFirstRun = accountsProviders.accounts.isEmpty && !profilesModel.firstRunProfileSetupComplete
         var addedIDs: [String] = []
-        for session in sessions {
-            let account = Account(id: Account.stableID(for: session), from: session)
-            let previousAccount = accountsProviders.accounts.first { $0.id == account.id }
-            do {
-                try accountsProviders.accountStore.add(account, token: session.accessToken)
-                if let previousAccount,
-                   previousAccount.credentialRevision != account.credentialRevision {
+        do {
+            for session in sessions {
+                let registration = try accountsProviders.accountStore.registerAuthenticatedSession(session)
+                if let previousAccount = registration.previousAccount,
+                   previousAccount.credentialRevision != registration.account.credentialRevision {
                     mediaShare.accountService.retireCredential(for: previousAccount)
                 }
-                addedIDs.append(account.id)
-            } catch {
-                continue // Skip a failed add; keep the rest of the batch.
+                if !addedIDs.contains(registration.account.id) {
+                    addedIDs.append(registration.account.id)
+                }
             }
+        } catch {
+            PlozzLog.auth.error("Unable to save authenticated Plex accounts")
+            accountsProviders.reloadAccounts()
+            apply(.authenticationFailed(.unknown("")))
+            return
         }
         accountsProviders.reloadAccounts()
         addedIDs.forEach(clearRemovalTombstone)   // (re)add clears removal tombstones
@@ -1802,7 +1862,9 @@ public final class AppState {
                         accountID: accountID,
                         serverName: session.server.name,
                         users: users,
-                        isFirstRun: isFirstRun
+                        isFirstRun: isFirstRun,
+                        applyToAccountIDs: self.pendingPlexUserApplyToAccountIDs.isEmpty
+                            ? [accountID] : self.pendingPlexUserApplyToAccountIDs
                     ))
                     self.apply(.plexUserSelectionRequired)
                 } else {
@@ -1827,10 +1889,13 @@ public final class AppState {
     /// Enters the "choose your libraries" step. On first run this also seeds the
     /// always-present default profile from the signed-in identity so the later
     /// confirm screen shows who's watching. `applyPlexIdentity` records whether a
-    /// freshly-picked Plex Home user still needs applying once the step completes
-    /// (deferred so the PIN prompt doesn't interrupt onboarding).
-    private func beginLibrarySelection(isFirstRun: Bool, seedName: String, seedAvatar: String?, applyPlexIdentity: Bool, skipSelectionStep: Bool = false) {
-        if isFirstRun {
+    /// freshly-picked Plex Home user should be reconciled again on completion.
+    /// The library step owns initial authentication before it can discover libraries.
+    private func beginLibrarySelection(
+        isFirstRun: Bool, seedName: String, seedAvatar: String?, applyPlexIdentity: Bool,
+        skipSelectionStep: Bool = false, seedIdentity: Bool = true
+    ) {
+        if isFirstRun && seedIdentity {
             profilesModel.seedDefaultProfileIdentity(name: seedName, avatarImageURL: seedAvatar)
         }
         pendingOnboardingContinuation = PendingOnboardingContinuation(
@@ -1843,6 +1908,7 @@ public final class AppState {
             confirmLibrarySelection()
         } else {
             apply(.librarySelectionRequired)
+            plexHomeUsers.ensurePlexIdentityForActiveProfile()
         }
     }
 
@@ -1850,6 +1916,7 @@ public final class AppState {
     /// first-ever account detours through the profile confirm step, a later add
     /// drops straight into the app (applying any freshly-picked Plex identity).
     public func confirmLibrarySelection() {
+        guard plexHomeUsers.pendingPlexPINRequest == nil else { return }
         let continuation = pendingOnboardingContinuation
         pendingOnboardingContinuation = nil
         pendingLibrarySelectionAccountIDs = []
@@ -1869,37 +1936,43 @@ public final class AppState {
     /// that user (so the confirm screen shows *who's watching*, not the account
     /// owner). Then continues to the profile confirm step (first run) or the
     /// app, applying the binding so the Plex identity switches.
-    public func selectPlexUserDuringOnboarding(_ user: PlexHomeUser?) {
+    public func selectPlexUserDuringOnboarding(_ user: PlexHomeUser?, addAllProfiles: Bool = false) {
         guard let pending = plexHomeUsers.pendingPlexUserSelection else { return }
         if let user {
-            let binding = PlexHomeUserBinding(
-                homeUserID: user.id,
-                name: user.name,
-                avatarURL: user.avatarURL?.absoluteString,
-                requiresPIN: user.requiresPIN,
-                pinRequirementVerified: user.pinRequirementVerified
-            )
-            // Apply the chosen Home user to every newly-added Plex account in the
-            // batch (they belong to the same Plex account and share Home users),
-            // falling back to just the one that triggered the pick.
-            let targets = pendingPlexUserApplyToAccountIDs.isEmpty
-                ? [pending.accountID]
-                : pendingPlexUserApplyToAccountIDs
-            var updated = profilesModel.activeProfile
-            for accountID in targets {
-                updated = updated.settingHomeUserBinding(binding, forPlexAccount: accountID)
+            guard plexHomeUsers.selectOnboardingUser(user, addAllProfiles: addAllProfiles) else { return }
+            if addAllProfiles, let profileID = plexHomeUsers.importedOnboardingProfileID(for: user) {
+                profileFlow.switchProfileForPlexOnboarding(to: profileID) { [weak self] in
+                    self?.finishPlexUserOnboarding(user, pending: pending, imported: true)
+                }
+                return
             }
-            profilesModel.update(updated)
         }
+        finishPlexUserOnboarding(user, pending: pending, imported: false)
+    }
+
+    public func importPlexHomeProfilesDuringOnboarding() -> PlexHomeProfileImportResult {
+        plexHomeUsers.importOnboardingProfiles()
+    }
+
+    private func finishPlexUserOnboarding(
+        _ user: PlexHomeUser?, pending: PlexHomeUsersModel.PendingPlexUserSelection, imported: Bool
+    ) {
         plexHomeUsers.clearUserSelection()
-        // Continue to the "choose your libraries" step. First run seeds the
-        // profile identity from the picked user; a later add applies the Plex
-        // identity once the library step completes.
+        if imported, !pending.isFirstRun, profilesModel.activeProfile.needsSetup {
+            pendingLibrarySelectionAccountIDs = []
+            pendingPlexUserApplyToAccountIDs = []
+            apply(.accountAuthenticated)
+            plexHomeUsers.ensurePlexIdentityForActiveProfile()
+            profileFlow.resumeSetupIfNeeded()
+            return
+        }
+        // The library step authenticates the selected viewer before discovery.
         beginLibrarySelection(
             isFirstRun: pending.isFirstRun,
             seedName: user?.name ?? "",
             seedAvatar: user?.avatarURL?.absoluteString,
-            applyPlexIdentity: !pending.isFirstRun
+            applyPlexIdentity: !pending.isFirstRun,
+            seedIdentity: !imported
         )
     }
 
@@ -1923,14 +1996,10 @@ public final class AppState {
         apply(.themeSelected)
     }
 
-    /// Advances first-run navigation selection to Home layout.
+    /// Completes appearance setup and reconciles the selected identity.
     public func finishNavigationSelection() {
+        profileFlow.completeAppearanceSetup(for: profilesModel.activeProfileID)
         apply(.navigationSelected)
-    }
-
-    /// Defers Plex PIN presentation until all appearance choices are complete.
-    public func finishHomeLayoutSelection() {
-        apply(.homeLayoutSelected)
         plexHomeUsers.ensurePlexIdentityForActiveProfile()
     }
 

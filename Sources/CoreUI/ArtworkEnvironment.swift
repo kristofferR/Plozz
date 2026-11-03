@@ -1,5 +1,6 @@
 #if canImport(SwiftUI)
 import CoreModels
+import MetadataKit
 import SwiftUI
 
 public struct ArtworkPresentationPolicy: Equatable, Sendable {
@@ -7,17 +8,20 @@ public struct ArtworkPresentationPolicy: Equatable, Sendable {
     public let settings: ArtworkSettings
     public let providers: MetadataProviderSettings
     public let placement: ArtworkPlacement?
+    public let logoLanguage: String
 
     public init(
         area: ArtworkArea = .browse,
         settings: ArtworkSettings = .default,
         providers: MetadataProviderSettings = .default,
-        placement: ArtworkPlacement? = nil
+        placement: ArtworkPlacement? = nil,
+        logoLanguage: String = Locale.current.identifier
     ) {
         self.area = area
         self.settings = settings
         self.providers = providers
         self.placement = placement
+        self.logoLanguage = MetadataQuery.normalizedArtworkLanguage(logoLanguage)
     }
 
     public var prefersOnlineArtwork: Bool { settings.prefersOnlineArtwork(in: area, placement: placement) }
@@ -34,15 +38,16 @@ public struct ArtworkPresentationPolicy: Equatable, Sendable {
     }
 
     public var identity: String {
-        metadataSettings.artworkPolicyIdentity
+        let language = placement == .logo ? "|logo-language:\(logoLanguage)" : ""
+        return metadataSettings.artworkPolicyIdentity + language
     }
 
     public func forArea(_ area: ArtworkArea) -> Self {
-        Self(area: area, settings: settings, providers: providers, placement: placement)
+        Self(area: area, settings: settings, providers: providers, placement: placement, logoLanguage: logoLanguage)
     }
 
     public func forPlacement(_ placement: ArtworkPlacement?) -> Self {
-        Self(area: area, settings: settings, providers: providers, placement: placement)
+        Self(area: area, settings: settings, providers: providers, placement: placement, logoLanguage: logoLanguage)
     }
 
     public var heroPolicy: Self {
@@ -84,7 +89,7 @@ public extension EnvironmentValues {
             area = explicit
         } else {
             switch plozzCardCaptionView {
-            case .home: area = .homeRows
+            case .home, .homeLibraries: area = .homeRows
             case .recommended: area = .recommended
             case .search: area = .search
             case .watchlist: area = .watchlist
@@ -93,10 +98,12 @@ public extension EnvironmentValues {
             case .browse: area = .browse
             case .collections: area = .collections
             case .playlists: area = .playlists
+            case .continueWatching: area = .continueWatching
             }
         }
         return ArtworkPresentationPolicy(
-            area: area, settings: plozzArtworkSettings, providers: plozzArtworkProviders
+            area: area, settings: plozzArtworkSettings, providers: plozzArtworkProviders,
+            logoLanguage: locale.identifier
         )
     }
 }

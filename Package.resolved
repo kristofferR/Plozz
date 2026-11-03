@@ -1,12 +1,12 @@
 {
-  "originHash" : "1187e1ddaf830631ae965c5ad2683128e3c441562e582ac46f97645c1d517e83",
+  "originHash" : "d2760b05e6cd40e764a18d32edc67a265471ca69f94b5361fb174a0cc4495f99",
   "pins" : [
     {
       "identity" : "aetherengine",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/brandomoore/AetherEngine",
       "state" : {
-        "revision" : "299a3d9ea767e2382158c2a3d137c4b1d302ab4a"
+        "revision" : "7cd91ee1a55401d59ca385e247a5c6308b7d27ea"
       }
     },
     {
@@ -14,8 +14,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/superuser404notfound/FFmpegBuild",
       "state" : {
-        "revision" : "013c48bd4d3073428f31cade039ec4ed958d0ceb",
-        "version" : "3.7.1"
+        "revision" : "6b5d084664234649c258248d16111dbac64684be",
+        "version" : "3.11.1"
       }
     },
     {
@@ -25,24 +25,6 @@
       "state" : {
         "revision" : "0d7cce1d6836a30d13a3a2326e50a153af53f014",
         "version" : "2.1.0"
-      }
-    },
-    {
-      "identity" : "libdtsx",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/superuser404notfound/LibDTSX",
-      "state" : {
-        "revision" : "9906f8fe9b72eb4d79a85754adbba6fa52cfe7b2",
-        "version" : "1.0.1"
-      }
-    },
-    {
-      "identity" : "libtruehd",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/superuser404notfound/LibTrueHD",
-      "state" : {
-        "revision" : "577de495184254e2c660ebfd6ce3f7d97f45899d",
-        "version" : "2.3.0"
       }
     },
     {
@@ -59,7 +41,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/thatcube/SMBClient.git",
       "state" : {
-        "revision" : "2c383ad5e5a7b3063160f6a0d00190c57e295cc3"
+        "revision" : "5d5bceb6fa0833c98b0eecc676609c9476bd9423"
       }
     },
     {
@@ -123,15 +105,6 @@
       "state" : {
         "revision" : "869129b7bf4ecc57b97d0193ad29690ca2134750",
         "version" : "1.8.1"
-      }
-    },
-    {
-      "identity" : "youtubekit",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/alexeichhorn/YouTubeKit.git",
-      "state" : {
-        "revision" : "e5b7d0396ce12bf3444f0d209e8436c83373b7af",
-        "version" : "0.4.9"
       }
     }
   ],

@@ -110,8 +110,10 @@ enum IPTVMapping {
         let isMovie = !explicitlyLive && (
             contentType == "movie" || contentType == "vod" || path.contains("/movie/") || (entry.duration ?? 0) > 0
         )
+        // Newly supported guide aliases must not change an existing catalogue's IDs.
+        let identityGuideID = attributes["tvg-id"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let identity = entry.hasExplicitName
-            ? digest([channel.guideID ?? "", channel.name, channel.groups.joined(separator: ";"),
+            ? digest([identityGuideID, channel.name, channel.groups.joined(separator: ";"),
                       url.lastPathComponent].joined(separator: "\u{1F}"))
             : digest(channel.id)
         if isSeries, let episode {

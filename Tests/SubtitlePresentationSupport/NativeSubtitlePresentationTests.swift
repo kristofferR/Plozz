@@ -11,6 +11,35 @@ import XCTest
 
 @MainActor
 final class NativeSubtitlePresentationTests: XCTestCase {
+    func testEmbeddedMP4CaptionsRecoverAfterOffAndPausedReselection() async throws {
+        let engine = NativeVideoEngine(startsMuted: true)
+        let model = LiveSubtitleModel()
+        model.beginLiveFeed(permitsTimingOffsets: false)
+        var cues: [SubtitleCue] = []
+        engine.onSubtitleCues = { cues = $0; model.updateLiveCues($0) }
+        let window = try await mount(engine, subtitles: model)
+        defer { engine.stop(); window.isHidden = true }
+        let track = MediaTrack(id: 2, kind: .subtitle, displayTitle: "English", language: "en", codec: "mov_text")
+        await engine.load(request: request(try fixtureURL("embedded.mp4"), tracks: [track]), startPosition: 0)
+        try await waitUntil(timeout: 30) { engine.underlyingPlayer?.currentItem?.status == .readyToPlay }
+        engine.selectSubtitleTrack(track)
+        try await waitUntil { cues.contains { $0.text == "Repeated" && $0.start == 9 } }
+        engine.pause()
+        await engine.seek(to: 6.5)
+        try await waitUntil { model.primary.map(\.text) == ["Repeated"] }
+        let item = try XCTUnwrap(engine.underlyingPlayer?.currentItem)
+        for _ in 0..<3 {
+            engine.selectSubtitleTrack(nil)
+            try await waitUntil { cues.isEmpty && model.primary.isEmpty }
+            engine.selectSubtitleTrack(track)
+            try await waitUntil { model.primary.map(\.text) == ["Repeated"] }
+            XCTAssertTrue(engine.underlyingPlayer?.currentItem === item)
+            XCTAssertTrue(engine.isPaused)
+            XCTAssertEqual(engine.currentTime, 6.5, accuracy: 1.0 / 24)
+            try assertOnlySuppressedOutput(engine)
+        }
+    }
+
     func testLocalASSAnimationFrameBudget() async throws {
         guard let path = ProcessInfo.processInfo.environment["PLOZZ_ASS_ANIMATION_REPRO"] else {
             throw XCTSkip("Requires the explicitly supplied private ASS animation fixture.")
@@ -187,6 +216,88 @@ final class NativeSubtitlePresentationTests: XCTestCase {
         XCTAssertEqual(engine.subtitlePresentationTime, 3, accuracy: 0.15)
         engine.selectSubtitleTrack(nil)
         try await waitUntil { subtitles.primary.isEmpty }
+    }
+
+    func testLocalPictureRelativePGSStaysInsideMeasuredPicture() async throws {
+        guard let path = ProcessInfo.processInfo.environment["PLOZZ_PICTURE_MEDIA_REPRO"] else {
+            throw XCTSkip("Requires an explicitly supplied local HDR video with dialogue PGS.")
+        }
+        let engine = try PlozzigenVideoEngine()
+        engine.configureLiveOutput(.init(isAudible: false, sharesAudioSession: true, suppressesDisplayMatching: true))
+        let model = LiveSubtitleModel()
+        model.style.followsSystemStyle = false
+        model.style.positionReference = .picture
+        model.beginLiveFeed()
+        engine.onSubtitleCues = { model.updateLiveCues($0) }
+        let window = try await mount(engine, subtitles: model)
+        defer { engine.stop(); window.isHidden = true; window.rootViewController = nil }
+        let url = path.hasPrefix("cache:")
+            ? try XCTUnwrap(FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first)
+                .appendingPathComponent(String(path.dropFirst("cache:".count)))
+            : URL(fileURLWithPath: path)
+        let handle = try FileHandle(forReadingFrom: url)
+        try handle.close()
+        await engine.load(request: request(url, tracks: []), startPosition: 0)
+        try await waitUntil(timeout: 30) { engine.isPlaybackPositionReady }
+        let track = try XCTUnwrap(engine.subtitleTracks.first { $0.codec?.lowercased().contains("pgs") == true })
+        engine.selectSubtitleTrack(track)
+        try await waitUntil(timeout: 30) { model.primary.contains(where: \.isImage) && model.activePictureRect != nil }
+        engine.pause()
+        engine.onSubtitleCues = nil
+        try await Task.sleep(for: .milliseconds(300))
+        let picture = try XCTUnwrap(model.activePictureRect).intersection(window.bounds)
+        let video = try XCTUnwrap(model.videoRect)
+        let images = model.primary.compactMap { cue -> SubtitleImage? in
+            guard case .image(let image) = cue.body else { return nil }
+            return image
+        }
+        let offsets = SubtitleOverlayGeometry.pictureBitmapOffsets(
+            images: images, style: model.style, video: video, reference: picture,
+            bounds: window.bounds, controls: [], sourceAspectRatio: engine.videoAspectRatio.map { CGFloat($0) }
+        )
+        XCTAssertFalse(offsets.isEmpty, "Real dialogue PGS must use picture-relative placement.")
+        for (index, offset) in offsets {
+            let frame = SubtitleOverlayGeometry.bitmapRect(
+                normalizedRect: images[index].normalizedRect, canvasSize: images[index].canvasSize,
+                videoRect: video, sourceAspectRatio: engine.videoAspectRatio.map { CGFloat($0) }
+            ).offsetBy(dx: 0, dy: offset)
+            XCTAssertGreaterThanOrEqual(frame.minY, picture.minY - 1)
+            XCTAssertLessThanOrEqual(frame.maxY, picture.maxY + 1)
+        }
+        func capture() -> UIImage {
+            UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true))
+            }
+        }
+        func text(in image: UIImage) throws -> [(String, CGRect)] {
+            let recognition = VNRecognizeTextRequest()
+            recognition.recognitionLevel = .accurate
+            recognition.recognitionLanguages = ["en-US"]
+            try VNImageRequestHandler(cgImage: XCTUnwrap(image.cgImage)).perform([recognition])
+            return (recognition.results ?? []).compactMap { observation in
+                guard let text = observation.topCandidates(1).first?.string else { return nil }
+                let box = observation.boundingBox
+                return (text, CGRect(
+                    x: box.minX * window.bounds.width, y: (1 - box.maxY) * window.bounds.height,
+                    width: box.width * window.bounds.width, height: box.height * window.bounds.height
+                ))
+            }
+        }
+        let visible = capture()
+        let rendered = try text(in: visible)
+        model.updateLiveCues([])
+        try await Task.sleep(for: .milliseconds(300))
+        let background = Set(try text(in: capture()).map(\.0))
+        let captions = rendered.filter { !background.contains($0.0) }
+        XCTAssertFalse(captions.isEmpty, "Actual painted PGS text must disappear when the subtitle overlay is cleared.")
+        for (_, frame) in captions {
+            XCTAssertGreaterThanOrEqual(frame.minY, picture.minY - 2)
+            XCTAssertLessThanOrEqual(frame.maxY, picture.maxY + 2)
+        }
+        let attachment = XCTAttachment(image: visible)
+        attachment.name = "Real HDR picture-relative PGS"
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     func testLocalEmbeddedASSKeepsAuthoredGraphicsThroughSeekAndOff() async throws {
@@ -565,7 +676,23 @@ final class NativeSubtitlePresentationTests: XCTestCase {
         let model = LiveSubtitleModel()
         model.beginLiveFeed(permitsTimingOffsets: false)
         var cues: [SubtitleCue] = []
-        engine.onSubtitleCues = { cues = $0; model.updateLiveCues($0) }
+        var reselectionUpdates: [[SubtitleCue]]?
+        let started = ContinuousClock.now
+        var phase = "initial load"
+        var cueHistory: [String] = []
+        engine.onSubtitleCues = { [weak engine] in
+            cues = $0
+            model.updateLiveCues($0)
+            reselectionUpdates?.append($0)
+            let outputs = engine?.underlyingPlayer?.currentItem?.outputs
+                .compactMap { $0 as? AVPlayerItemLegibleOutput } ?? []
+            cueHistory.append(
+                "\(started.duration(to: .now)) \(phase): time=\(engine?.subtitlePresentationTime ?? .nan), "
+                    + "outputs=\(outputs.map { "\(ObjectIdentifier($0))/suppressed=\($0.suppressesPlayerRendering)" }), "
+                    + "cues=\($0)"
+            )
+            if cueHistory.count > 32 { cueHistory.removeFirst() }
+        }
         let window = try await mount(engine, subtitles: model, liveClock: true)
         defer { engine.stop(); window.isHidden = true }
         let full = MediaTrack(id: 2, kind: .subtitle, displayTitle: "Full", language: "en", codec: "webvtt")
@@ -593,6 +720,7 @@ final class NativeSubtitlePresentationTests: XCTestCase {
         let loadedGroup = try await item.asset.loadMediaSelectionGroup(for: .legible)
         let group = try XCTUnwrap(loadedGroup)
 
+        phase = "engine selects Alternate"
         await engine.seek(to: 2.5)
         engine.selectSubtitleTrack(alternate)
         try await waitUntil(
@@ -606,6 +734,8 @@ final class NativeSubtitlePresentationTests: XCTestCase {
         XCTAssertFalse(cues.contains { $0.text == "Alpha" || $0.text == "Bravo" })
         XCTAssertEqual(engine.subtitlePresentationTime, 2.5, accuracy: 1.0 / 24)
         XCTAssertTrue(engine.underlyingPlayer?.currentItem === item)
+        let alternateOption = try XCTUnwrap(item.currentMediaSelection.selectedMediaOption(in: group))
+        phase = "engine selects Full"
         engine.selectSubtitleTrack(full)
         try await waitUntil(
             detail: "After reselecting Full: visible=\(model.primary.compactMap(\.text)), "
@@ -615,19 +745,57 @@ final class NativeSubtitlePresentationTests: XCTestCase {
         ) {
             return model.primary.compactMap(\.text) == ["Alpha", "Bravo"]
         }
-        let previousOutput = try XCTUnwrap(item.outputs.compactMap { $0 as? AVPlayerItemLegibleOutput }.first)
-        engine.selectSubtitleTrack(full)
-        try await waitUntil(detail: "Reselecting the same paused rendition must repopulate the replacement output") {
-            item.outputs.compactMap { $0 as? AVPlayerItemLegibleOutput }.first !== previousOutput
-                && model.primary.compactMap(\.text) == ["Alpha", "Bravo"]
+        reselectionUpdates = []
+        for _ in 0..<3 {
+            let previousOutput = try XCTUnwrap(item.outputs.compactMap { $0 as? AVPlayerItemLegibleOutput }.first)
+            engine.selectSubtitleTrack(full)
+            let selection = try XCTUnwrap(engine.defaultSubtitleSelectionTask)
+            await selection.value
+            XCTAssertTrue(item.outputs.compactMap { $0 as? AVPlayerItemLegibleOutput }.first === previousOutput,
+                          "An unchanged rendition must retain its working extraction output.")
+            XCTAssertEqual(model.primary.compactMap(\.text), ["Alpha", "Bravo"])
+            XCTAssertTrue(reselectionUpdates?.isEmpty == true,
+                          "Reselecting the current track must not clear or republish its paused captions.")
         }
+        reselectionUpdates = nil
+        for adoptionDelay in [0, 10, 100, 500] {
+            phase = "prepare Full before \(adoptionDelay)ms adoption"
+            engine.selectSubtitleTrack(full)
+            try await waitUntil { model.primary.compactMap(\.text) == ["Alpha", "Bravo"] }
+            let fullOutput = try XCTUnwrap(item.outputs.compactMap { $0 as? AVPlayerItemLegibleOutput }.first)
+            phase = "external Alternate \(adoptionDelay)ms"
+            item.select(alternateOption, in: group)
+            try await waitUntil { item.currentMediaSelection.selectedMediaOption(in: group) == alternateOption }
+            if adoptionDelay > 0 {
+                try await Task.sleep(for: .milliseconds(adoptionDelay))
+            }
+            phase = "adopt Alternate \(adoptionDelay)ms"
+            engine.selectSubtitleTrack(alternate)
+            let selection = try XCTUnwrap(engine.defaultSubtitleSelectionTask)
+            await selection.value
+            XCTAssertFalse(item.outputs.compactMap { $0 as? AVPlayerItemLegibleOutput }.first === fullOutput,
+                           "A selection changed outside the engine must still fence the old rendition's output.")
+            try await waitUntil(
+                detail: "After adopting external Alternate (\(adoptionDelay)ms): visible=\(model.primary.compactMap(\.text)), "
+                    + "decoded=\(cues), time=\(engine.subtitlePresentationTime), "
+                    + "selected=\(String(describing: item.currentMediaSelection.selectedMediaOption(in: group))), "
+                    + "history=\(cueHistory.joined(separator: "\n"))"
+            ) { model.primary.compactMap(\.text) == ["Alternate"] }
+            XCTAssertTrue(engine.isPaused)
+            XCTAssertEqual(engine.subtitlePresentationTime, 2.5, accuracy: 1.0 / 24)
+        }
+        phase = "explicit Off"
         engine.selectSubtitleTrack(nil)
         try await waitUntil {
             item.currentMediaSelection.selectedMediaOption(in: group) == nil && cues.isEmpty
         }
+        phase = "rapid Alternate then Full"
         engine.selectSubtitleTrack(alternate)
         engine.selectSubtitleTrack(full)
-        try await waitUntil(detail: "The latest rapid track selection must win after explicit Off") {
+        try await waitUntil(
+            detail: "The latest rapid track selection must win after explicit Off. "
+                + "history=\(cueHistory.joined(separator: "\n"))"
+        ) {
             model.primary.compactMap(\.text) == ["Alpha", "Bravo"]
         }
         XCTAssertTrue(engine.isPaused)
@@ -757,6 +925,97 @@ final class NativeSubtitlePresentationTests: XCTestCase {
                 && item.currentMediaSelection.selectedMediaOption(in: group) == nil && cues.isEmpty
         }
     }
+
+    #if DEBUG
+    func testSidecarLinesRenderDuringUninterruptedPlaybackWithoutControls() async throws {
+        for liveClock in [false, true] {
+            let engine = NativeVideoEngine(startsMuted: true)
+            let model = LiveSubtitleModel()
+            model.style.followsSystemStyle = false
+            model.loadPrimary(SubtitleCueParser.parse("""
+            1
+            00:00:01,000 --> 00:00:02,000
+            First line
+
+            2
+            00:00:02,000 --> 00:00:03,000
+            A longer second line
+            with another row
+
+            3
+            00:00:03,500 --> 00:00:04,500
+            Last line
+            """))
+            let controls = PlayerControlsModel()
+            controls.controlsVisible = false
+            let window = try await mount(engine, subtitles: model, liveClock: liveClock, controls: controls)
+            defer { engine.stop(); window.isHidden = true; window.rootViewController = nil }
+            await engine.load(request: request(try fixtureURL("embedded.mp4"), tracks: []), startPosition: 0)
+            try await waitUntil { engine.underlyingPlayer?.currentItem?.status == .readyToPlay }
+            engine.selectSubtitleTrack(nil)
+            engine.play()
+            for text in ["First line", "A longer second line\nwith another row", "Last line"] {
+                try await waitUntil(timeout: 8, detail: "Expected \(text), liveClock=\(liveClock)") {
+                    model.primary.first?.text == text && self.paintedCaptionTexts(in: window) == [text]
+                }
+                XCTAssertFalse(engine.isPaused)
+                XCTAssertFalse(controls.controlsVisible)
+                XCTAssertTrue(controls.subtitleLayout.frames.isEmpty)
+            }
+            try await waitUntil {
+                engine.currentTime >= 4.5 && model.primary.isEmpty && self.paintedCaptionTexts(in: window).isEmpty
+            }
+        }
+    }
+
+    func testRevisedLiveCueBecomesVisibleWithoutPauseOrControlChanges() async throws {
+        let engine = NativeVideoEngine(startsMuted: true)
+        let model = LiveSubtitleModel()
+        model.style.followsSystemStyle = false
+        model.beginLiveFeed()
+        model.updateLiveCues([.init(id: 1, start: 0, end: 60, body: .text(.init("")))])
+        let controls = PlayerControlsModel()
+        controls.controlsVisible = false
+        let window = try await mount(engine, subtitles: model, controls: controls)
+        defer { engine.stop(); window.isHidden = true; window.rootViewController = nil }
+        await engine.load(request: request(try fixtureURL("embedded.mp4"), tracks: []), startPosition: 0)
+        try await waitUntil { engine.underlyingPlayer?.currentItem?.status == .readyToPlay }
+        engine.selectSubtitleTrack(nil)
+        engine.play()
+        try await waitUntil(detail: "time=\(engine.currentTime), paused=\(engine.isPaused), status=\(engine.status)") {
+            engine.currentTime >= 1 && !engine.isPaused
+        }
+        XCTAssertTrue(paintedCaptionTexts(in: window).isEmpty)
+        model.updateLiveCues([.init(id: 1, start: 0, end: 60, body: .text(.init("Now visible")))])
+        try await waitUntil {
+            model.primary.first?.text == "Now visible" && self.paintedCaptionTexts(in: window) == ["Now visible"]
+        }
+        XCTAssertFalse(engine.isPaused)
+        XCTAssertFalse(controls.controlsVisible)
+        XCTAssertTrue(controls.subtitleLayout.frames.isEmpty)
+        let line = try XCTUnwrap(paintedCaptionLines(in: window).first)
+        let builds = line.layoutBuildCountForTesting
+        let draws = line.drawCountForTesting
+        let time = engine.currentTime
+        try await waitUntil { engine.currentTime >= time + 0.5 }
+        XCTAssertEqual(line.layoutBuildCountForTesting, builds, "Clock ticks must not reshape an unchanged cue")
+        XCTAssertEqual(line.drawCountForTesting, draws, "Clock ticks must not redraw an unchanged cue")
+    }
+
+    private func paintedCaptionTexts(in view: UIView) -> [String] {
+        paintedCaptionLines(in: view).compactMap(\.drawnTextForTesting)
+    }
+
+    private func paintedCaptionLines(in view: UIView) -> [SubtitleLineView] {
+        guard !view.isHidden, view.alpha > 0 else { return [] }
+        if let line = view as? SubtitleLineView {
+            guard line.bounds.width > 0, line.bounds.height > 0,
+                  line.layer.contents != nil, line.drawnTextForTesting != nil else { return [] }
+            return [line]
+        }
+        return view.subviews.flatMap { paintedCaptionLines(in: $0) }
+    }
+    #endif
 
     private func assertOnlySuppressedOutput(_ engine: NativeVideoEngine) throws {
         let item = try XCTUnwrap(engine.underlyingPlayer?.currentItem)
@@ -927,6 +1186,10 @@ private final class SidecarTrackHost: SubtitleTrackControllerHost, SubtitleOverl
     func trackRememberedSubtitle(for item: MediaItem) -> RememberedSubtitleSelection? { .off }
     func trackEffectiveSubtitleRule(for item: MediaItem) -> SubtitlePolicy.Rule { .init() }
     func trackRecordAudioSelection(language: String?) {}
+    func trackSelectAudioTrack(_ track: MediaTrack) -> Bool {
+        engine.selectAudioTrack(track)
+        return true
+    }
     func trackRecordSubtitleSelection(_ selection: RememberedSubtitleSelection?) {}
     func trackRefreshSubtitleDelayAvailability() {}
     func trackPlayResolvedForImageSubtitleSwap(_ request: PlaybackRequest, startPosition: TimeInterval) async {
@@ -948,7 +1211,7 @@ private final class SidecarTrackHost: SubtitleTrackControllerHost, SubtitleOverl
     #endif
 }
 
-private final class SubtitleFixtureServer: @unchecked Sendable {
+final class SubtitleFixtureServer: @unchecked Sendable {
     private let listener: NWListener
     private let files: [String: Data]
     private let queue = DispatchQueue(label: "SubtitleFixtureServer")
@@ -961,8 +1224,10 @@ private final class SubtitleFixtureServer: @unchecked Sendable {
     init(directory: URL) throws {
         bytesPerSecond = nil
         files = try Dictionary(uniqueKeysWithValues: FileManager.default.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: nil
-        ).map { ($0.lastPathComponent, try Data(contentsOf: $0)) })
+            at: directory, includingPropertiesForKeys: [.isRegularFileKey]
+        ).filter {
+            try $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true
+        }.map { ($0.lastPathComponent, try Data(contentsOf: $0)) })
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
         listener = try NWListener(using: parameters)

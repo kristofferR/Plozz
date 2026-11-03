@@ -50,9 +50,9 @@ def checkout_environment() -> dict[str, str]:
     return env
 
 
-def command(repo: Path, *args: str) -> bytes:
+def command(repo: Path, *args: str, timeout: int = 30) -> bytes:
     return subprocess.check_output(args, cwd=repo, env=checkout_environment(),
-                                   stderr=subprocess.PIPE, timeout=30)
+                                   stderr=subprocess.PIPE, timeout=timeout)
 
 
 def phase_paths(repo: Path, scope: str) -> tuple[set[str], set[str]]:
@@ -227,7 +227,7 @@ def package_workspace_fingerprint(repo: Path, workspace: Path) -> str:
     for path in sorted(checkouts.iterdir() if checkouts.exists() else []):
         if not path.is_dir():
             raise FreshnessError("Unexpected package checkout entry")
-        status = command(path, "git", "status", "--porcelain", "--untracked-files=all")
+        status = command(path, "git", "status", "--porcelain", "--untracked-files=all", timeout=120)
         if status:
             raise FreshnessError(f"Modified localization package checkout: {path.name}")
         facts.append((path.name, command(path, "git", "rev-parse", "HEAD").decode().strip()))

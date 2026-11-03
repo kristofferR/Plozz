@@ -61,6 +61,7 @@ public final class HomeLibraryVisibilityStore: HomeLibraryVisibilityStoring, @un
 @MainActor
 @Observable
 public final class HomeLibraryVisibilityModel {
+    public let sectionDiagnostics = HomeSectionDiagnosticsModel()
     public private(set) var visibility: HomeLibraryVisibility
     public private(set) var serverMatchFailures: [String: AppError] = [:]
     public private(set) var rowDefaultsRevision = UUID()
@@ -250,6 +251,29 @@ public final class HomeLibraryVisibilityModel {
         store.save(visibility)
     }
 
+    public func saveCollectionSection(_ section: CollectionSection, catalog: HomeSectionCatalog) throws {
+        guard !section.id.isEmpty, !section.source.collectionID.isEmpty,
+              !section.source.accountID.isEmpty, section.source.serverUserID?.isEmpty == false,
+              !section.title.isEmpty else { throw AppError.invalidResponse }
+        var updated = visibility
+        if let index = updated.collectionSections.firstIndex(where: { $0.id == section.id }) {
+            updated.collectionSections[index] = section
+        } else {
+            updated.collectionSections.append(section)
+        }
+        let choices = catalog.availableChoices(in: updated)
+        guard choices.contains(where: { $0.id == section.rowID }) else { throw AppError.notFound }
+        var sections = catalog.sections(in: updated)
+        sections.disabled.removeAll { $0 == section.rowID }
+        if !sections.enabled.contains(section.rowID) {
+            let index = sections.enabled.firstIndex(of: .libraries) ?? sections.enabled.endIndex
+            sections.enabled.insert(section.rowID, at: index)
+        }
+        updated.applyRows(sections, choices: choices)
+        visibility = updated
+        store.save(visibility)
+    }
+
     public func useRowDefaults(_ defaults: HomeRowCustomization.Defaults) {
         serverRequest?.cancel()
         serverRequest = nil
@@ -294,6 +318,40 @@ public final class HomeLibraryVisibilityModel {
         visibility.continueWatchingShowsSeriesArtwork
     }
 
+    public var continueWatchingUsesSeriesArtwork: Bool {
+        visibility.continueWatchingUsesSeriesArtwork
+    }
+
+    public var continueWatchingLayout: ContinueWatchingCardLayout {
+        visibility.continueWatchingLayout
+    }
+
+    public var continueWatchingPlaybackDetails: ContinueWatchingPlaybackDetails {
+        visibility.continueWatchingPlaybackDetails
+    }
+
+    public var continueWatchingAction: ContinueWatchingAction {
+        visibility.continueWatchingAction
+    }
+
+    public func setContinueWatchingAction(_ action: ContinueWatchingAction) {
+        guard visibility.continueWatchingAction != action else { return }
+        visibility.continueWatchingAction = action
+        store.save(visibility)
+    }
+
+    public func setContinueWatchingPlaybackDetails(_ details: ContinueWatchingPlaybackDetails) {
+        guard visibility.continueWatchingPlaybackDetails != details else { return }
+        visibility.continueWatchingPlaybackDetails = details
+        store.save(visibility)
+    }
+
+    public func setContinueWatchingLayout(_ layout: ContinueWatchingCardLayout) {
+        guard visibility.continueWatchingLayout != layout else { return }
+        visibility.continueWatchingLayout = layout
+        store.save(visibility)
+    }
+
     /// Sets the Continue Watching artwork treatment and persists.
     public func setContinueWatchingShowsSeriesArtwork(_ showsSeriesArtwork: Bool) {
         guard visibility.continueWatchingShowsSeriesArtwork != showsSeriesArtwork else { return }
@@ -304,6 +362,12 @@ public final class HomeLibraryVisibilityModel {
     public func setMergeNextUpIntoContinueWatching(_ merge: Bool) {
         guard visibility.mergeNextUpIntoContinueWatching != merge else { return }
         visibility.mergeNextUpIntoContinueWatching = merge
+        store.save(visibility)
+    }
+
+    public func setHideWatchedRecentlyAdded(_ hide: Bool) {
+        guard visibility.hideWatchedRecentlyAdded != hide else { return }
+        visibility.hideWatchedRecentlyAdded = hide
         store.save(visibility)
     }
 
@@ -342,6 +406,14 @@ public final class HomeLibraryVisibilityModel {
     /// separate Home-only opt-out was retired).
     public func isVisibleOnHome(_ key: String) -> Bool {
         visibility.isVisibleOnHome(key)
+    }
+
+    public func isVisibleOnHome(_ key: String, library: MediaLibrary) -> Bool {
+        visibility.isVisibleOnHome(key, library: library)
+    }
+
+    public func isVisibleOnHome(_ library: AggregatedLibrary) -> Bool {
+        visibility.isVisibleOnHome(library)
     }
 
     /// Compatibility alias for ``isVisibleOnHome(_:)``.

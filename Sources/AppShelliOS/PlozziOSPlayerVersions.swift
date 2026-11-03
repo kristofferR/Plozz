@@ -1,5 +1,6 @@
 #if os(iOS)
 import CoreModels
+import CoreUI
 import FeatureHomeCore
 import SwiftUI
 
@@ -8,59 +9,22 @@ struct PlozziOSPlayerVersionSheet: View {
     let mediaSourceID: String?
     var onlySDR = false
     let onSelect: (String) -> Void
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.locale) private var locale
 
     var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    ForEach(onlySDR
-                        ? PlayerVersionSelection.sdrAlternatives(for: item, mediaSourceID: mediaSourceID)
-                        : PlayerVersionSelection.versions(for: item)) { version in
-                        let selected = PlayerVersionSelection.isSelected(version, item: item, mediaSourceID: mediaSourceID)
-                        let presentation = MediaVersion.PickerPresentation(version, locale: locale)
-                        Button {
-                            dismiss()
-                            if !selected { onSelect(version.id) }
-                        } label: {
-                            HStack(alignment: .top, spacing: 12) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    if let label = presentation.title {
-                                        Text(verbatim: label)
-                                    } else {
-                                        Text("Original")
-                                    }
-                                    if !presentation.supplementalFacts.isEmpty {
-                                        Text(verbatim: presentation.supplementalFacts.joined(separator: " · "))
-                                            .font(.caption)
-                                            .foregroundStyle(Color.secondary)
-                                            .fixedSize(horizontal: false, vertical: true)
-                                    }
-                                    if let name = presentation.releaseName {
-                                        Text(verbatim: name)
-                                            .font(.caption2)
-                                            .foregroundStyle(Color.secondary)
-                                            .lineLimit(2)
-                                            .truncationMode(.middle)
-                                    }
-                                }
-                                .multilineTextAlignment(.leading)
-                                Spacer(minLength: 0)
-                                if selected { Image(systemName: "checkmark") }
-                            }
-                            .foregroundStyle(.primary)
-                        }
-                        .accessibilityAddTraits(selected ? .isSelected : [])
-                    }
-                } footer: {
-                    Text("Resumes at the current position. Different cuts may have different timing.")
-                }
-            }
-            .navigationTitle(onlySDR ? "SDR versions" : "Version")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+        let versions = onlySDR
+            ? PlayerVersionSelection.sdrAlternatives(for: item, mediaSourceID: mediaSourceID)
+            : PlayerVersionSelection.versions(for: item)
+        let selectedID = versions.first {
+            PlayerVersionSelection.isSelected($0, item: item, mediaSourceID: mediaSourceID)
+        }?.id
+        MediaVersionPicker(
+            versions: versions,
+            selectedVersionID: selectedID,
+            title: onlySDR ? "SDR versions" : "Version",
+            footer: "Resumes at the current position. Different cuts may have different timing."
+        ) { id in
+            if id != selectedID {
+                onSelect(id)
             }
         }
         .presentationDetents([.medium, .large])

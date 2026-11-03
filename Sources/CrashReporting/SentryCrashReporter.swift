@@ -16,8 +16,11 @@ import Sentry
 ///   • Bounded IPTV transport and live-engine failure categories and numeric codes.
 ///   • A bounded in-memory operation timeline attached to existing events, including active operations.
 ///   • Numerical memory-pressure evidence when supplied by the SDK.
-/// What is NOT sent: user identity, IP, server URLs/hostnames, media titles,
+///   • Original foreground/active booleans when supplied by the SDK.
+/// What automatic reports omit: user identity, IP fields, server URLs/hostnames, media titles,
 /// profile names, automatic network/UI breadcrumbs, or performance traces.
+/// Manual submissions use separate typed attachment exports; their optional
+/// message is explicitly user-provided and is not claimed to be anonymous.
 @MainActor
 public final class SentryCrashReporter: CrashReporter {
     private let dsn: String
@@ -98,8 +101,13 @@ public final class SentryCrashReporter: CrashReporter {
 
         isActive = true
         PerformanceDiagnostics.shared.start()
+        SearchDiagnosticJournal.shared.start()
         SiloSetupDiagnostics.shared.start { diagnostic in
             guard SentrySDK.isEnabled, let event = Self.siloSetupEvent(diagnostic) else { return }
+            SentrySDK.capture(event: event)
+        }
+        DeviceSetupDiagnostics.shared.start { diagnostic in
+            guard SentrySDK.isEnabled, let event = Self.deviceSetupEvent(diagnostic) else { return }
             SentrySDK.capture(event: event)
         }
         configureSetupDiagnostics(context)
@@ -125,7 +133,9 @@ public final class SentryCrashReporter: CrashReporter {
     public func stop() {
         guard isActive else { return }
         PerformanceDiagnostics.shared.stop()
+        SearchDiagnosticJournal.shared.stop()
         SiloSetupDiagnostics.shared.stop()
+        DeviceSetupDiagnostics.shared.stop()
         for observer in diagnosticObservers { NotificationCenter.default.removeObserver(observer) }
         diagnosticObservers.removeAll()
         playlistDiagnosticGate.reset()
@@ -144,7 +154,10 @@ public final class SentryCrashReporter: CrashReporter {
         _ event: Event, diagnostics: PerformanceDiagnostics = .shared
     ) -> Event? {
         event.context?[CrashPerformanceContext.key] = nil
-        let snapshot = diagnostics.snapshot()
+        // Fatal reports are recovered on relaunch. The SDK can fall back to a new
+        // timestamp when the original crash time or watchdog breadcrumbs are absent.
+        let snapshot = event.level == .fatal ? nil
+            : event.timestamp.flatMap { diagnostics.snapshot(forEventAt: $0) }
         if let snapshot,
            let bytes = try? JSONEncoder().encode(snapshot),
            let data = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any] {
@@ -295,6 +308,21 @@ public final class SentryCrashReporter: CrashReporter {
             data["delivery"] = facts
         }
         return data
+    }
+
+    nonisolated static func deviceSetupData(_ diagnostic: DeviceSetupDiagnostic) -> [String: Any] {
+        [
+            "role": diagnostic.role.rawValue, "route": diagnostic.route.rawValue,
+            "stage": diagnostic.stage.rawValue, "outcome": diagnostic.outcome.rawValue,
+            "reason": diagnostic.reason.rawValue, "elapsedMilliseconds": diagnostic.elapsedMilliseconds
+        ]
+    }
+
+    nonisolated static func deviceSetupEvent(_ diagnostic: DeviceSetupDiagnostic) -> Event? {
+        let event = Event(level: .warning)
+        event.tags = ["report.kind": "device-setup"]
+        event.context = ["device_setup": deviceSetupData(diagnostic)]
+        return CrashRedaction.scrub(event)
     }
 
     nonisolated static func siloSetupData(_ diagnostic: SiloSetupDiagnostic) -> [String: Any] {

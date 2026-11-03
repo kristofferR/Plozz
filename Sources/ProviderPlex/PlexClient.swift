@@ -141,6 +141,8 @@ public struct PlexClient: Sendable {
     private var resolver: PlexConnectionResolver { routing.resolver.withLock { $0 } }
     private let deviceProfile: PlexDeviceProfile
     private let token: String
+    private let serverID: String?
+    private let cloudTokenResolver: (@Sendable () async throws -> String?)?
     /// Token for **plex.tv Discover** calls (watchlist, Discover metadata,
     /// people) as opposed to per-server ones.
     ///
@@ -171,14 +173,8 @@ public struct PlexClient: Sendable {
     /// sets. Defaults to a live `.detected()` probe (which falls back to the
     /// conservative `.default` on Linux/CI).
     private let capabilities: MediaCapabilities
-    /// Whether the dual-engine (VLCKit) build is active. When `true`,
-    /// `canDirectPlay` additionally accepts the **extra** formats the on-device
-    /// hybrid engine handles — the Matroska / WebM container (every display-
-    /// supported range, including Dolby Vision, decoded on-device) and DTS / DTS-HD /
-    /// TrueHD audio (decoded on-device, no passthrough required). Defaults to
-    /// `false`, preserving today's native-only direct-play decisions. Must stay in
-    /// lockstep with `EngineRouter`: every extra format accepted here is one the
-    /// router sends to the hybrid engine.
+    /// Aether availability enables the shared linked-input format profile.
+    /// Native-only clients retain their separate capability checks.
     private let hybridEngineEnabled: Bool
 
     /// The server base URL currently in use (best-known reachable connection).
@@ -218,6 +214,8 @@ public struct PlexClient: Sendable {
         baseURL: URL,
         deviceProfile: PlexDeviceProfile,
         token: String,
+        serverID: String? = nil,
+        cloudTokenResolver: (@Sendable () async throws -> String?)? = nil,
         discoverToken: String? = nil,
         http: HTTPClient = URLSessionHTTPClient(),
         interactiveHTTP: HTTPClient? = nil,
@@ -228,6 +226,8 @@ public struct PlexClient: Sendable {
             resolver: PlexConnectionResolver(candidates: [baseURL], deviceProfile: deviceProfile, token: token),
             deviceProfile: deviceProfile,
             token: token,
+            serverID: serverID,
+            cloudTokenResolver: cloudTokenResolver,
             discoverToken: discoverToken,
             http: http,
             interactiveHTTP: interactiveHTTP,
@@ -253,6 +253,8 @@ public struct PlexClient: Sendable {
         resolver: PlexConnectionResolver,
         deviceProfile: PlexDeviceProfile,
         token: String,
+        serverID: String? = nil,
+        cloudTokenResolver: (@Sendable () async throws -> String?)? = nil,
         discoverToken: String? = nil,
         http: HTTPClient = URLSessionHTTPClient(),
         interactiveHTTP: HTTPClient? = nil,
@@ -262,6 +264,8 @@ public struct PlexClient: Sendable {
         self.routing = Routing(resolver)
         self.deviceProfile = deviceProfile
         self.token = token
+        self.serverID = serverID
+        self.cloudTokenResolver = cloudTokenResolver
         self.discoverToken = discoverToken
         self.http = http
         // Falls back to `http` when no dedicated foreground client is supplied, so
@@ -338,7 +342,8 @@ public struct PlexClient: Sendable {
     /// a lost tune response may already have allocated a tuner on the server.
     func liveTVSessionRequest(
         path: String, method: HTTPMethod = .get,
-        query: [URLQueryItem] = [], playbackID: String
+        query: [URLQueryItem] = [], playbackID: String,
+        diagnostic: PlaybackFailureAttempt? = nil
     ) async throws -> Data {
         guard UUID(uuidString: playbackID) != nil,
               query.allSatisfy({
@@ -354,13 +359,36 @@ public struct PlexClient: Sendable {
         var liveHeaders = headers
         liveHeaders["Cache-Control"] = "no-store"
         liveHeaders["X-Plex-Session-Identifier"] = playbackID
-        let (data, response) = try await http.sendRaw(
-            Endpoint(
-                method: method, path: path, queryItems: query, headers: liveHeaders,
-                redirectPolicy: .sameOrigin
-            ),
-            baseURL: await resolvedBaseURL()
-        )
+        let data: Data
+        let response: HTTPURLResponse
+        do {
+            (data, response) = try await http.sendRaw(
+                Endpoint(
+                    method: method, path: path, queryItems: query, headers: liveHeaders,
+                    redirectPolicy: .sameOrigin
+                ),
+                baseURL: await resolvedBaseURL()
+            )
+        } catch {
+            let nsError = error as NSError
+            if !(error is CancellationError), error as? AppError != .cancelled,
+               !(nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled) {
+                diagnostic?.fail(stage: .load, reason: .network,
+                                 domain: .init(nsError.domain), code: nsError.code)
+            }
+            throw error
+        }
+        if !(200..<300).contains(response.statusCode) {
+            let reason: IPTVSetupDiagnostic.Failure.Reason = switch response.statusCode {
+            case 401: .authentication
+            case 402, 403: .accessDenied
+            case 404: .notFound
+            case 429: .rateLimited
+            default: .other
+            }
+            diagnostic?.fail(stage: .response, reason: reason, httpStatus: response.statusCode,
+                             format: .init(mimeType: response.mimeType))
+        }
         switch response.statusCode {
         case 200..<300: return data
         case 401: throw AppError.unauthorized
@@ -379,10 +407,11 @@ public struct PlexClient: Sendable {
 
     /// Sends and decodes JSON, with the same self-healing retry as `send`.
     private func decode<T: Decodable>(_ type: T.Type, _ endpoint: Endpoint, using client: HTTPClient? = nil) async throws -> T {
-        let (data, _) = try await send(endpoint, using: client)
+        let (data, response) = try await send(endpoint, using: client)
         do {
             return try JSONDecoder.plozz.decode(T.self, from: data)
         } catch {
+            HTTPResponseDiagnostics.recordDecodeFailure(error, data: data, response: response)
             PlozzLog.networking.error("Decoding \(String(describing: T.self)) failed")
             throw AppError.decoding
         }
@@ -403,17 +432,19 @@ public struct PlexClient: Sendable {
     private func decodeStreamEnriched<T: Decodable>(
         _ type: T.Type,
         path: String,
-        query: [URLQueryItem]
+        query: [URLQueryItem],
+        preservingContainers: Bool = false
     ) async throws -> T {
+        let streamParameter = preservingContainers ? "includeOptionalElements" : "includeElements"
         let enriched = Endpoint(
             path: path,
-            queryItems: query + [URLQueryItem(name: "includeElements", value: "Stream")],
+            queryItems: query + [URLQueryItem(name: streamParameter, value: "Stream")],
             headers: headers
         )
         do {
             return try await decode(T.self, enriched)
         } catch AppError.invalidResponse {
-            PlozzLog.networking.error("Plex rejected includeElements=Stream on \(path); retrying lean")
+            PlozzLog.networking.error("Plex rejected \(streamParameter)=Stream on \(path); retrying lean")
             let lean = Endpoint(path: path, queryItems: query, headers: headers)
             return try await decode(T.self, lean)
         }
@@ -424,24 +455,40 @@ public struct PlexClient: Sendable {
     /// `GET /library/sections` — top-level libraries.
     func sections() async throws -> [PlexDirectory] {
         let endpoint = Endpoint(path: "/library/sections", headers: headers)
-        return try await decode(PlexMediaContainerResponse.self, endpoint)
-            .MediaContainer.Directory ?? []
+        do {
+            return try await decode(PlexMediaContainerResponse.self, endpoint)
+                .MediaContainer.Directory ?? []
+        } catch AppError.unauthorized {
+            guard let serverID else { throw AppError.unauthorized }
+            let auth = PlexAuthClient(deviceProfile: deviceProfile, http: http)
+            let cloudToken = try await cloudTokenResolver?() ?? plexTVToken
+            try Task.checkCancellation()
+            let grant = try await auth.serverAccessToken(forServerID: serverID, authToken: cloudToken)
+            try Task.checkCancellation()
+            let currentCloudToken = try await cloudTokenResolver?() ?? plexTVToken
+            guard currentCloudToken == cloudToken else { throw CancellationError() }
+            guard grant == nil else { throw AppError.unauthorized }
+            PlozzLog.auth.info("Plex cloud confirmed no server libraries are shared with the signed-in user")
+            return []
+        }
     }
 
     /// `GET /library/onDeck` — Continue Watching.
     func onDeck(limit: Int) async throws -> [PlexMetadata] {
-        if limit == Int.max {
-            return try await exhaustiveResumeFeed(
+        try await HTTPResponseDiagnostics.$route.withValue(.onDeck) {
+            if limit == Int.max {
+                return try await exhaustiveResumeFeed(
+                    path: "/library/onDeck",
+                    acceptsNestedHubs: false,
+                    streamEnriched: true
+                )
+            }
+            return try await decodeStreamEnriched(
+                PlexMediaContainerResponse.self,
                 path: "/library/onDeck",
-                acceptsNestedHubs: false,
-                streamEnriched: true
-            )
+                query: containerQuery(start: 0, size: limit)
+            ).MediaContainer.Metadata ?? []
         }
-        return try await decodeStreamEnriched(
-            PlexMediaContainerResponse.self,
-            path: "/library/onDeck",
-            query: containerQuery(start: 0, size: limit)
-        ).MediaContainer.Metadata ?? []
     }
 
     /// Fetches exact metadata records in bounded batches chosen by the caller.
@@ -514,18 +561,23 @@ public struct PlexClient: Sendable {
     }
 
     /// `GET /library/metadata/{ratingKey}` — full detail for one item.
-    func metadata(ratingKey: String) async throws -> PlexMetadata {
+    func metadata(ratingKey: String, includeChapters: Bool = false) async throws -> PlexMetadata {
         let endpoint = Endpoint(
             path: "/library/metadata/\(ratingKey)",
             queryItems: [
                 URLQueryItem(name: "includeGuids", value: "1"),
                 URLQueryItem(name: "includePreferences", value: "1")
-            ],
+            ] + (includeChapters ? [URLQueryItem(name: "includeChapters", value: "1")] : []),
             headers: headers
         )
-        let container = try await decode(PlexMediaContainerResponse.self, endpoint, using: interactiveHTTP).MediaContainer
-        guard let item = container.Metadata?.first else { throw AppError.notFound }
-        return item
+        return try await HTTPResponseDiagnostics.$route.withValue(.itemDetail) {
+            let container = try await decode(PlexMediaContainerResponse.self, endpoint, using: interactiveHTTP).MediaContainer
+            guard let item = container.Metadata?.first else {
+                HTTPResponseDiagnostics.recordValidationFailure(.missingMetadata, route: .itemDetail)
+                throw AppError.notFound
+            }
+            return item
+        }
     }
 
     /// `GET /library/metadata/{ratingKey}?includeMarkers=1` — fetches the item's
@@ -665,18 +717,21 @@ public struct PlexClient: Sendable {
         size: Int,
         sort: CoreModels.SortDescriptor,
         filters: LibraryFilters = .all,
-        genreID: String? = nil
+        genreID: String? = nil,
+        includeCollections: Bool = false
     ) async throws -> PlexMediaContainer {
         var query = containerQuery(start: start, size: size)
         if let type {
             query.append(URLQueryItem(name: "type", value: String(type)))
         }
         query.append(URLQueryItem(name: "sort", value: try Self.sortQuery(for: sort)))
+        query.append(URLQueryItem(name: "includeCollections", value: includeCollections ? "1" : "0"))
         query += try Self.libraryFilterQuery(filters, genreID: genreID)
         return try await decodeStreamEnriched(
             PlexMediaContainerResponse.self,
             path: "/library/sections/\(sectionID)/all",
-            query: query
+            query: query,
+            preservingContainers: includeCollections
         ).MediaContainer
     }
 
@@ -716,11 +771,74 @@ public struct PlexClient: Sendable {
             URLQueryItem(name: "count", value: String(max(1, count))),
             URLQueryItem(name: "includeGuids", value: "1")
         ]
-        return try await decodeStreamEnriched(
-            PlexMediaContainerResponse.self,
-            path: "/hubs/sections/\(sectionID)",
-            query: query
-        ).MediaContainer.Hub ?? []
+        return try await HTTPResponseDiagnostics.$route.withValue(.libraryHubs) {
+            try await decodeStreamEnriched(
+                PlexMediaContainerResponse.self,
+                path: "/hubs/sections/\(sectionID)",
+                query: query
+            ).MediaContainer.Hub ?? []
+        }
+    }
+
+    static func homeShelfKey(_ key: String?) -> String? {
+        guard let key else { return nil }
+        guard var parts = URLComponents(string: key),
+              parts.scheme == nil, parts.host == nil, parts.user == nil,
+              parts.fragment == nil, !parts.path.hasPrefix("//"),
+              !parts.path.split(separator: "/").contains(".."),
+              ["/hubs/", "/library/"].contains(where: parts.path.hasPrefix) else {
+            PlozzLog.networking.error("Plex Home shelf supplied an invalid continuation path")
+            return nil
+        }
+        parts.queryItems = parts.queryItems?.filter {
+            let name = $0.name.lowercased()
+            return !name.hasPrefix("x-plex-")
+                && !["token", "password", "authorization", "apikey", "api_key"].contains(name)
+        }
+        if parts.queryItems?.isEmpty == true { parts.queryItems = nil }
+        return parts.string
+    }
+
+    func homeShelfPage(key: String, startIndex: Int, limit: Int) async throws
+        -> (items: [PlexMetadata], nextOffset: Int?) {
+        // Native Home recovery also reads the bounded 100-item filtering window.
+        guard startIndex >= 0, limit > 0, limit <= 100,
+              startIndex < Int.max - limit,
+              let safeKey = Self.homeShelfKey(key), let parts = URLComponents(string: safeKey) else {
+            throw AppError.invalidResponse
+        }
+        var query = (parts.queryItems ?? []).filter {
+            !["count", "includeguids", "includeelements"].contains($0.name.lowercased())
+        }
+        query += [
+            .init(name: "X-Plex-Container-Start", value: String(startIndex)),
+            .init(name: "X-Plex-Container-Size", value: String(limit)),
+            .init(name: "includeGuids", value: "1")
+        ]
+        let container = try await decodeStreamEnriched(
+            PlexMediaContainerResponse.self, path: parts.path, query: query
+        ).MediaContainer
+        guard container.Metadata != nil || (container.Hub?.count ?? 0) <= 1 else {
+            throw AppError.invalidResponse
+        }
+        let hub = container.Metadata == nil ? container.Hub?.first : nil
+        guard container.Metadata != nil || hub?.Metadata != nil
+                || (hub == nil ? container.size == 0 : hub?.size == 0) else {
+            throw AppError.invalidResponse
+        }
+        let items = container.Metadata ?? hub?.Metadata ?? []
+        let offset = hub == nil ? container.offset ?? startIndex : hub?.offset ?? startIndex
+        let total = hub == nil ? container.totalSize : hub?.totalSize
+        let size = hub == nil ? container.size : hub?.size
+        guard offset == startIndex, items.count <= limit,
+              size.map({ $0 == items.count }) ?? true,
+              total.map({ $0 >= startIndex + items.count }) ?? true,
+              !items.isEmpty || total.map({ startIndex >= $0 }) ?? true else {
+            throw AppError.invalidResponse
+        }
+        let more = total.map { startIndex + items.count < $0 } ?? (hub?.more ?? (items.count == limit))
+        guard !more || !items.isEmpty else { throw AppError.invalidResponse }
+        return (items, more ? startIndex + items.count : nil)
     }
 
     func promotedHubs(sectionID: String, count: Int) async throws -> [PlexHub] {
@@ -738,7 +856,7 @@ public struct PlexClient: Sendable {
 
     /// Server promotions, not an import of any client's pinned sidebar.
     func serverHomeHubs(sectionID: String, count: Int) async throws -> [PlexHub] {
-        try await decodeStreamEnriched(
+        let container = try await decodeStreamEnriched(
             PlexMediaContainerResponse.self,
             path: "/hubs/promoted",
             query: [
@@ -746,7 +864,20 @@ public struct PlexClient: Sendable {
                 URLQueryItem(name: "count", value: String(max(1, min(count, 100)))),
                 URLQueryItem(name: "includeGuids", value: "1")
             ]
-        ).MediaContainer.Hub ?? []
+        ).MediaContainer
+        guard let hubs = container.Hub else {
+            guard container.size == 0, (container.totalSize ?? 0) == 0 else {
+                PlozzLog.networking.error("Plex Home promotions omitted their hub payload")
+                throw AppError.invalidResponse
+            }
+            return []
+        }
+        guard container.size.map({ $0 == hubs.count }) ?? true,
+              container.totalSize.map({ $0 == hubs.count }) ?? true else {
+            PlozzLog.networking.error("Plex Home promotions returned an incomplete hub payload")
+            throw AppError.invalidResponse
+        }
+        return hubs
     }
 
     /// `GET /hubs/continueWatching/items` returns both resumes and next episodes
@@ -762,6 +893,12 @@ public struct PlexClient: Sendable {
     /// Older servers may not route the `items` variant; the provider falls back to
     /// the plain hub and then the legacy feed only when an endpoint fails.
     func continueWatchingHub(limit: Int, itemsVariant: Bool = true) async throws -> [PlexMetadata] {
+        try await HTTPResponseDiagnostics.$route.withValue(itemsVariant ? .continueWatchingItems : .continueWatchingHub) {
+            try await continueWatchingHubPage(limit: limit, itemsVariant: itemsVariant)
+        }
+    }
+
+    private func continueWatchingHubPage(limit: Int, itemsVariant: Bool) async throws -> [PlexMetadata] {
         let path = itemsVariant ? "/hubs/continueWatching/items" : "/hubs/continueWatching"
         if limit == Int.max {
             return try await exhaustiveResumeFeed(
@@ -837,11 +974,20 @@ public struct PlexClient: Sendable {
                     from: container,
                     acceptsNestedHubs: acceptsNestedHubs
                 )
+                func invalidPage(_ reason: LibraryPagingDiagnostic.Reason) -> AppError {
+                    let stage: LibraryPagingDiagnostic.Stage = path == "/hubs/continueWatching/items"
+                        ? .continueWatchingItems : acceptsNestedHubs ? .continueWatchingHub : .onDeck
+                    HTTPResponseDiagnostics.recordPagingFailure(.init(
+                        stage: stage, reason: reason, start: start,
+                        rows: page.items.count, total: page.totalSize
+                    ))
+                    return .invalidResponse
+                }
                 if let total = page.totalSize {
-                    guard total >= 0 else { throw AppError.invalidResponse }
+                    guard total >= 0 else { throw invalidPage(.negativeTotal) }
                     if let expectedTotal {
                         guard total == expectedTotal else {
-                            throw AppError.invalidResponse
+                            throw invalidPage(.changedTotal)
                         }
                     } else {
                         expectedTotal = total
@@ -849,26 +995,26 @@ public struct PlexClient: Sendable {
                 }
                 if let size = page.size {
                     guard size >= 0, size == page.items.count else {
-                        throw AppError.invalidResponse
+                        throw invalidPage(.sizeMismatch)
                     }
                 }
                 if let offset = page.offset {
-                    guard offset == start else { throw AppError.invalidResponse }
+                    guard offset == start else { throw invalidPage(.offsetMismatch) }
                 }
 
                 guard !page.items.isEmpty else {
                     let totalIsIncomplete = expectedTotal.map { start < $0 } ?? false
                     if page.more == true || totalIsIncomplete {
-                        throw AppError.invalidResponse
+                        throw invalidPage(.emptyBeforeTotal)
                     }
                     return collected
                 }
 
                 for item in page.items {
                     let identifiers = resumeFeedIdentifiers(item)
-                    guard !identifiers.isEmpty,
-                          seenIdentifiers.isDisjoint(with: identifiers) else {
-                        throw AppError.invalidResponse
+                    guard !identifiers.isEmpty else { throw invalidPage(.emptyID) }
+                    guard seenIdentifiers.isDisjoint(with: identifiers) else {
+                        throw invalidPage(.repeatedItem)
                     }
                     seenIdentifiers.formUnion(identifiers)
                 }
@@ -876,26 +1022,26 @@ public struct PlexClient: Sendable {
 
                 let (nextStart, overflow) = start.addingReportingOverflow(page.items.count)
                 guard !overflow, nextStart > start else {
-                    throw AppError.invalidResponse
+                    throw invalidPage(.nonAdvancing)
                 }
-                start = nextStart
 
                 if let expectedTotal {
-                    guard start <= expectedTotal else {
-                        throw AppError.invalidResponse
+                    guard nextStart <= expectedTotal else {
+                        throw invalidPage(.itemsPastEnd)
                     }
-                    if start == expectedTotal {
+                    if nextStart == expectedTotal {
                         guard page.more != true else {
-                            throw AppError.invalidResponse
+                            throw invalidPage(.contradictoryMore)
                         }
                         return collected
                     }
                     if page.more == false {
-                        throw AppError.invalidResponse
+                        throw invalidPage(.contradictoryMore)
                     }
                 } else if page.more == false {
                     return collected
                 }
+                start = nextStart
             }
         } catch let cancellation as CancellationError {
             throw cancellation
@@ -940,13 +1086,19 @@ public struct PlexClient: Sendable {
     }
 
     private func resumeFeedIdentifiers(_ item: PlexMetadata) -> Set<String> {
-        Set(
-            [item.ratingKey, item.guid, item.key]
-                .compactMap { value in
-                    guard let value, !value.isEmpty else { return nil }
-                    return value
-                }
-        )
+        var identifiers = Set<String>()
+        if let ratingKey = item.ratingKey, !ratingKey.isEmpty {
+            identifiers.insert("ratingKey:\(ratingKey)")
+        }
+        if let key = item.key, !key.isEmpty {
+            identifiers.insert("key:\(key)")
+        }
+        // Copies and editions can share a global GUID but remain distinct
+        // server items. Use it only when no server-local identity is available.
+        if identifiers.isEmpty, let guid = item.guid, !guid.isEmpty {
+            identifiers.insert("guid:\(guid)")
+        }
+        return identifiers
     }
 
     /// `GET /library/sections/{id}/firstCharacter` — the section's title
@@ -962,6 +1114,7 @@ public struct PlexClient: Sendable {
         if let type {
             query.append(URLQueryItem(name: "type", value: String(type)))
         }
+        query.append(URLQueryItem(name: "includeCollections", value: "0"))
         let endpoint = Endpoint(
             path: "/library/sections/\(sectionID)/firstCharacter",
             queryItems: query,
@@ -1637,7 +1790,7 @@ public struct PlexClient: Sendable {
                 // inline.
                 URLQueryItem(
                     name: "includeFields",
-                    value: "title,type,year,thumb,art,guid,Guid,ratingKey"
+                    value: "title,type,year,thumb,art,guid,Guid,ratingKey,watchlistedAt,originallyAvailableAt"
                 )
             ],
             headers: plexTVHeaders
@@ -1683,6 +1836,20 @@ public struct PlexClient: Sendable {
     }
 
     // MARK: URLs
+
+    func selectAudioStream(_ streamID: Int, partID: Int) async throws {
+        let endpoint = Endpoint(
+            method: .put,
+            path: "/library/parts/\(partID)",
+            queryItems: [
+                URLQueryItem(name: "audioStreamID", value: String(streamID)),
+                URLQueryItem(name: "allParts", value: "1")
+            ],
+            headers: headers
+        )
+        _ = try await send(endpoint)
+        try Task.checkCancellation()
+    }
 
     /// Fetches the raw text of a lyrics (or other sidecar) stream by its
     /// server-relative `key` (e.g. `/library/streams/5555`). Plex serves an
@@ -1991,14 +2158,6 @@ public struct PlexClient: Sendable {
     /// by Plex's HLS transcode, which repackages them into a seekable playlist.
     private static let directPlayContainers: Set<String> = ["mp4", "m4v", "mov"]
 
-    /// Containers AVPlayer can't reliably direct-play from a raw file URL but the
-    /// hybrid engine can decode on-device. Only eligible when
-    /// `hybridEngineEnabled`.
-    private static let hybridDirectPlayContainers: Set<String> = [
-        "mkv", "webm", "matroska",
-        "ts", "m2ts", "mts", "m2t", "mpegts", "bdav", "bdmv"
-    ]
-
     /// Lossy audio codecs the Apple TV always decodes in software, regardless of
     /// the connected receiver. These never need passthrough, so they're always
     /// direct-playable. FLAC is lossless but AVFoundation has decoded it natively
@@ -2019,55 +2178,37 @@ public struct PlexClient: Sendable {
         return canDirectPlayVideoRange(part: part)
     }
 
-    /// True only when we can prove the original file plays natively in AVPlayer
-    /// on **this** device + display/audio route. Unknown/missing container or
-    /// codec info, an unsupported codec for the current hardware, or HDR/Dolby
-    /// Vision the display can't accept all fall back to a server transcode
-    /// (matching server-side decisioning).
-    ///
-    /// When `hybridEngineEnabled`, also accepts the extra formats the on-device
-    /// engine handles: hybrid-only containers (Matroska/WebM/TS-family),
-    /// interlaced video, and DTS/DTS-HD/TrueHD/Opus/Vorbis audio (decoded
-    /// on-device).
+    /// Negotiate the linked engine's input formats independently of native
+    /// display/output capabilities. Missing codec metadata is left to its probe.
     func canDirectPlay(media: PlexMedia, part: PlexPart) -> Bool {
         let container = (media.container ?? part.container ?? Self.containerExtension(fromKey: part.key))?.lowercased()
         guard let container else { return false }
-
-        let isAppleContainer = Self.directPlayContainers.contains(container)
-        let isHybridContainer = hybridEngineEnabled && Self.hybridDirectPlayContainers.contains(container)
-        guard isAppleContainer || isHybridContainer else { return false }
-
         let videoStream = part.Stream?.first(where: { $0.streamType == 1 })
-        if Self.isInterlaced(videoStream), !hybridEngineEnabled {
-            return false
+        if hybridEngineEnabled {
+            guard PlozzigenMediaFormats.supports(container: container) else { return false }
+            if let video = media.videoCodec ?? videoStream?.codec, !video.isEmpty,
+               !PlozzigenMediaFormats.supports(videoCodec: video) { return false }
+            let audioStream = part.Stream?.first { $0.streamType == 2 && $0.selected == true }
+                ?? part.Stream?.first { $0.streamType == 2 }
+            if let audio = audioStream?.codec ?? media.audioCodec, !audio.isEmpty,
+               !PlozzigenMediaFormats.supports(audioCodec: audio) { return false }
+            return true
         }
-
-        // Video codec gate. Apple containers must be a hardware-decodable codec;
-        // the hybrid engine demuxes/decodes the broad set inside hybrid-only
-        // containers, so the
-        // codec is left to VLCKit there (the SDR range gate below still applies).
-        if !isHybridContainer, let video = media.videoCodec?.lowercased() {
+        guard Self.directPlayContainers.contains(container),
+              !Self.isInterlaced(videoStream) else { return false }
+        if let video = media.videoCodec?.lowercased() {
             guard let mapped = Self.directPlayVideoCodec(forPlexCodec: video),
                   capabilities.allowedDirectPlayVideoCodecs.contains(mapped) else { return false }
         }
-
         if let audio = media.audioCodec?.lowercased(), !canDirectPlayAudio(codec: audio) {
             return false
         }
-
-        if isHybridContainer {
-            guard isHybridDirectPlayableRange(part: part) else { return false }
-        } else {
-            guard canDirectPlayVideoRange(part: part) else { return false }
-        }
-
-        return true
+        return canDirectPlayVideoRange(part: part)
     }
 
     /// Maps a Plex `videoCodec` token onto a `MediaCapabilities` direct-play
     /// codec. Plex labels HEVC as either `hevc` or `h265`; both fold to `.hevc`.
-    /// Returns `nil` for codecs that are never direct-playable (e.g. mpeg2,
-    /// vc1), forcing a transcode.
+    /// This is the native/server-output set, not Aether's input codec set.
     static func directPlayVideoCodec(forPlexCodec codec: String) -> DirectPlayVideoCodec? {
         switch codec {
         case "h264", "avc": return .h264
@@ -2082,24 +2223,10 @@ public struct PlexClient: Sendable {
     /// passthrough/bitstream codec the **current route** can carry. AC-3/E-AC-3
     /// are always passthrough-eligible; DTS / DTS-HD only when the route reports
     /// `supportsDTSPassthrough`, since Apple TV cannot decode DTS itself.
-    ///
-    /// When `hybridEngineEnabled`, DTS / DTS-HD / TrueHD are additionally accepted
-    /// even without passthrough, because the on-device VLCKit engine decodes them
-    /// (the router sends these to the hybrid engine).
     private func canDirectPlayAudio(codec: String) -> Bool {
         if Self.alwaysDecodableAudioCodecs.contains(codec) { return true }
-        if hybridEngineEnabled, Self.isHybridDecodableAudio(codec) { return true }
         guard let passthrough = Self.passthroughAudioCodec(forPlexCodec: codec) else { return false }
         return capabilities.allowedPassthroughAudioCodecs.contains(passthrough)
-    }
-
-    /// DTS / DTS-HD / TrueHD / Opus / Vorbis: audio the on-device Plozzigen engine
-    /// decodes regardless of the connected receiver's passthrough support.
-    static func isHybridDecodableAudio(_ codec: String) -> Bool {
-        let codec = codec.lowercased()
-        return codec.contains("dts") || codec == "dca" || codec.hasPrefix("dca")
-            || codec.contains("truehd") || codec == "mlp"
-            || codec == "opus" || codec == "vorbis"   // Plozzigen decodes these; AVPlayer can't in Apple containers
     }
 
     /// Maps a Plex `audioCodec` token onto a `MediaCapabilities` passthrough
@@ -2144,33 +2271,6 @@ public struct PlexClient: Sendable {
             return !allowed.isDisjoint(with: doviRanges)
         }
 
-        switch video.colorTrc?.lowercased() {
-        case "smpte2094-40":
-            return allowed.contains(.hdr10Plus)
-        case "smpte2084", "pq":
-            return allowed.contains(.hdr10)
-        case "arib-std-b67", "hlg":
-            return allowed.contains(.hlg)
-        default:
-            return true
-        }
-    }
-
-    /// Range gate for a raw MKV sent to the on-device engine: allows SDR and any
-    /// **display-supported** range, including HDR10 / HLG **and Dolby Vision** —
-    /// the on-device engine decodes the HEVC base layer (HDR10/SDR base for
-    /// Profile 8, tone-mapped for Profile 5), so DoVi-in-MKV plays without the
-    /// unreliable server transcode AVPlayer would otherwise need (it can't demux
-    /// MKV). Matches Infuse and mirrors `EngineRouter` (DoVi-in-MKV → hybrid).
-    private func isHybridDirectPlayableRange(part: PlexPart) -> Bool {
-        guard let video = part.Stream?.first(where: { $0.streamType == 1 }) else { return true }
-        let allowed = Set(capabilities.allowedHDRRanges)
-        if video.DOVIPresent == true {
-            // Decoded on-device whenever the display supports Dolby Vision (which,
-            // on an Apple TV 4K, tracks HEVC hardware decode — effectively always).
-            let doviRanges: Set<HDRRange> = [.dolbyVision, .dolbyVisionWithHDR10, .dolbyVisionWithHLG, .dolbyVisionWithSDR]
-            return !allowed.isDisjoint(with: doviRanges)
-        }
         switch video.colorTrc?.lowercased() {
         case "smpte2094-40":
             return allowed.contains(.hdr10Plus)

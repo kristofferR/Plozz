@@ -91,6 +91,8 @@ struct SiloUserState: Decodable, Sendable {
 
 struct SiloWatchRollup: Decodable, Sendable {
     let played: Bool
+    let watched_count: Int?
+    let unplayed_count: Int?
     let position_seconds: Double?
     let duration_seconds: Double?
 }
@@ -107,6 +109,10 @@ struct SiloFileVersion: Decodable, Sendable {
     let file_size: Int64
     let duration: Double
     let bitrate: Int
+    let presentation_kind: String?
+    let presentation_part_total: Int?
+    let multi_episode_start: Int?
+    let multi_episode_end: Int?
     let video_tracks: [SiloVideoTrack]?
     let audio_tracks: [SiloAudioTrack]?
     let subtitle_tracks: [SiloSubtitleTrack]?
@@ -120,6 +126,10 @@ struct SiloVideoTrack: Decodable, Sendable {
     let video_range_type: String?
     let hdr10_plus: Bool?
     let dv_profile: Int?
+    let dv_config_present: Bool?
+    let dv_bl_compat_id: Int?
+    let dv_bl_compat_id_present: Bool?
+    let color_transfer: String?
 }
 
 struct SiloAudioTrack: Decodable, Sendable {

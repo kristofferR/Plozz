@@ -14,7 +14,6 @@ import MetadataKit
 import FeatureSearch
 import FeatureSettings
 import FeatureProfiles
-import ProviderTrailers
 import RatingsService
 import TraktService
 import SeerService
@@ -23,6 +22,7 @@ import WetrakrService
 import AniListService
 import MALService
 import LastFmService
+import TopShelfKit
 
 /// Keep the typed environment dependency stable across Settings redraws.
 @MainActor
@@ -41,7 +41,7 @@ private struct LiveTVSettingsSourcesScope<Content: View>: View {
         didConfigurePlaylist: @escaping () -> Void
     ) {
         self.content = content
-        _sources = State(initialValue: LiveTVSettingsSources {
+        _sources = State(initialValue: LiveTVSettingsSources { preferences in
             AnyView(LiveTVShellSourcesDestination(
                 profileID: profileID,
                 preferencesNamespace: preferencesNamespace,
@@ -49,7 +49,8 @@ private struct LiveTVSettingsSourcesScope<Content: View>: View {
                 connectServer: connectServer,
                 didConfigurePlaylist: didConfigurePlaylist,
                 isPresented: isPresented(),
-                isProfileAuthorized: { isPresented() && isProfileAuthorized() }
+                isProfileAuthorized: { isPresented() && isProfileAuthorized() },
+                settingsPreferences: preferences
             ))
         })
     }
@@ -99,27 +100,25 @@ private struct RootNavigationTabLabel: View {
     }
 }
 
-struct NativeTopBarNavigation: View {
-    let destinations: [NavigationRailDestination]
-    @Binding var selection: NavigationRailDestination
-    let preventsAccidentalExit: Bool
-    let content: (NavigationRailDestination, Bool) -> AnyView
-    let label: (NavigationRailDestination) -> AnyView
+/// Keep Settings mounted while its style picker saves a new preference.
+/// Replace the shell only after leaving Settings, without reparenting its pages.
+struct SettingsNavigationShell<Navigation: View>: View {
+    let style: NavigationStyle
+    let showsSettings: Bool
+    @ViewBuilder var navigation: (NavigationStyle) -> Navigation
+    @State private var lastVisibleStyle: NavigationStyle?
 
     var body: some View {
-        let current = selection
-        TabView(selection: $selection) {
-            ForEach(destinations, id: \.storageValue) { destination in
-                Tab(value: destination) {
-                    AnyView(content(destination, current == destination)
-                        .tvNavigationExitProtectionContent())
-                } label: {
-                    label(destination)
-                }
+        let preservesStyle = showsSettings
+        let mountedStyle = preservesStyle ? lastVisibleStyle ?? style : style
+        navigation(mountedStyle)
+            .environment(\.plozzNavigationStyle, mountedStyle)
+            .onChange(of: preservesStyle, initial: true) { _, _ in
+                if lastVisibleStyle == nil || !preservesStyle { lastVisibleStyle = style }
             }
-        }
-        .tabViewStyle(.tabBarOnly)
-        .tvNavigationExitProtection(isEnabled: preventsAccidentalExit)
+            .onChange(of: style) { _, style in
+                if !preservesStyle { lastVisibleStyle = style }
+            }
     }
 }
 
@@ -253,13 +252,29 @@ struct MainTabView: View {
             Color.clear
                 .frame(width: 0, height: 0)
                 .accessibilityHidden(true)
-                .task(id: pendingPlay.itemID) {
-                    guard pendingPlay.itemID != nil else { return }
+                .task(id: pendingPlay.request) {
+                    guard pendingPlay.request != nil else { return }
                     onRequireHome()
                 }
                 .task(id: screenshotDirector.request) {
                     guard screenshotDirector.request != nil else { return }
                     onRequireHome()
+                }
+        }
+    }
+
+    /// Remains mounted while Settings is open, even when Home's view is not.
+    private struct TopShelfSettingsObserver: View {
+        let runtime: HomeTabRuntime
+
+        var body: some View {
+            Color.clear
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+                .onChange(of: TopShelfSettingsModel.shared.settings, initial: true) { _, settings in
+                    TopShelfPublisher.settingsDidChange(settings)
+                    guard settings.isEnabled else { return }
+                    runtime.homeViewModel.existingValue(forKey: runtime.scopeKey)?.publishCurrentContent()
                 }
         }
     }
@@ -465,6 +480,8 @@ struct MainTabView: View {
     var pendingStandaloneLiveTVEntry = false
     var onConsumeStandaloneLiveTVEntry: (() -> Void)?
     var onConfiguredIPTVPlaylist: () -> Void = {}
+    var settingsEntryRequested = false
+    var onConsumeSettingsEntry: () -> Void = {}
 
     @State private var hasResolvedStandaloneStartup = false
     @State private var retainsExplicitLiveTVEntry = false
@@ -477,7 +494,6 @@ struct MainTabView: View {
     /// ROOT list. Threading the raw `LoadState` value through `SettingsView`
     /// instead rebuilt the root rows mid-flip → `setToViewXFlippedScreenShot:` UAF.
     @State private var librariesStore = DiscoveredLibrariesStore()
-    @State private var libraryReloadRevision = 0
     @State private var musicAvailability = MusicAvailabilityModel()
     @State private var themeMusicController = ThemeMusicController()
     /// One app-level trailer player shared by the Home and detail heroes so
@@ -490,6 +506,7 @@ struct MainTabView: View {
     /// presents unreliably under the sidebar tab style (the cover only appears
     /// after a stray Back press). Bound down into `MusicTabView`, which flips it.
     @State private var showNowPlaying = false
+    @State private var profileTrailerSuppressionID = UUID()
     /// The video player is hosted here on the root `TabView` (not inside a tab's
     /// navigation stack) so it presents reliably on the FIRST trigger — the same
     /// reason `showNowPlaying` lives here. A `fullScreenCover` attached inside a
@@ -515,8 +532,8 @@ struct MainTabView: View {
     private static let processLaunch = UUID().uuidString
     /// Carries the currently-visible top-bar destination into rail/sidebar when
     /// the style changes, without erasing the separately remembered library
-    /// destination. Cleared when the viewer chooses a real library-navigation
-    /// destination or returns to top bar.
+    /// destination. Prepared as top-bar selection changes so the first frame of
+    /// a style switch does not temporarily leave Settings.
     @State private var libraryNavigationEntryOverride: NavigationRailDestination?
     /// Whether a detail page is on top of the visible destination, so the rail can
     /// step aside. Owned here and injected, so the stacks that know their depth can
@@ -541,11 +558,11 @@ struct MainTabView: View {
     /// player has closed. Same hand-off as `pendingPersonRoute`.
     @State private var pendingTitleRoute: MediaItem?
     @State private var retainsExplicitHomeEntry = false
+    @State private var retainsExplicitWatchlistEntry = false
     /// Settings navigation identity owned above all three navigation shells.
     /// MainTabView passes the reference but never reads its path, so Settings
     /// pushes do not invalidate this large shell body.
     @State private var settingsNavigation = SettingsNavigationModel()
-    @State private var settingsReturnDestination: NavigationRailDestination = .home
 
     private var selectedTab: Binding<NavigationRailDestination> {
         Binding(
@@ -558,12 +575,17 @@ struct MainTabView: View {
                 HandoffDiagnostics.emit("NAVIGATION event=topTabSelection previous=\(resolvedSelectedTab.storageValue) requested=\($0.storageValue)")
                 recordedProcessLaunch = Self.processLaunch
                 releaseExplicitLiveTVEntry(ifLeavingFor: $0)
-                selectedTabRaw = resolvedTopBarTab($0).storageValue
+                let destination = resolvedTopBarTab($0)
+                selectedTabRaw = destination.storageValue
+                // This binding can still belong to the mounted top bar after
+                // Settings has saved a different style.
+                libraryNavigationEntryOverride = destination
             }
         )
     }
 
     private var resolvedSelectedTab: NavigationRailDestination {
+        if settingsEntryRequested { return .settings }
         let stored = Self.launchDestination(
             stored: NavigationRailDestination(storageValue: selectedTabRaw) ?? .home,
             recordedProcess: recordedProcessLaunch, currentProcess: Self.processLaunch
@@ -578,7 +600,8 @@ struct MainTabView: View {
     }
 
     private func resolvedTopBarTab(_ tab: NavigationRailDestination) -> NavigationRailDestination {
-        NavigationRailPlan.resolvedSelection(
+        if tab == .settings { return .settings }
+        return NavigationRailPlan.resolvedSelection(
             tab, destinations: topBarDestinations
         )
     }
@@ -599,6 +622,7 @@ struct MainTabView: View {
     private func activeLibraryNavigationDestination(
         in destinations: [NavigationRailDestination]
     ) -> NavigationRailDestination {
+        if settingsEntryRequested { return .settings }
         let current = libraryNavigationEntryOverride ?? NavigationRailPlan.resolvedSelection(
             storedRailSelection,
             destinations: destinations
@@ -645,10 +669,10 @@ struct MainTabView: View {
     }
 
     private var shouldResolveStartup: Bool {
-        (admissionContext.explicitStandaloneChoice && pendingStandaloneLiveTVEntry)
+        !settingsEntryRequested && ((admissionContext.explicitStandaloneChoice && pendingStandaloneLiveTVEntry)
             || (!hasResolvedStandaloneStartup
                 && (navigationAvailability.prefersLiveTV
-                    || (admissionContext.explicitStandaloneChoice && !admissionContext.hasMediaAccounts)))
+                    || (admissionContext.explicitStandaloneChoice && !admissionContext.hasMediaAccounts))))
     }
 
     static func launchDestination(
@@ -667,15 +691,19 @@ struct MainTabView: View {
 
     private func releaseExplicitLiveTVEntry(ifLeavingFor destination: NavigationRailDestination) {
         if destination != .home { retainsExplicitHomeEntry = false }
+        if destination != .watchlist { retainsExplicitWatchlistEntry = false }
         if destination != .liveTV { retainsExplicitLiveTVEntry = false }
     }
 
     private func includingExplicitLiveTVEntry(
         _ destinations: [NavigationRailDestination]
     ) -> [NavigationRailDestination] {
-        let destinations = Self.includingExplicitHome(
+        var destinations = Self.includingExplicitHome(
             destinations, isRequested: retainsExplicitHomeEntry
         )
+        if retainsExplicitWatchlistEntry, !destinations.contains(.watchlist) {
+            destinations.append(.watchlist)
+        }
         return AppAdmissionNavigation.destinations(
             destinations,
             liveTV: .liveTV,
@@ -758,6 +786,17 @@ struct MainTabView: View {
             libraryNavigationSelection.wrappedValue = .liveTV
         }
         NotificationCenter.default.post(name: LiveTVGuideButton.pressed, object: nil)
+    }
+
+    private func openWatchlist() {
+        retainsExplicitWatchlistEntry = true
+        refreshWatchlistNavigation()
+        if navigationStyle == .tabBar {
+            selectedTab.wrappedValue = .watchlist
+        } else {
+            if navigationStyle == .sidebar { nativeSidebarFocus.begin(.watchlist) }
+            libraryNavigationSelection.wrappedValue = .watchlist
+        }
     }
 
     private func destination(for tab: MainTab) -> NavigationRailDestination {
@@ -866,7 +905,7 @@ struct MainTabView: View {
 
     private var navigationAvailability: NavigationContentAvailability {
         NavigationContentAvailability(
-            accounts: accounts.map(\.account),
+            accounts: accountsProviders.navigationAccounts,
             libraries: railLibraries,
             discoveredAccountIDs: navigationStyleModel.discoveredAccountIDs,
             disabledLibraryKeys: homeVisibility.visibility.disabledKeys,
@@ -879,14 +918,6 @@ struct MainTabView: View {
         return navigationStyleModel.libraryLayout.resolvingAutomaticVisibility(
             hidden: navigationAvailability.automaticallyHiddenKeys,
             retainingWatchlist: retainsActiveWatchlist
-        )
-    }
-
-    private var topBarNavigationLayout: NavigationLibraryLayout {
-        effectiveNavigationLayout.resolvingAutomaticVisibility(
-            hidden: NavigationRailPlan.automaticallyHiddenLibraryKeys(
-                visibleLibraries: availableRailLibraries, style: .tabBar
-            )
         )
     }
 
@@ -919,11 +950,11 @@ struct MainTabView: View {
     }
 
     private var topBarDestinations: [NavigationRailDestination] {
-        includingExplicitLiveTVEntry(NavigationRailPlan.destinations(
+        NavigationDestinationDefaults.topBar(destinations: includingExplicitLiveTVEntry(NavigationRailPlan.destinations(
             visibleLibraries: availableRailLibraries,
-            layout: topBarNavigationLayout,
+            layout: effectiveNavigationLayout,
             availableKeys: sidebarDestinationKeys
-        ))
+        )), layout: effectiveNavigationLayout)
     }
 
     private var sidebarDestinations: [NavigationRailDestination] {
@@ -1010,6 +1041,18 @@ struct MainTabView: View {
         // `.environment(\.colorScheme,)` — for `.system` that equals the real
         // device scheme, so Settings' theme switching follows the device.
         ThemePalette.palette(for: themeModel.theme, systemColorScheme: systemColorScheme)
+    }
+
+    private var themeMusicAuthorization: ThemeMusicPlaybackAuthorization {
+        let scope = accountsProviders.liveTVAuthorizationID
+        return ThemeMusicPlaybackAuthorization(
+            id: isLiveTVProfileAuthorized() ? scope : nil,
+            provider: { accountID in
+                guard isLiveTVProfileAuthorized(),
+                      accountsProviders.liveTVAuthorizationID == scope else { return nil }
+                return accountsProviders.homeAccounts.first { $0.account.id == accountID }?.provider
+            }
+        )
     }
 
     /// The identity of both tab subtrees. Includes the active profile, so
@@ -1122,24 +1165,6 @@ struct MainTabView: View {
             )
             .settingsPageBackground()
             .environment(Self.subtitleStyleDestination)
-            .environment(\.settingsExitAction, SettingsExitAction(closeSettings))
-    }
-
-    private func closeSettings() {
-        let destinations = activeNavigationDestinations.filter { $0 != .settings }
-        guard !destinations.isEmpty else {
-            retainsExplicitHomeEntry = true
-            requireHomeDestination()
-            return
-        }
-        let destination = NavigationRailPlan.resolvedSelection(
-            settingsReturnDestination, destinations: destinations
-        )
-        if navigationStyle == .tabBar {
-            selectedTab.wrappedValue = destination
-        } else {
-            libraryNavigationSelection.wrappedValue = destination
-        }
     }
 
     /// Extracted from `body`: the `HomeTab` initializer takes ~40 arguments and,
@@ -1162,6 +1187,7 @@ struct MainTabView: View {
             return HomeTab(
                 root: root,
                 accounts: accounts,
+                isProfileAuthorized: isLiveTVProfileAuthorized,
                 configuredServerCount: displayAccounts.count,
                 libraryPreferencesNamespace: liveTVPreferencesNamespace,
                 detailSnapshotCache: detailSnapshotCache,
@@ -1213,6 +1239,7 @@ struct MainTabView: View {
             // A rail library root gets its own identity, so switching libraries
             // rebuilds the stack instead of re-using the previous library's grid.
             .id(id ?? homeScopeKey)
+            .environment(\.openWatchlist, openWatchlist)
     }
 
     /// The Music destination.
@@ -1238,6 +1265,7 @@ struct MainTabView: View {
             let runtime = homeRuntime
             return SearchTab(
                 accounts: accounts,
+                isProfileAuthorized: isLiveTVProfileAuthorized,
                 detailSnapshotCache: detailSnapshotCache,
                 authenticatedHTTPResolver: authenticatedHTTPResolver,
                 seer: seer,
@@ -1275,31 +1303,23 @@ struct MainTabView: View {
     /// modifier the shell needs — the player hosts, the environment injections, the
     /// music probe — is applied to this in `body`, so the two chromes can never
     /// drift in what they provide.
-    @ViewBuilder
     private var shellContent: some View {
-        let showsSettings = isActiveTab(.settings)
-        ZStack {
-            navigationShell
-                .opacity(showsSettings ? 0 : 1)
-                .disabled(showsSettings)
-                .accessibilityHidden(showsSettings)
-            if showsSettings {
-                settingsTabContent
-            }
+        SettingsNavigationShell(
+            style: navigationStyle, showsSettings: isActiveTab(.settings)
+        ) { style in
+            navigationShell(style: style)
         }
     }
 
-    // Keep the Settings stack outside TabView's navigation adaptation. Changing
-    // chrome must not lift its right-hand destination over the category column.
     @ViewBuilder
-    private var navigationShell: some View {
-        switch navigationStyle {
+    private func navigationShell(style: NavigationStyle) -> some View {
+        switch style {
         case .rail:
             railShell
         case .sidebar:
             nativeSidebarShell
         case .tabBar:
-            nativeTopBarShell
+            topBarShell
         }
     }
 
@@ -1321,6 +1341,11 @@ struct MainTabView: View {
         pendingPersonRoute = PersonRoute(person: person, sourceAccountID: accountID)
     }
 
+    private func openTitleFromPlayer(_ item: MediaItem) {
+        playRequest = nil
+        pendingTitleRoute = item
+    }
+
     /// Live playback blocks all shell-owned ambient audio for as long as the
     /// Live TV destination is visible.
     private var isLiveTVDestinationActive: Bool {
@@ -1334,8 +1359,7 @@ struct MainTabView: View {
     /// already installed its own depth, so only the currently selected Live TV
     /// destination may write it.
     private func updateLiveTVChrome(_ expanded: Bool) {
-        guard navigationStyle == .rail,
-              activeLibraryNavigationDestination == .liveTV else {
+        guard navigationStyle != .sidebar, isLiveTVDestinationActive else {
             return
         }
         navigationChrome.setStackDepth(expanded ? 1 : 0)
@@ -1368,6 +1392,7 @@ struct MainTabView: View {
                 completeLibraryChannelPlayback: completeLibraryChannelPlayback,
                 isProfileAuthorized: isLiveTVProfileAuthorized,
                 usesNativeNavigation: true,
+                onExpandedChange: updateLiveTVChrome,
                 onOpenTitle: openTitleFromLiveTV
             ))
         case .search:
@@ -1375,7 +1400,7 @@ struct MainTabView: View {
         case .music:
             return AnyView(musicTabContent)
         case .settings:
-            return AnyView(Color.clear)
+            return AnyView(settingsTabContent)
         case .allLibraries, .library:
             guard let libraryEntry else {
                 return AnyView(homeTabContent(isActive: isActive))
@@ -1413,12 +1438,11 @@ struct MainTabView: View {
         }
     }
 
-    /// Capture the same library plan used by the sidebar before lazy tab content
-    /// is evaluated. Horizontal library shortcuts are explicitly opted in.
-    private var nativeTopBarShell: some View {
+    /// Both custom navigation layouts use the same profile-scoped library plan.
+    private var topBarShell: some View {
         let libraries = availableRailLibraries
         let entries = NavigationRailPlan.entries(
-            visibleLibraries: libraries, layout: topBarNavigationLayout,
+            visibleLibraries: libraries, layout: effectiveNavigationLayout,
             offlineAccountIDs: navigationStyleModel.offlineAccountIDs
                 .union(shareScanStatusModel.offlineShareIDs)
         )
@@ -1426,7 +1450,7 @@ struct MainTabView: View {
             uniqueKeysWithValues: entries.map { ($0.destination, $0) }
         )
         let browsableLibraries = NavigationRailPlan.browsableLibraries(libraries)
-        return NativeTopBarNavigation(
+        return TopBarNavigation(
             destinations: topBarDestinations,
             selection: selectedTab,
             preventsAccidentalExit: navigationStyleModel.preventsAccidentalExit,
@@ -1441,7 +1465,11 @@ struct MainTabView: View {
                 rootNavigationLabel(
                     for: destination, libraryEntry: entriesByDestination[destination]
                 )
-            }
+            },
+            profile: activeProfile,
+            onOpenProfileSwitcher: openProfileSwitcher,
+            chrome: navigationChrome,
+            pinsSettings: navigationStyleModel.libraryLayout.pinsSettingsInTopBar
         )
     }
 
@@ -1590,7 +1618,7 @@ struct MainTabView: View {
         case .music:
             return AnyView(musicTabContent)
         case .settings:
-            return AnyView(Color.clear)
+            return AnyView(settingsTabContent)
         case .allLibraries, .library:
             if let entry = railEntries.first(where: {
                 $0.destination == activeLibraryNavigationDestination
@@ -1683,7 +1711,7 @@ struct MainTabView: View {
             settleInitialCatalogue(previous: previous, current: current)
         }
         .task(id: railLibrariesKey, priority: .utility) {
-            await refreshNavigationLibraries()
+            await reloadLibrariesFromCurrentScope()
         }
     }
 
@@ -1704,33 +1732,8 @@ struct MainTabView: View {
         libraryNavigationEntryOverride = nil
     }
 
-    private func refreshNavigationLibraries() async {
-        let navigation = navigationStyleModel
-        if !railLibraries.isEmpty { railLibrariesLoaded = true }
-        let accounts = currentAccounts()
-        let discovered = await discovery.libraryDiscovery(from: accounts)
-        guard !Task.isCancelled, navigationStyleModel === navigation else { return }
-        navigation.updateContentLibraries(
-            discovered.libraries,
-            accountIDs: Set(accounts.map(\.account.id)),
-            unreachableAccountIDs: discovered.unreachableAccountIDs,
-            failures: discovered.failures
-        )
-        guard !railLibraries.isEmpty || discovered.unreachableAccountIDs.isEmpty else { return }
-        railLibrariesLoaded = true
-    }
-
-    var body: some View {
-        // TEMPORARY. MainTabView was the one view in the detail-page loop with no
-        // probe, and the loop is driven through the bindings IT creates: the
-        // capture showed HomeTab reporting only `_pendingPersonRoute,
-        // _pendingTitleRoute changed`, 3,559 times, with its own state and
-        // `__path` untouched. Those two bindings are built inline here, so a
-        // re-run of this body hands HomeTab fresh ones every pass. Without this
-        // probe the cycle is invisible at exactly the point it turns over.
-        let _ = plozzPrintChanges { Self._printChanges() }
-        let _ = PlozzBodyRate.tick("MainTabView")
-        return contentAwareShell
+    private var routedShell: some View {
+        contentAwareShell
         .homeLiveTVScope(
             profileID: activeProfile.id, namespace: liveTVPreferencesNamespace,
             accounts: accountsProviders, isAuthorized: isLiveTVProfileAuthorized,
@@ -1748,6 +1751,15 @@ struct MainTabView: View {
         .onChange(of: pendingStandaloneLiveTVEntry, initial: true) { _, _ in
             settleFreshLaunch()
             settleStandaloneStartup()
+        }
+        .onChange(of: settingsEntryRequested, initial: true) { _, requested in
+            guard requested else { return }
+            hasChosenNavigationDestination = true
+            recordedProcessLaunch = Self.processLaunch
+            selectedTabRaw = NavigationRailDestination.settings.storageValue
+            railSelectionRaw = NavigationRailDestination.settings.storageValue
+            libraryNavigationEntryOverride = .settings
+            onConsumeSettingsEntry()
         }
         #if os(tvOS)
         .onContinueUserActivity(LiveTVGuideButton.activityType) { _ in openLiveTVGuide() }
@@ -1780,6 +1792,9 @@ struct MainTabView: View {
                 onRequireHome: requireHomeDestination
             )
         }
+        .background {
+            TopShelfSettingsObserver(runtime: homeRuntime)
+        }
         .onChange(of: resolvedRailSelection) { _, _ in
             guard navigationStyle != .tabBar else { return }
             persistPrunedRailSelection()
@@ -1810,12 +1825,7 @@ struct MainTabView: View {
                 persistPrunedRailSelection()
             }
         }
-        .onChange(of: activeDestinationKey, initial: true) { previous, destination in
-            if destination == NavigationRailDestination.settings.storageValue,
-               let previous = NavigationRailDestination(storageValue: previous),
-               previous != .settings {
-                settingsReturnDestination = previous
-            }
+        .onChange(of: activeDestinationKey, initial: true) { _, destination in
             if let selected = NavigationRailDestination(storageValue: destination) {
                 retainsActiveWatchlist = selected == .watchlist
                 releaseExplicitLiveTVEntry(ifLeavingFor: selected)
@@ -1845,10 +1855,15 @@ struct MainTabView: View {
             homeHeroRuntime.resetForSourceScopeChange()
             onWarmIdentityIndex()
         }
+    }
+
+    private var playbackShell: some View {
         // Host the full-screen Now Playing player here, on the root TabView, so it
         // presents reliably on the first trigger under both tab styles. Hosting it
         // inside the Music tab's navigation stack made it present a beat late under
         // the sidebar style (only appearing after a stray Back press).
+        routedShell
+        .environment(\.detailPlaybackPreparationAllowed, playRequest == nil && resumePrompt == nil && !showNowPlaying)
         .plozzFullScreenCover(isPresented: $showNowPlaying) {
             NowPlayingView(
                 controller: audioController,
@@ -1887,66 +1902,77 @@ struct MainTabView: View {
             // navigation stacks live inside the tabs, so this is the only place
             // that can see both.
             onOpenPerson: openPersonFromPlayer,
-            onOpenTitle: { item in
-                playRequest = nil
-                pendingTitleRoute = item
-            }
+            onOpenTitle: openTitleFromPlayer
         )
-        .environment(\.themeMusicController, themeMusicController)
+    }
+
+    var body: some View {
+        // TEMPORARY. MainTabView was the one view in the detail-page loop with no
+        // probe, and the loop is driven through the bindings IT creates: the
+        // capture showed HomeTab reporting only `_pendingPersonRoute,
+        // _pendingTitleRoute changed`, 3,559 times, with its own state and
+        // `__path` untouched. Those two bindings are built inline here, so a
+        // re-run of this body hands HomeTab fresh ones every pass. Without this
+        // probe the cycle is invisible at exactly the point it turns over.
+        let _ = plozzPrintChanges { Self._printChanges() }
+        let _ = PlozzBodyRate.tick("MainTabView")
+        return playbackShell
+        #if os(tvOS)
+        .background(
+            TVProfilePlaybackPresence(
+                isActive: playRequest != nil || showNowPlaying || audioController.isPlaying
+            )
+            .frame(width: 0, height: 0)
+        )
+        #endif
+        .themeMusicScope(
+            controller: themeMusicController,
+            model: themeMusicModel,
+            background: heroBackgroundModel.settings,
+            isBlocked: audioController.hasActivePlayback || heroTrailerController.isPlaying
+                || heroTrailerController.isPlaybackSuppressed || playRequest != nil
+                || isLiveTVDestinationActive,
+            authorization: themeMusicAuthorization,
+            authenticatedHTTPResolver: authenticatedHTTPResolver
+        )
+        .environment(\.themeMusicPreviewResolver, {
+            try await ThemeMusicPreviewResolver.resolve(
+                content: homeRuntime.homeViewModel.existingValue(forKey: homeRuntime.scopeKey)?.state.value,
+                accounts: currentAccounts()
+            )
+        })
         .environment(
             \.seasonRequestContextID,
             "\(seer.connectionRevision)|\(activeProfile.id)|\(activeProfile.seerrUserID.map(String.init) ?? "admin")|\(activeProfile.seerrServerIdentity?.canonicalURL ?? "")"
         )
-        .environment(\.themeMusicSettings, themeMusicModel.settings)
         .environment(heroTrailerController)
+        .onChange(of: isLiveTVProfileAuthorized(), initial: true) { _, authorized in
+            if authorized {
+                heroTrailerController.resumeAfterPlayback(owner: profileTrailerSuppressionID)
+            } else {
+                heroTrailerController.suspendForPlayback(owner: profileTrailerSuppressionID)
+            }
+        }
         .environment(heroBackgroundModel)
-        .environment(
-            \.themeMusicAuthenticatedHTTPResolver,
-            authenticatedHTTPResolver
-        )
         .onChange(of: artworkPolicy.forArea(.music), initial: true) { _, policy in
             audioController.updateArtworkPolicy(policy)
         }
-        .onChange(of: audioController.hasActivePlayback, initial: true) { _, active in
-            themeMusicController.setBlocked(
-                active || heroTrailerController.isPlaying || isLiveTVDestinationActive
-            )
-        }
         .onChange(of: playRequest != nil) { _, videoStarting in
-            if videoStarting {
-                themeMusicController.stop()
-            }
             // Full-screen playback suspends the ambient hero in place; dismissing
             // the player resumes the same trailer/timeline instead of restarting.
             heroTrailerController.setPaused(videoStarting)
         }
         .onChange(of: heroBackgroundModel.settings, initial: true) { _, settings in
-            // Theme music is a DETAIL-page concern; keep the legacy theme-music
-            // controller's enabled state mirrored from the detail mode.
-            themeMusicModel.settings.isEnabled = settings.themeMusicEnabled
             // Stop the shared trailer player only when NEITHER surface wants a
             // trailer; otherwise leave it to the active hero view. Mute is a live
             // session state on the controller, so it isn't touched here.
             if !settings.homeTrailerEnabled && !settings.detailTrailerEnabled {
                 heroTrailerController.stop()
             }
-            themeMusicController.setBlocked(
-                audioController.hasActivePlayback
-                    || heroTrailerController.isPlaying
-                    || isLiveTVDestinationActive
-            )
-        }
-        .onChange(of: heroTrailerController.isPlaying) { _, playing in
-            themeMusicController.setBlocked(
-                audioController.hasActivePlayback || playing || isLiveTVDestinationActive
-            )
         }
         .onChange(of: activeDestinationKey) {
-            themeMusicController.stop()
+            themeMusicController.fadeOutAndStop()
             heroTrailerController.stop()
-            themeMusicController.setBlocked(
-                audioController.hasActivePlayback || isLiveTVDestinationActive
-            )
         }
         .environment(musicPlayerModel)
         .environment(uiDensityModel)
@@ -1990,37 +2016,26 @@ struct MainTabView: View {
     }
 
     @MainActor
-    private func reloadLibrariesFromCurrentScope() async {
-        libraryReloadRevision += 1
-        let revision = libraryReloadRevision
+    private func reloadLibrariesFromCurrentScope(changedAccountID: String? = nil) async {
+        let navigation = navigationStyleModel
+        let authorizationID = accountsProviders.liveTVAuthorizationID
         let scopedAccounts = currentAccounts()
-        librariesStore.beginRefresh(
-            accountIDs: Set(scopedAccounts.map(\.account.id))
+        if !railLibraries.isEmpty { railLibrariesLoaded = true }
+        let loaded = await discovery.refreshNavigationLibraries(
+            from: scopedAccounts, navigation: navigation, settings: librariesStore,
+            changedAccountID: changedAccountID,
+            isCurrent: {
+                navigationStyleModel === navigation
+                    && accountsProviders.liveTVAuthorizationID == authorizationID
+            }
         )
-        await Task.yield()
-        let discovered = await discovery.libraryDiscovery(from: scopedAccounts)
-        guard revision == libraryReloadRevision else { return }
-        librariesStore.finishRefresh(
-            with: discovered.libraries,
-            unreachableAccountIDs: discovered.unreachableAccountIDs,
-            failures: discovered.failures
-        )
+        if loaded { railLibrariesLoaded = true }
     }
 
     @MainActor
     private func scheduleLibraryReloadFromCurrentScope(changedAccountID: String) {
-        libraryReloadRevision += 1
-        let revision = libraryReloadRevision
-        librariesStore.beginRefresh(accountIDs: [changedAccountID])
         Task { @MainActor in
-            await Task.yield()
-            let discovered = await discovery.libraryDiscovery(from: currentAccounts())
-            guard revision == libraryReloadRevision else { return }
-            librariesStore.finishRefresh(
-                with: discovered.libraries,
-                unreachableAccountIDs: discovered.unreachableAccountIDs,
-                failures: discovered.failures
-            )
+            await reloadLibrariesFromCurrentScope(changedAccountID: changedAccountID)
         }
     }
 

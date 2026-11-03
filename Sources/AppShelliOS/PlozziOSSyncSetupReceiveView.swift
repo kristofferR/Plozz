@@ -106,7 +106,7 @@ struct PlozziOSSyncSetupReceiveView: View {
                 Text("Setup didn’t finish").font(.title3.bold())
                 Text(message).foregroundStyle(palette.secondaryText)
                     .multilineTextAlignment(.center)
-                if sourceInvite?.isUsable() != false {
+                if sourceInvite == nil {
                     Button("Try Again") {
                         Task {
                             await model.startReceiving(
@@ -209,6 +209,7 @@ struct PlozziOSSyncSetupReceiveView: View {
             guard !didApply else { return }
             didApply = true
             let outcome = appModel.applyReceivedSetup(received, restrictToAccountID: requestedServer?.id)
+            model.recordApplication(outcome)
             // For a per-server request, success means that one server actually
             // signed in. For a whole-device transfer, success means at least one
             // credential stuck (the existing gate).

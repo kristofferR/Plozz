@@ -1,11 +1,13 @@
 import CoreModels
 
 public enum PlayerVersionSelection {
-    public static func item(opened: MediaItem, resolved: MediaItem?) -> MediaItem {
+    public static func item(
+        opened: MediaItem, resolved: MediaItem?, authoritativeVersions: Bool = false
+    ) -> MediaItem {
         guard let resolved, resolved.id == opened.id, resolved.kind == opened.kind,
               resolved.sourceAccountID == nil || resolved.sourceAccountID == opened.sourceAccountID else { return opened }
         var item = opened
-        if !resolved.versions.isEmpty {
+        if authoritativeVersions || !resolved.versions.isEmpty {
             item.versions = resolved.versions
             for index in item.sources.indices
             where item.sources[index].accountID == item.sourceAccountID
@@ -19,7 +21,9 @@ public enum PlayerVersionSelection {
     public static func versions(for item: MediaItem) -> [MediaVersion] {
         DetailPlaybackSelection.versions(
             for: item, sources: item.sources, activeAccountID: item.sourceAccountID
-        ).filter { $0.sourceAccountID == nil || $0.sourceAccountID == item.sourceAccountID }
+        ).filter {
+            !$0.isExternalSource && ($0.sourceAccountID == nil || $0.sourceAccountID == item.sourceAccountID)
+        }
     }
 
     public static func isSelected(_ version: MediaVersion, item: MediaItem, mediaSourceID: String?) -> Bool {
@@ -29,11 +33,11 @@ public enum PlayerVersionSelection {
                 || (mediaSourceID == nil && version.isDefault))
     }
 
-    public static func selecting(_ id: String, in item: MediaItem) -> MediaItem? {
+    public static func selecting(_ id: String, in item: MediaItem, explicit: Bool = true) -> MediaItem? {
         guard versions(for: item).contains(where: { $0.id == id }) else { return nil }
         return DetailPlaybackSelection.playItem(
             for: item, sources: item.sources, activeAccountID: item.sourceAccountID,
-            versionID: id, explicit: true
+            versionID: id, explicit: explicit
         )
     }
 

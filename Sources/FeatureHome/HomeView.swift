@@ -26,6 +26,8 @@ public final class HomeHeroRuntimeState {
     var cachedDisabledLibraryKeys: Set<String> = []
     var hasHydratedCache = false
     var externalRefreshRevision = 0
+    var identityIndexRevision = 0
+    var requestStatusContext: String?
     /// The Random source's retained draw, so a background recomputation reuses the
     /// titles already on screen instead of re-shuffling every library on every
     /// connected server. See ``HeroRandomRollStore``.
@@ -65,6 +67,28 @@ public final class HomeHeroRuntimeState {
 
     public init() {}
 
+    func synchronizeRequestContext(_ context: String) {
+        guard requestStatusContext != context else { return }
+        items = HeroDiscoveryStatus.clearingRequestStatus(in: items)
+        cachedItems = HeroDiscoveryStatus.clearingRequestStatus(in: cachedItems)
+        requestStatusContext = context
+    }
+
+    func resetForLibraryVisibility(
+        disabledKeys: Set<String>, cached: [MediaItem], settings: HeroSettings?, requestContext: String
+    ) {
+        let previous = items
+        let sameRequestContext = requestStatusContext == requestContext
+        resetForSourceScopeChange()
+        hasHydratedCache = true
+        cachedDisabledLibraryKeys = disabledKeys
+        cachedItems = HeroDiscoveryStatus.retainingRequestStatus(
+            in: cached, from: previous, sameRequestContext: sameRequestContext
+        )
+        cachedKey = HeroConfigurationKey(settings: settings)
+        requestStatusContext = requestContext
+    }
+
     public func resetForSourceScopeChange() {
         items = []
         completedKey = nil
@@ -80,6 +104,8 @@ public final class HomeHeroRuntimeState {
         sourceEligibility = .unrestricted
         supportingSourceIndex.reset()
         externalRefreshRevision &+= 1
+        identityIndexRevision = 0
+        requestStatusContext = nil
         scopeRevision &+= 1
     }
 
@@ -129,16 +155,29 @@ final class HomeNavigationActivity {
     }
 }
 
+public enum HomeBrowseDestination: Hashable {
+    case row(HomeRowBrowseModel)
+    case watchlist
+
+    @MainActor
+    public func push(onto path: Binding<NavigationPath>, chrome: NavigationChromeModel? = nil) {
+        chrome?.setStackDepth(path.wrappedValue.count + 1)
+        path.wrappedValue.append(self)
+    }
+}
+
 /// The Home screen: an optional cinematic **hero** carousel followed by
 /// Continue Watching, Latest, and library shortcuts.
 public struct HomeView: View {
     @Environment(\.homeLiveTVSnapshot) private var liveTV
+    @Environment(LibraryPresentationSettingsModel.self) private var libraryPresentation: LibraryPresentationSettingsModel?
     @State private var viewModel: HomeViewModel
     private var visibility: HomeLibraryVisibilityModel
     private let spoilerSettings: SpoilerSettings
     private let onSelectItem: (MediaItem) -> Void
     private let onPlayItem: (MediaItem) -> Void
     private let onSelectLibrary: (MediaLibrary) -> Void
+    private let onBrowse: (HomeBrowseDestination) -> Void
     /// Servers added to the device, and how many this profile has switched on.
     /// Both are needed to tell "no servers yet" from "all of them turned off".
     private let configuredServerCount: Int
@@ -154,7 +193,7 @@ public struct HomeView: View {
     private var carouselSettings: HeroSettings? {
         guard let settings = heroSettings?.effectiveSettings else { return nil }
         #if os(tvOS)
-        if settings.followsFocus { return nil }
+        if settings.style == .followsFocus { return nil }
         #endif
         return settings
     }
@@ -169,7 +208,7 @@ public struct HomeView: View {
 
     static func curationSettings(for settings: HeroSettings?) -> HeroSettings? {
         #if os(tvOS)
-        if let settings, settings.followsFocus {
+        if let settings, settings.style == .followsFocus {
             guard settings.showsDiscoverRow else { return nil }
             var discover = settings
             discover.isEnabled = true
@@ -185,11 +224,13 @@ public struct HomeView: View {
     /// viewer sits on it. `nil` disables polling (previews, hosts with no shares).
     private let onPollShares: () -> Void
     @State private var navigationActivity = HomeNavigationActivity()
+    @State private var featuredTrailers = FeaturedTrailerCoordinator()
     private let heroTrailerResolver: HeroTrailerResolving
     private let heroIsFrontmost: Bool
     private let heroCurator: HeroCurator
     private let heroFeaturedProvider: FeaturedContentProviding
     private let heroDiscoveryProvider: HeroDiscoveryContentProviding?
+    private let heroIdentityRevision: @Sendable () -> Int
     private let heroRequestIdentity: @MainActor (MediaItem) -> Bool
     /// Lightweight Seerr-only status polling. Kept separate from the curated
     /// provider so the 30-second CTA refresh never repeats live watch-state lookups.
@@ -274,6 +315,8 @@ public struct HomeView: View {
     @Environment(\.mediaItemActionHandler) private var mediaItemActionHandler
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.locale) private var locale
+    @Environment(\.seasonRequestContextID) private var seasonRequestContextID
+    @Environment(NavigationStyleSettingsModel.self) private var navigation: NavigationStyleSettingsModel?
 
     public init(
         viewModel: HomeViewModel,
@@ -288,6 +331,7 @@ public struct HomeView: View {
         heroCurator: HeroCurator = HeroCurator(),
         heroFeaturedProvider: @escaping FeaturedContentProviding = HeroFeaturedProvider.none,
         heroDiscoveryProvider: HeroDiscoveryContentProviding? = nil,
+        heroIdentityRevision: @escaping @Sendable () -> Int = { 0 },
         heroRequestIdentity: @escaping @MainActor (MediaItem) -> Bool = { _ in true },
         heroFeaturedStatusProvider: HeroFeaturedStatusProviding? = nil,
         heroRandomProvider: @escaping RandomLibraryContentProviding = HeroRandomProvider.none,
@@ -312,6 +356,7 @@ public struct HomeView: View {
         onSelectItem: @escaping (MediaItem) -> Void,
         onPlayItem: @escaping (MediaItem) -> Void,
         onSelectLibrary: @escaping (MediaLibrary) -> Void,
+        onBrowse: @escaping (HomeBrowseDestination) -> Void,
         configuredServerCount: Int = 1,
         enabledServerCount: Int = 1
     ) {
@@ -328,6 +373,7 @@ public struct HomeView: View {
         self.heroCurator = heroCurator
         self.heroFeaturedProvider = heroFeaturedProvider
         self.heroDiscoveryProvider = heroDiscoveryProvider
+        self.heroIdentityRevision = heroIdentityRevision
         self.heroRequestIdentity = heroRequestIdentity
         self.heroFeaturedStatusProvider = heroFeaturedStatusProvider ?? { items in
             await heroFeaturedProvider(items.count)
@@ -354,6 +400,7 @@ public struct HomeView: View {
         self.onSelectItem = onSelectItem
         self.onPlayItem = onPlayItem
         self.onSelectLibrary = onSelectLibrary
+        self.onBrowse = onBrowse
         self.configuredServerCount = configuredServerCount
         self.enabledServerCount = enabledServerCount
         if !heroRuntime.hasHydratedCache {
@@ -368,6 +415,14 @@ public struct HomeView: View {
     }
 
     public var body: some View {
+        GeometryReader { geometry in
+            screen
+                .environment(\.mediaRowHeaderTrailingInset,
+                             navigationStyle == .rail ? geometry.safeAreaInsets.trailing : 0)
+        }
+    }
+
+    private var screen: some View {
         let _ = PlozzBodyRate.tick("HomeView")
         return ContentStateView(
             state: HomePresentationRow.displayState(
@@ -382,21 +437,23 @@ public struct HomeView: View {
                             .first { $0.kind == .continueWatching }?.count ?? 0
                     )
                 } else {
-                    HomeSkeletonView(layout: viewModel.skeletonLayout, heroActive: carouselSettings?.isActive ?? false, continueWatchingShowsSeriesArtwork: visibility.continueWatchingShowsSeriesArtwork)
+                    HomeSkeletonView(
+                        layout: viewModel.skeletonLayout, heroActive: carouselSettings?.isActive ?? false,
+                        continueWatchingShowsSeriesArtwork: visibility.continueWatchingUsesSeriesArtwork,
+                        continueWatchingLayout: visibility.continueWatchingLayout
+                    )
                 }
             }
         ) { content in
             // The screen is a data-driven list of rows. Both this loaded view and
             // the skeleton render from the same ordered `HomeRow`/`HomeRowKind`
-            // structure, which keeps them 1:1 and makes the order the single thing
-            // a future row-customization feature edits. `HomeRow.rows` also applies
-            // per-library Home-visibility to *every* row's items (not just the
-            // Libraries tiles), so a hidden library's content is suppressed
-            // app-wide; passing the reactive `isVisible` here keeps toggles taking
-            // effect on the next render even before any re-fetch settles.
+            // structure. Discovery follows live library visibility; global
+            // viewing history remains account-wide.
             let rows = HomeRow.rows(
                 for: content,
+                libraryOrder: navigation?.libraryOrderingKeys ?? [],
                 isLibraryVisible: { visibility.isVisible($0) },
+                isLibraryTileVisible: visibility.isVisibleOnHome,
                 isGlobalRowEnabled: { visibility.visibility.isGlobalRowEnabled($0) },
                 includesEmptyWatchlist:
                     viewModel.watchlistLoadingPlaceholderCount > 0,
@@ -405,7 +462,8 @@ public struct HomeView: View {
                 skeletonLayout: viewModel.skeletonLayout
             )
             let presentationRows = HomePresentationRow.resolve(
-                rows: rows, content: content, visibility: visibility.visibility, liveTV: liveTV
+                rows: rows, content: content, visibility: visibility.visibility, liveTV: liveTV,
+                presentation: libraryPresentation?.settings ?? .default
             )
             let heroContent = HomeHeroLaunchPolicy.content(
                 content,
@@ -426,6 +484,8 @@ public struct HomeView: View {
                 settings: curationSettings,
                 randomLibraries: randomLibraries,
                 externalRefreshRevision: heroRuntime.externalRefreshRevision,
+                identityIndexRevision: heroRuntime.identityIndexRevision,
+                requestContextID: seasonRequestContextID,
                 freshnessRevision: heroRuntime.freshnessRefresh.revision,
                 watchlistMembershipRevision: watchlistIntentRevision,
                 disabledLibraryKeys: visibility.visibility.disabledKeys,
@@ -486,8 +546,9 @@ public struct HomeView: View {
                     focusHeroHome(
                         rows: rows, content: content, settings: focusHeroSettings,
                         discoverItems: displayHeroItems,
+                        showsFeaturedHero: heroSlotState != .hidden,
                         discoverState: HomeHeroSlotState.resolve(
-                            isConfigured: focusHeroSettings.showsDiscoverRow,
+                            isConfigured: focusHeroSettings.style == .followsFocus && focusHeroSettings.showsDiscoverRow,
                             hasItems: !displayHeroItems.isEmpty,
                             recomputeComplete: heroRuntime.completedKey == heroRecomputeKey
                         )
@@ -619,10 +680,11 @@ public struct HomeView: View {
                                             rowView(
                                                 row,
                                                 reservesLoadingFocus: !heroLayoutActive
-                                                    && presentation.id == presentationRows.first?.id
+                                                    && presentation.id == presentationRows.first?.id,
+                                                onBrowse: browseAction(for: presentation)
                                             )
                                         case let .library(row):
-                                            libraryRowView(row)
+                                            libraryRowView(row, onBrowse: browseAction(for: presentation))
                                         case let .liveTV(channels):
                                             MediaRowView(
                                                 title: Text("Live TV"), items: [], style: .landscape,
@@ -663,6 +725,7 @@ public struct HomeView: View {
                         }
                         // Never clip a focused card's lift, shadow or border.
                         .scrollClipDisabled()
+                        .scrollsTopNavigation { heroRecedeModel.isReceded = false }
                         // Drive the recede off the SCROLL, observed as a BOOL so this fires
                         // ONLY when the threshold is crossed — never on every scroll frame.
                         // (The old per-frame CGFloat capture wrote @State each frame, forcing
@@ -739,14 +802,14 @@ public struct HomeView: View {
             await heroRuntime.freshnessRefresh.runWhileVisible()
         }
         .onChange(of: visibility.visibility.disabledKeys) { _, disabled in
-            heroRuntime.resetForSourceScopeChange()
-            heroRuntime.hasHydratedCache = true
-            heroRuntime.cachedDisabledLibraryKeys = disabled
-            if let settings = curationSettings,
-               let cached = viewModel.cachedHeroItems(for: settings) {
-                heroRuntime.cachedItems = cached
-                heroRuntime.cachedKey = HeroConfigurationKey(settings: settings)
-            }
+            let cached = curationSettings.flatMap { viewModel.cachedHeroItems(for: $0) } ?? []
+            heroRuntime.resetForLibraryVisibility(
+                disabledKeys: disabled, cached: cached, settings: curationSettings,
+                requestContext: seasonRequestContextID
+            )
+        }
+        .onChange(of: seasonRequestContextID) { _, context in
+            heroRuntime.synchronizeRequestContext(context)
         }
         .task(id: visibility.visibility.intent) {
             // First appearance loads; thereafter any change to the visibility
@@ -843,6 +906,7 @@ public struct HomeView: View {
             // burst on a multi-server boot — debounce to a single fold.
             let refreshAsyncHistory = shouldRefreshAsyncWatchHistory
             viewModel.scheduleReenrich {
+                heroRuntime.identityIndexRevision = heroIdentityRevision()
                 if refreshAsyncHistory {
                     heroRuntime.externalRefreshRevision &+= 1
                 }
@@ -856,6 +920,8 @@ public struct HomeView: View {
             }
         }
         .onAppear {
+            heroRuntime.identityIndexRevision = heroIdentityRevision()
+            heroRuntime.synchronizeRequestContext(seasonRequestContextID)
             MainThreadStallProbe.context = "home"
             if homePerfOverlayEnabled || HomePerfDiagnostics.isStdoutMirrorEnabled {
                 perfSampler.start()
@@ -892,12 +958,15 @@ public struct HomeView: View {
                     group.sections.map { HomeRowChoice(section: $0, library: group.library) }
                 }
             let rows = HomeRow.rows(
-                for: content, isLibraryVisible: visibility.isVisible,
+                for: content, libraryOrder: navigation?.libraryOrderingKeys ?? [],
+                isLibraryVisible: visibility.isVisible,
+                isLibraryTileVisible: visibility.isVisibleOnHome,
                 isGlobalRowEnabled: visibility.isGlobalRowEnabled,
                 loadingRows: viewModel.loadingRows, failures: viewModel.rowFailures
             )
             if HomePresentationRow.resolve(
-                rows: rows, content: content, visibility: visibility.visibility, liveTV: liveTV
+                rows: rows, content: content, visibility: visibility.visibility, liveTV: liveTV,
+                presentation: libraryPresentation?.settings ?? .default
             ).isEmpty, visibility.visibility.rowSections(choices: choices).enabled.isEmpty {
                 return .noHomeRows
             }
@@ -1010,6 +1079,8 @@ public struct HomeView: View {
         // artwork. On-device profiling showed the full re-curate cost 2–8.5s and drove
         // the main-thread hitches while browsing; reusing the loaded set avoids the
         // network re-fetch, the artwork re-decode, and the hero's visual rebuild.
+        // Discovery identity changes must take the full verification path, not
+        // watch-history enrichment of the previously unverified source list.
         if let completed = heroRuntime.completedKey,
            completed != key,
            completed.matchesIgnoringExternalRefresh(key),
@@ -1025,7 +1096,7 @@ public struct HomeView: View {
                 content: content, randomLibraries: randomLibraries,
                 candidates: refreshed, supportingCandidates: heroRuntime.candidatePool
             )
-            let refreshedLineup = focusHeroSettings != nil ? HeroLiveMerge.merge(
+            let refreshedLineup = settings.style == .followsFocus ? HeroLiveMerge.merge(
                 showing: heroRuntime.items, fresh: refreshed, limit: settings.maxItems,
                 preservesLineup: true, sourceEligibility: sourceEligibility
             ).items : refreshed
@@ -1033,7 +1104,7 @@ public struct HomeView: View {
                 refreshedLineup,
                 settings: settings,
                 watchMutations: durable + heroRuntime.watchMutations,
-                preservesLineup: focusHeroSettings != nil,
+                preservesLineup: settings.style == .followsFocus,
                 sourceEligibility: sourceEligibility
             )
             heroRuntime.sourceEligibility = sourceEligibility
@@ -1205,7 +1276,7 @@ public struct HomeView: View {
             supportingCandidates: updatedPool
         )
         let current: [MediaItem]
-        if focusHeroSettings != nil, !onScreen.isEmpty {
+        if settings.style == .followsFocus, !onScreen.isEmpty {
             let refreshed = await heroWatchStateRefresher(onScreen)
             guard !Task.isCancelled else { return }
             current = HeroLiveMerge.merge(
@@ -1219,7 +1290,7 @@ public struct HomeView: View {
             current,
             settings: settings,
             watchMutations: durableWatchMutations + heroRuntime.watchMutations,
-            preservesLineup: focusHeroSettings != nil
+            preservesLineup: settings.style == .followsFocus
         )
         let merge = HeroLiveMerge.merge(
             showing: showing,
@@ -1229,12 +1300,14 @@ public struct HomeView: View {
             misses: foldsIntoLoadedSet ? heroRuntime.retainedMisses : [:],
             freshIsAuthoritative: freshIsAuthoritative,
             preservesPinnedItems: true,
-            preservesLineup: focusHeroSettings != nil,
+            preservesLineup: settings.style == .followsFocus,
+            preservesRequestStatus: heroRuntime.requestStatusContext == seasonRequestContextID,
             sourceEligibility: sourceEligibility
         )
         heroRuntime.sourceEligibility = sourceEligibility
         heroRuntime.retainedMisses = merge.misses
         if merge.items != heroRuntime.items { heroRuntime.items = merge.items }
+        heroRuntime.requestStatusContext = seasonRequestContextID
         heroRuntime.cachedItems = []
         heroRuntime.cachedKey = nil
         heroRuntime.completedKey = key
@@ -1250,7 +1323,7 @@ public struct HomeView: View {
             viewModel.clearCachedHeroItems()
         } else {
             viewModel.cacheHeroCandidatePool(
-                durablePool, for: settings, preservingUnseen: focusHeroSettings != nil
+                durablePool, for: settings, preservingUnseen: settings.style == .followsFocus
             )
         }
         let elapsedMS = Int(Date().timeIntervalSince(started) * 1_000)
@@ -1270,7 +1343,7 @@ public struct HomeView: View {
     /// hero item **in place**, so the featured CTA tracks the server
     /// (Request → "Downloading n%" → Play) as downloads start and finish.
     ///
-    /// Deliberately surgical: it mutates only those two fields on items whose id
+    /// Deliberately surgical: it mutates only request status fields on items whose id
     /// still matches a fresh featured result, never changing the array's contents
     /// order or any item's id. That's what guarantees the hero carousel doesn't
     /// re-seat, re-wipe its backdrop, restart its dwell, or move focus — only the
@@ -1285,7 +1358,7 @@ public struct HomeView: View {
             },
             settings: curationSettings,
             isConfigured: heroSeerConnected,
-            contextID: String(heroRuntime.scopeRevision),
+            contextID: "\(seasonRequestContextID)|\(heroRuntime.scopeRevision)",
             scopeID: ObjectIdentifier(heroRuntime)
         )
     }
@@ -1301,6 +1374,7 @@ public struct HomeView: View {
             guard !Task.isCancelled, key == heroStatusRefreshKey else { return }
             let updated = HeroDiscoveryStatus.merging(fresh, into: heroRuntime.items)
             if updated != heroRuntime.items { heroRuntime.items = updated }
+            heroRuntime.requestStatusContext = seasonRequestContextID
             try? await Task.sleep(for: Self.featuredRefreshInterval)
         }
     }
@@ -1309,26 +1383,46 @@ public struct HomeView: View {
     /// whether selecting a card plays it or opens its detail) is exactly what the
     /// view used inline before the row model existed.
     @ViewBuilder
-    private func rowView(_ row: HomeRow, reservesLoadingFocus: Bool = false) -> some View {
+    private func rowView(
+        _ row: HomeRow, reservesLoadingFocus: Bool = false, onBrowse: (() -> Void)? = nil
+    ) -> some View {
         if let failure = row.failure, row.items.isEmpty, row.libraries.isEmpty,
            row.kind != .continueWatching || liveTV.recentChannels.isEmpty {
-            rowFailureView(title: Text(row.title), error: failure)
+            rowFailureView(
+                title: Text(row.title), error: failure,
+                report: row.kind == .continueWatching
+                    ? viewModel.continueWatchingDiagnostic.map(PlaybackDiagnosticReport.library) : nil
+            )
         } else {
-            homeRowContent(row, reservesLoadingFocus: reservesLoadingFocus)
+            homeRowContent(row, reservesLoadingFocus: reservesLoadingFocus, onBrowse: onBrowse)
         }
     }
 
+    private func browseAction(for row: HomePresentationRow) -> (() -> Void)? {
+        guard row.canBrowse else { return nil }
+        if row.id == .global(.watchlist) { return { onBrowse(.watchlist) } }
+        return { onBrowse(.row(viewModel.browseRow(row))) }
+    }
+
     @ViewBuilder
-    private func homeRowContent(_ row: HomeRow, reservesLoadingFocus: Bool) -> some View {
+    private func homeRowContent(
+        _ row: HomeRow, reservesLoadingFocus: Bool, onBrowse: (() -> Void)?
+    ) -> some View {
         switch row.kind {
         case .continueWatching:
             MediaRowView(
-                title: Text(row.title), items: row.items, style: posterStyle(row.style),
-                spoilerSettings: spoilerSettings, showsSeriesArtwork: visibility.continueWatchingShowsSeriesArtwork,
+                title: Text(row.title), items: row.items, style: visibility.continueWatchingLayout.cardStyle,
+                spoilerSettings: spoilerSettings, showsSeriesArtwork: visibility.continueWatchingUsesSeriesArtwork,
                 loadingPlaceholderCount: row.loadingPlaceholderCount,
-                reservesLoadingFocus: reservesLoadingFocus, playsOnSelect: true,
-                liveChannels: liveTV.recentChannels, onSelect: onPlayItem
+                reservesLoadingFocus: reservesLoadingFocus,
+                playsOnSelect: row.playsOnSelect(continueWatchingAction: visibility.continueWatchingAction),
+                showsResumeChip: true,
+                liveChannels: liveTV.recentChannels,
+                onPlay: onPlayItem,
+                onSelect: row.playsOnSelect(continueWatchingAction: visibility.continueWatchingAction)
+                    ? onPlayItem : onSelectItem
             )
+            .browsingRow(row.items.isEmpty ? nil : onBrowse)
             .environment(\.plozzArtworkArea, .continueWatching)
         case .watchlist:
             MediaRowView(
@@ -1345,6 +1439,7 @@ public struct HomeView: View {
                 reservesLoadingFocus: reservesLoadingFocus,
                 onSelect: onSelectItem
             )
+            .browsingRow(row.items.isEmpty ? nil : onBrowse)
         case .recentlyAdded:
             MediaRowView(
                 title: Text(row.title), items: row.items, style: posterStyle(row.style),
@@ -1352,6 +1447,7 @@ public struct HomeView: View {
                 reservesLoadingFocus: reservesLoadingFocus,
                 onSelect: onSelectItem
             )
+            .browsingRow(row.items.isEmpty ? nil : onBrowse)
         case .libraries:
             if row.loadingPlaceholderCount > 0 {
                 HomeSkeletonRowView(row: HomeRowLayout(kind: .libraries, count: row.loadingPlaceholderCount))
@@ -1362,17 +1458,17 @@ public struct HomeView: View {
     }
 
     private func rowFailureView(
-        title: Text, error: AppError, onFocusEntered: (() -> Void)? = nil
+        title: Text, error: AppError, report: PlaybackDiagnosticReport? = nil,
+        onFocusEntered: (() -> Void)? = nil
     ) -> some View {
-        VStack(alignment: .leading, spacing: metrics.sectionTitleSpacing) {
-            title
-                .font(.system(size: metrics.sectionHeaderFontSize, weight: .bold))
-                .padding(.horizontal, PlozzTheme.Metrics.screenPadding)
-            ContentStateView<Bool, EmptyView>(
-                state: .failed(error),
-                onRetry: { Task { await viewModel.load(showLoadingState: false) } }
-            ) { _ in EmptyView() }
-            .frame(height: metrics.posterHeight)
+        MediaRowSection(title: title, insetsContent: true) {
+            MediaRowStatusContent(message: error.userMessage, symbol: "exclamationmark.triangle") {
+                EmptyView()
+            } actions: {
+                ContentFailureActions(report: report) {
+                    Task { await viewModel.load(showLoadingState: false) }
+                }
+            }
             .disabled(viewModel.isRefreshing)
         }
         .background {
@@ -1396,9 +1492,9 @@ public struct HomeView: View {
         #endif
     }
 
-    private enum FocusHomeRowSource {
-        case home(HomeRow)
-        case section(HomeLibrarySectionGroup.Row)
+    enum FocusHomeRowSource {
+        case home(HomeRow, HomePresentationRow?)
+        case section(HomeLibrarySectionGroup.Row, HomePresentationRow)
         case liveTV([HomeLiveTVChannel])
         case discover([MediaItem], isLoading: Bool)
         case notice(HomeContentNotice)
@@ -1412,8 +1508,8 @@ public struct HomeView: View {
         discoverItems: [MediaItem],
         discoverState: HomeHeroSlotState
     ) -> [(row: FocusHeroRow, source: FocusHomeRowSource)] {
-        let seriesArtwork = visibility.continueWatchingShowsSeriesArtwork
-        func entry(_ row: HomeRow) -> (row: FocusHeroRow, source: FocusHomeRowSource) {
+        let seriesArtwork = visibility.continueWatchingUsesSeriesArtwork
+        func entry(_ row: HomeRow, presentation: HomePresentationRow) -> (row: FocusHeroRow, source: FocusHomeRowSource) {
             (
                 FocusHeroRow(
                     id: "home-\(row.kind)",
@@ -1422,6 +1518,7 @@ public struct HomeView: View {
                     items: row.items,
                     isPlaceholder: row.loadingPlaceholderCount > 0,
                     cardArtwork: row.style == .landscape
+                        && !(row.kind == .continueWatching && visibility.continueWatchingLayout == .portrait)
                         ? { PosterCardView.leadingLandscapeArtwork(
                             for: $0, showsSeriesArtwork: seriesArtwork,
                             prefersTextlessArtwork: artworkSettings.prefersTextlessArtwork(in: .continueWatching)
@@ -1429,15 +1526,16 @@ public struct HomeView: View {
                         : nil,
                     liveChannels: row.kind == .continueWatching ? liveTV.recentChannels : []
                 ),
-                .home(row)
+                .home(row, presentation)
             )
         }
         var result: [(row: FocusHeroRow, source: FocusHomeRowSource)] = []
         for presentation in HomePresentationRow.resolve(
-            rows: rows, content: content, visibility: visibility.visibility, liveTV: liveTV
+            rows: rows, content: content, visibility: visibility.visibility, liveTV: liveTV,
+            presentation: libraryPresentation?.settings ?? .default
         ) {
             switch presentation.source {
-            case let .home(row): result.append(entry(row))
+            case let .home(row): result.append(entry(row, presentation: presentation))
             case let .liveTV(channels):
                 result.append((
                     FocusHeroRow(
@@ -1458,7 +1556,7 @@ public struct HomeView: View {
                             ? { PosterCardView.leadingLandscapeArtwork(for: $0, showsSeriesArtwork: false) }
                             : nil
                     ),
-                    .section(row)
+                    .section(row, presentation)
                 ))
             }
         }
@@ -1499,7 +1597,9 @@ public struct HomeView: View {
                 settings: settings,
                 spoilerSettings: spoilerSettings,
                 navigationStyle: navigationStyle,
-                isFrontmost: heroIsFrontmost
+                isFrontmost: heroIsFrontmost,
+                featuredHero: settings.style == .heroShowcase && settings.hasFeaturedHero
+                    ? { _ in AnyView(HomeHeroSkeletonView()) } : nil
             ) { row, _ in
                 // Redacted rows draw their names as skeleton pills at a real
                 // title's exact height.
@@ -1507,8 +1607,8 @@ public struct HomeView: View {
                     MediaRowView(
                         title: Text(verbatim: "Continue Watching"),
                         items: [],
-                        style: .landscape,
-                        showsSeriesArtwork: visibility.continueWatchingShowsSeriesArtwork,
+                        style: visibility.continueWatchingLayout.cardStyle,
+                        showsSeriesArtwork: visibility.continueWatchingUsesSeriesArtwork,
                         loadingPlaceholderCount: continueWatchingCount > 0 ? continueWatchingCount : 8,
                         onSelect: { _ in }
                     )
@@ -1539,6 +1639,7 @@ public struct HomeView: View {
         content: HomeViewModel.Content,
         settings: HeroSettings,
         discoverItems: [MediaItem],
+        showsFeaturedHero: Bool,
         discoverState: HomeHeroSlotState
     ) -> some View {
         #if os(tvOS)
@@ -1558,7 +1659,15 @@ public struct HomeView: View {
             spoilerSettings: spoilerSettings,
             navigationStyle: navigationStyle,
             isFrontmost: heroIsFrontmost,
-            enrich: heroMetadataEnricher
+            enrich: heroMetadataEnricher,
+            featuredHero: settings.style == .heroShowcase && settings.hasFeaturedHero
+                && showsFeaturedHero
+                ? { suspended in
+                    AnyView(showcaseFeaturedHero(
+                        items: discoverItems, settings: settings, suspended: suspended,
+                        content: content
+                    ))
+                } : nil
         ) { row, reporter in
             if let source = sources[row.id] {
                 focusHomeRowView(
@@ -1571,9 +1680,46 @@ public struct HomeView: View {
         #endif
     }
 
+    #if os(tvOS)
+    @ViewBuilder
+    private func showcaseFeaturedHero(
+        items: [MediaItem], settings: HeroSettings, suspended: Bool, content: HomeViewModel.Content
+    ) -> some View {
+        if items.isEmpty {
+            HomeHeroSkeletonView()
+                .contentShape(Rectangle())
+                .focusable(true)
+                .prefersDefaultFocus(true, in: heroFocusScope)
+                .focusEffectDisabled()
+                .accessibilityLabel("Loading Home content")
+                .focusScope(heroFocusScope)
+        } else {
+            HomeHeroView(
+                items: items, settings: settings, backgroundSettings: heroBackground.settings,
+                trailerController: heroTrailerController, trailerResolver: heroTrailerResolver,
+                isFrontmost: heroIsFrontmost, spoilerSettings: spoilerSettings,
+                navigationStyle: navigationStyle,
+                watchlistedKeys: Set(content.watchlist.map {
+                    HomeHeroView.watchlistKey(accountID: $0.sourceAccountID, itemID: $0.id)
+                }),
+                focusScope: heroFocusScope, onSelect: onSelectItem, onPlay: onPlayItem,
+                seerConnected: heroSeerConnected, canRequestDiscoveryItem: heroRequestIdentity,
+                onRequest: onRequestItem, requestAvailability: onRequestAvailability,
+                onRequestSeasons: onRequestSeasonsItem,
+                onPinnedItemsChanged: { heroRuntime.pinnedItemIDs = $0 },
+                onTrailerReturnItemChanged: { heroRuntime.trailerReturnItemID = $0 },
+                onItemExposed: { viewModel.recordHeroExposure($0) },
+                exposureScopeID: ObjectIdentifier(viewModel),
+                recedeModel: heroRecedeModel, showcaseSuspended: suspended
+            )
+            .focusScope(heroFocusScope)
+        }
+    }
+    #endif
+
     /// The same rows as ``rowView(_:)``, reporting focus to the hero.
     @ViewBuilder
-    private func focusHomeRowView(
+    func focusHomeRowView(
         _ source: FocusHomeRowSource, reporter: FocusHeroRowReporter, reservesLoadingFocus: Bool
     ) -> some View {
         let onFocusChange: (MediaItem?) -> Void = { item in
@@ -1587,29 +1733,39 @@ public struct HomeView: View {
                 liveChannels: channels, onLiveChannelFocused: reporter.focusedLiveChannel,
                 onSelect: { _ in }
             )
-        case .home(let row):
+        case .home(let row, let presentation):
+            let onBrowse = presentation.flatMap { browseAction(for: $0) }
             if let failure = row.failure, row.items.isEmpty, row.libraries.isEmpty,
                row.kind != .continueWatching || liveTV.recentChannels.isEmpty {
-                rowFailureView(title: Text(row.title), error: failure, onFocusEntered: reporter.entered)
+                rowFailureView(
+                    title: Text(row.title), error: failure,
+                    report: row.kind == .continueWatching
+                        ? viewModel.continueWatchingDiagnostic.map(PlaybackDiagnosticReport.library) : nil,
+                    onFocusEntered: reporter.entered
+                )
             } else {
                 switch row.kind {
                 case .continueWatching:
                     MediaRowView(
                         title: Text(row.title),
                         items: row.items,
-                        style: posterStyle(row.style),
+                        style: visibility.continueWatchingLayout.cardStyle,
                         spoilerSettings: spoilerSettings,
-                        showsSeriesArtwork: visibility.continueWatchingShowsSeriesArtwork,
+                        showsSeriesArtwork: visibility.continueWatchingUsesSeriesArtwork,
                         onFocusEntered: reporter.entered,
                         onFocusChange: onFocusChange,
                         onCardFocused: reporter.cardFocused,
                         loadingPlaceholderCount: row.loadingPlaceholderCount,
                         reservesLoadingFocus: reservesLoadingFocus,
-                        playsOnSelect: true,
+                        playsOnSelect: row.playsOnSelect(continueWatchingAction: visibility.continueWatchingAction),
+                        showsResumeChip: true,
                         liveChannels: liveTV.recentChannels,
                         onLiveChannelFocused: reporter.focusedLiveChannel,
-                        onSelect: onPlayItem
+                        onPlay: onPlayItem,
+                        onSelect: row.playsOnSelect(continueWatchingAction: visibility.continueWatchingAction)
+                            ? onPlayItem : onSelectItem
                     )
+                    .browsingRow(row.items.isEmpty ? nil : onBrowse)
                     .environment(\.plozzArtworkArea, .continueWatching)
                 case .watchlist:
                     MediaRowView(
@@ -1629,6 +1785,7 @@ public struct HomeView: View {
                         reservesLoadingFocus: reservesLoadingFocus,
                         onSelect: onSelectItem
                     )
+                    .browsingRow(row.items.isEmpty ? nil : onBrowse)
                 case .recentlyAdded:
                     MediaRowView(
                         title: Text(row.title),
@@ -1642,6 +1799,7 @@ public struct HomeView: View {
                         reservesLoadingFocus: reservesLoadingFocus,
                         onSelect: onSelectItem
                     )
+                    .browsingRow(row.items.isEmpty ? nil : onBrowse)
                 case .libraries:
                     if row.loadingPlaceholderCount > 0 {
                         HomeSkeletonRowView(row: HomeRowLayout(kind: .libraries, count: row.loadingPlaceholderCount))
@@ -1674,9 +1832,15 @@ public struct HomeView: View {
                 reservesLoadingFocus: reservesLoadingFocus,
                 onSelect: onSelectItem
             )
-        case .section(let row):
+        case .section(let row, let presentation):
+            let onBrowse = browseAction(for: presentation)
             let section = row.section
-            if let failure = row.failure {
+            let playsOnSelect = row.browseItem == nil && section.style == .landscape
+                && !CollectionCoverLayout.isCollectionGroup(section.items)
+            if let issue = row.issue {
+                sectionStatusView(issue, browseItem: row.browseItem)
+                    .background { NativeFocusRegionObserver(onFocusEntered: reporter.entered) }
+            } else if let failure = row.failure {
                 rowFailureView(
                     title: section.displayName, error: failure, onFocusEntered: reporter.entered
                 )
@@ -1691,9 +1855,11 @@ public struct HomeView: View {
                     onCardFocused: reporter.cardFocused,
                     loadingPlaceholderCount: row.isLoading ? 8 : 0,
                     reservesLoadingFocus: reservesLoadingFocus,
-                    playsOnSelect: section.style == .landscape,
-                    onSelect: section.style == .landscape ? onPlayItem : onSelectItem
+                    playsOnSelect: playsOnSelect,
+                    onSeeAll: row.browseItem.map { item in { onSelectItem(item) } },
+                    onSelect: playsOnSelect ? onPlayItem : onSelectItem
                 )
+                .browsingRow(row.isLoading ? nil : onBrowse)
             }
         }
     }
@@ -1737,10 +1903,16 @@ public struct HomeView: View {
     /// browse entry points into each library's full grid. Poster rows open detail
     /// on select; a landscape row plays — matching the merged rows' behaviour.
     @ViewBuilder
-    private func libraryRowView(_ row: HomeLibrarySectionGroup.Row) -> some View {
+    func libraryRowView(_ row: HomeLibrarySectionGroup.Row, onBrowse: (() -> Void)?) -> some View {
             let section = row.section
-            if let failure = row.failure {
+            let playsOnSelect = row.browseItem == nil && section.style == .landscape
+                && !CollectionCoverLayout.isCollectionGroup(section.items)
+            if let issue = row.issue {
+                sectionStatusView(issue, browseItem: row.browseItem)
+            } else if let failure = row.failure {
                 rowFailureView(title: section.displayName, error: failure)
+            } else if row.collectionCardStyle == .featured, !row.isLoading {
+                featuredRow(row, onBrowse: onBrowse)
             } else {
                 MediaRowView(
                     title: section.displayName,
@@ -1748,10 +1920,35 @@ public struct HomeView: View {
                     style: cardStyle(section.style),
                     spoilerSettings: spoilerSettings,
                     loadingPlaceholderCount: row.isLoading ? 8 : 0,
-                    playsOnSelect: section.style == .landscape,
-                    onSelect: section.style == .landscape ? onPlayItem : onSelectItem
+                    playsOnSelect: playsOnSelect,
+                    onSeeAll: row.browseItem.map { item in { onSelectItem(item) } },
+                    onSelect: playsOnSelect ? onPlayItem : onSelectItem
                 )
+                .browsingRow(row.isLoading ? nil : onBrowse)
         }
+    }
+
+    private func featuredRow(
+        _ row: HomeLibrarySectionGroup.Row, onBrowse: (() -> Void)?,
+        onFocus: ((MediaItem) -> Void)? = nil
+    ) -> some View {
+        FeaturedMediaRow(
+            title: row.section.displayName, items: row.section.items,
+            scope: ObjectIdentifier(viewModel),
+            coordinator: featuredTrailers, controller: heroTrailerController,
+            settings: heroBackground.settings, resolver: heroTrailerResolver,
+            isActive: heroIsFrontmost, spoilers: spoilerSettings, onFocus: onFocus,
+            onSeeAll: row.browseItem.map { item in { onSelectItem(item) } },
+            onSelect: onSelectItem
+        )
+        .browsingRow(onBrowse)
+    }
+
+    private func sectionStatusView(_ issue: HomeSectionIssue, browseItem: MediaItem?) -> some View {
+        HomeSectionStatusRow(issue: issue, onSeeAll: browseItem.map { item in { onSelectItem(item) } }) {
+            Task { await viewModel.load(showLoadingState: false) }
+        }
+        .disabled(viewModel.isRefreshing)
     }
 
     private func librariesRow(
@@ -1814,6 +2011,8 @@ struct HeroRecomputeKey: Equatable {
     /// ``HeroConfigurationKey``.
     let configuration: HeroConfigurationKey
     let externalRefreshRevision: Int
+    let identityIndexRevision: Int
+    let requestContextID: String
     let freshnessRevision: Int
     let watchlistMembershipRevision: Int
     let disabledLibraryKeys: Set<String>
@@ -1825,6 +2024,8 @@ struct HeroRecomputeKey: Equatable {
         settings: HeroSettings?,
         randomLibraries: [HeroRandomLibrary],
         externalRefreshRevision: Int = 0,
+        identityIndexRevision: Int = 0,
+        requestContextID: String = "",
         freshnessRevision: Int = 0,
         watchlistMembershipRevision: Int = 0,
         disabledLibraryKeys: Set<String> = [],
@@ -1864,6 +2065,9 @@ struct HeroRecomputeKey: Equatable {
             } : []
         self.externalRefreshRevision = settings?.requiresExternalWatchHistory == true
             ? externalRefreshRevision : 0
+        self.identityIndexRevision = settings?.requiresDiscoveryVerification == true
+            ? identityIndexRevision : 0
+        self.requestContextID = settings?.requiresDiscoveryVerification == true ? requestContextID : ""
         self.freshnessRevision = activeSources.isEmpty ? 0 : freshnessRevision
         self.watchlistMembershipRevision = activeSources.contains(.watchlist) ? watchlistMembershipRevision : 0
         self.disabledLibraryKeys = activeSources.isEmpty ? [] : disabledLibraryKeys
@@ -1886,6 +2090,8 @@ struct HeroRecomputeKey: Equatable {
             && maxItems == other.maxItems
             && hideWatched == other.hideWatched
             && configuration == other.configuration
+            && identityIndexRevision == other.identityIndexRevision
+            && requestContextID == other.requestContextID
             && freshnessRevision == other.freshnessRevision
             && watchlistMembershipRevision == other.watchlistMembershipRevision
             && disabledLibraryKeys == other.disabledLibraryKeys
@@ -1981,7 +2187,7 @@ enum HomeHeroDisplayResolver {
                 runtime.items,
                 settings: settings,
                 watchMutations: watchMutations,
-                preservesLineup: settings?.followsFocus == true,
+                preservesLineup: settings?.style == .followsFocus,
                 sourceEligibility: sourceEligibility
             )
             if !reconciled.isEmpty { return reconciled }
@@ -1996,7 +2202,7 @@ enum HomeHeroDisplayResolver {
             runtime.cachedItems,
             settings: settings,
             watchMutations: watchMutations,
-            preservesLineup: settings.followsFocus,
+            preservesLineup: settings.style == .followsFocus,
             sourceEligibility: sourceEligibility
         )
     }
@@ -2256,6 +2462,8 @@ struct LibraryCardView: View {
     @Environment(\.themePalette) private var palette
     @Environment(\.plozzReduceTransparency) private var reduceTransparency
     @Environment(\.plozzMetrics) private var metrics
+    @Environment(\.plozzCardCaptionSettings) private var captions
+    @Environment(\.plozzCardCaptionIsShowcase) private var isShowcase
     /// Per-profile card presentation, so a Home "Libraries" tile switches between
     /// the framed glass card and the borderless "Posters" look with every other
     /// card on Home.
@@ -2302,6 +2510,7 @@ struct LibraryCardView: View {
                     ? ProviderBrandMark.brandTint(aggregated.providerKind) : nil,
                 providerKind: aggregated.providerKind,
                 mediaShareTransport: aggregated.transportKind,
+                showsCaption: captions.showsLabels(in: .homeLibraries, isShowcase: isShowcase),
                 focus: $isFocused,
                 action: action
             ) {
@@ -2333,35 +2542,9 @@ struct LibraryCardView: View {
                 .clipShape(RoundedRectangle(cornerRadius: PlozzTheme.Metrics.mediumMediaCornerRadius, style: .continuous))
                 .plozzMediaEdge(cornerRadius: PlozzTheme.Metrics.mediumMediaCornerRadius)
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: PlozzTheme.Spacing.small) {
-                    ProviderBrandMark(
-                        provider: aggregated.providerKind, size: metrics.cardTitleFontSize,
-                        mediaShareTransport: aggregated.transportKind
-                    )
-                    .environment(\.settingsRowIsFocused, surfaceFocused)
-                    .accessibilityHidden(true)
-                    PlozzMarqueeText(
-                        text: aggregated.library.displayName,
-                        font: .system(size: metrics.cardTitleFontSize, weight: .semibold),
-                        color: titleColor,
-                        inset: 0,
-                        fadeWidth: metrics.landscapeCaptionInset * PlozzTheme.Metrics.marqueeFadeRatio,
-                        isFocused: isFocused
-                    )
-                }
-                .padding(.horizontal, metrics.landscapeCaptionInset)
-                PlozzMarqueeText(
-                    text: Text(subtitle.isEmpty ? " " : subtitle),
-                    font: .system(size: metrics.cardSubtitleFontSize),
-                    color: subtitleColor,
-                    inset: metrics.landscapeCaptionInset,
-                    isFocused: isFocused
-                )
-                .opacity(subtitle.isEmpty ? 0 : 1)
+            if captions.showsLabels(in: .homeLibraries, isShowcase: isShowcase) {
+                framedCaption
             }
-            .padding(.bottom, metrics.landscapeCaptionInset)
-            .frame(width: metrics.landscapeWidth, alignment: .leading)
         }
         .padding(metrics.cardInset)
         .plozzGlassCard(cornerRadius: metrics.landscapeCardCornerRadius, isFocused: surfaceFocused)
@@ -2376,6 +2559,38 @@ struct LibraryCardView: View {
                        accessibilityLabel: aggregated.library.displayName(in: locale), accessibilityValue: subtitle,
                        action: action)
         .plozzCardFocusTransition(isFocused: isFocused)
+    }
+
+    private var framedCaption: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: PlozzTheme.Spacing.small) {
+                ProviderBrandMark(
+                    provider: aggregated.providerKind, size: metrics.cardTitleFontSize,
+                    mediaShareTransport: aggregated.transportKind
+                )
+                .environment(\.settingsRowIsFocused, surfaceFocused)
+                .accessibilityHidden(true)
+                PlozzMarqueeText(
+                    text: aggregated.library.displayName,
+                    font: .system(size: metrics.cardTitleFontSize, weight: .semibold),
+                    color: titleColor,
+                    inset: 0,
+                    fadeWidth: metrics.landscapeCaptionInset * PlozzTheme.Metrics.marqueeFadeRatio,
+                    isFocused: isFocused
+                )
+            }
+            .padding(.horizontal, metrics.landscapeCaptionInset)
+            PlozzMarqueeText(
+                text: Text(subtitle.isEmpty ? " " : subtitle),
+                font: .system(size: metrics.cardSubtitleFontSize),
+                color: subtitleColor,
+                inset: metrics.landscapeCaptionInset,
+                isFocused: isFocused
+            )
+            .opacity(subtitle.isEmpty ? 0 : 1)
+        }
+        .padding(.bottom, metrics.landscapeCaptionInset)
+        .frame(width: metrics.landscapeWidth, alignment: .leading)
     }
 
     /// The borderless ("Posters") Libraries tile: the library artwork with no glass
@@ -2399,16 +2614,18 @@ struct LibraryCardView: View {
                     isFocused: isFocused
                 )
 
-            BorderlessCardCaption(
-                title: aggregated.library.displayName,
-                subtitle: subtitle.isEmpty ? nil : subtitle,
-                horizontalInset: metrics.landscapeCaptionInset,
-                isFocused: isFocused,
-                providerKind: aggregated.providerKind,
-                mediaShareTransport: aggregated.transportKind
-            )
-            .frame(width: width)
-            .offset(y: focusStyle.usesSystemEffect || isFocused ? 0 : -push)
+            if captions.showsLabels(in: .homeLibraries, isShowcase: isShowcase) {
+                BorderlessCardCaption(
+                    title: aggregated.library.displayName,
+                    subtitle: subtitle.isEmpty ? nil : subtitle,
+                    horizontalInset: metrics.landscapeCaptionInset,
+                    isFocused: isFocused,
+                    providerKind: aggregated.providerKind,
+                    mediaShareTransport: aggregated.transportKind
+                )
+                .frame(width: width)
+                .offset(y: focusStyle.usesSystemEffect || isFocused ? 0 : -push)
+            }
         }
         .padding(.horizontal, metrics.borderlessCardSideMargin)
         .focusableCard(isFocused: $isFocused, cornerRadius: metrics.landscapeCardCornerRadius,

@@ -47,11 +47,15 @@ public struct PlayerClockTimes {
         end = endTime.map(endLabel)
         // Reserve both day periods and two hour digits so a clock rollover cannot
         // move the touch scrubber, including while its labels show the seek target.
-        let sizingFormat = Date.FormatStyle(date: .omitted, time: .shortened, locale: locale, timeZone: .gmt)
-        currentWidthSamples = [11, 23].map {
-            Date(timeIntervalSince1970: Double($0 * 3_600 + 59 * 60)).formatted(sizingFormat)
-        }
+        currentWidthSamples = Self.clockWidthSamples(locale: locale)
         endWidthSamples = currentWidthSamples.map(endLabel)
+    }
+
+    static func clockWidthSamples(locale: Locale) -> [String] {
+        let format = Date.FormatStyle(date: .omitted, time: .shortened, locale: locale, timeZone: .gmt)
+        return [11, 23].map {
+            Date(timeIntervalSince1970: Double($0 * 3_600 + 59 * 60)).formatted(format)
+        }
     }
 }
 

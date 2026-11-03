@@ -1,5 +1,37 @@
 import SwiftUI
 
+public struct NoStreamsButtonLabel: View {
+    let isLoading: Bool
+    let onLight: Bool
+    let fitsAvailableWidth: Bool
+
+    public init(isLoading: Bool, onLight: Bool, fitsAvailableWidth: Bool = false) {
+        self.isLoading = isLoading
+        self.onLight = onLight
+        self.fitsAvailableWidth = fitsAvailableWidth
+    }
+
+    public var body: some View {
+        HStack(spacing: 8) {
+            Group {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(onLight ? .black : .white)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                }
+            }
+            .frame(width: 20, height: 20)
+            Text("No streams found")
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+        }
+        .fixedSize(horizontal: !fitsAvailableWidth, vertical: true)
+        .accessibilityHint("Try again")
+    }
+}
+
 /// The thin watched-progress bar shown inside a Play/Resume button, between the
 /// play glyph and the "… left" line. Its colours flip with the button's
 /// light/dark background — dark ink on a light (focused/selected) button, light
@@ -138,8 +170,10 @@ public struct PlayResumeButtonLabel: View {
     /// width-constrained caller can request a shorter form to avoid wrapping.
     public var resumeTrailingStyle: ResumeTrailingStyle
     public var isPlaceholder: Bool
+    public var isLoading: Bool
     public var separatesEpisodeText: Bool
     public var wrapsText: Bool
+    public var systemImage: String
 
     /// Supplies the default bar height, which tracks the reader's text size.
     @Environment(\.plozzMetrics) private var metrics
@@ -155,8 +189,10 @@ public struct PlayResumeButtonLabel: View {
         barHeight: CGFloat? = nil,
         resumeTrailingStyle: ResumeTrailingStyle = .full,
         isPlaceholder: Bool = false,
+        isLoading: Bool = false,
         separatesEpisodeText: Bool = false,
-        wrapsText: Bool = false
+        wrapsText: Bool = false,
+        systemImage: String = "play.fill"
     ) {
         self.title = title
         self.progress = progress
@@ -168,8 +204,10 @@ public struct PlayResumeButtonLabel: View {
         self.barHeight = barHeight
         self.resumeTrailingStyle = resumeTrailingStyle
         self.isPlaceholder = isPlaceholder
+        self.isLoading = isLoading
         self.separatesEpisodeText = separatesEpisodeText
         self.wrapsText = wrapsText
+        self.systemImage = systemImage
     }
 
     /// The in-progress fraction that switches the label to the resume form: a
@@ -224,7 +262,7 @@ public struct PlayResumeButtonLabel: View {
 
     private var placeholderContent: some View {
         HStack(spacing: spacing) {
-            Image(systemName: "play.fill")
+            playIcon
             Text(title)
                 .lineLimit(1)
                 .hidden()
@@ -249,7 +287,7 @@ public struct PlayResumeButtonLabel: View {
 
     private var resolvedStack: some View {
         HStack(spacing: spacing) {
-            Image(systemName: "play.fill")
+            playIcon
             if let resumeProgress {
                 ResumeProgressCapsule(
                     progress: resumeProgress,
@@ -270,5 +308,9 @@ public struct PlayResumeButtonLabel: View {
                     .fixedSize(horizontal: false, vertical: wrapsText)
             }
         }
+    }
+
+    private var playIcon: some View {
+        ActionProgressIcon(systemName: systemImage, isLoading: isLoading, onLight: onLight)
     }
 }

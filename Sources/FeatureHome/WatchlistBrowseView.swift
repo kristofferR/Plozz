@@ -18,6 +18,10 @@ public struct WatchlistBrowseView: View {
     @Environment(\.mediaItemActionHandler) private var mediaItemActionHandler
     @Environment(\.plozzMetrics) private var metrics
     @Environment(\.plozzNavigationContentInset) private var navigationContentInset
+    #if os(tvOS)
+    @Namespace private var entryFocusScope
+    @State private var hasResolvedEntryFocus = false
+    #endif
 
     public init(
         viewModel: HomeViewModel,
@@ -32,24 +36,52 @@ public struct WatchlistBrowseView: View {
     }
 
     public var body: some View {
-        ContentStateView(
-            state: viewModel.state,
-            emptyMessage: "Your Watchlist is empty.",
-            onRetry: { Task { await viewModel.load() } },
-            loadingContent: {
-                watchlistContent(
-                    [],
-                    loadingPlaceholderCount:
-                        max(metrics.posterColumns.count * 2, 6)
-                )
+        @Bindable var browse = viewModel.watchlistBrowse
+        ScrollView(.vertical) {
+            LazyVStack(alignment: .leading, spacing: metrics.sectionTitleSpacing) {
+                HStack {
+                    Text("Watchlist")
+                        .font(.largeTitle.bold())
+                        .accessibilityIdentifier("watchlist-title")
+                    Spacer(minLength: PlozzTheme.Spacing.large)
+                    WatchlistBrowseControls(preferences: $browse.preferences)
+                        #if os(tvOS)
+                        .disabled(awaitsGridEntry)
+                        #endif
+                }
+                .padding(.leading, contentLeadingPadding)
+                .padding(.trailing, HomeLayout.horizontalPadding)
+                .focusSection()
+
+                ContentStateView(
+                    state: viewModel.state,
+                    emptyMessage: "Your Watchlist is empty.",
+                    onRetry: { Task { await viewModel.load() } },
+                    loadingContent: {
+                        watchlistContent(
+                            [],
+                            loadingPlaceholderCount: max(metrics.posterColumns.count * 2, 6)
+                        )
+                    }
+                ) { content in
+                    watchlistContent(
+                        content.watchlist,
+                        loadingPlaceholderCount: viewModel.watchlistLoadingPlaceholderCount
+                    )
+                }
             }
-        ) { content in
-            watchlistContent(
-                content.watchlist,
-                loadingPlaceholderCount:
-                    viewModel.watchlistLoadingPlaceholderCount
-            )
+            .padding(.top, PlozzTheme.Spacing.large)
         }
+        .scrollClipDisabled()
+        .scrollsTopNavigation()
+        #if os(tvOS)
+        .focusScope(entryFocusScope)
+        .background {
+            NativeFocusRegionObserver(isEnabled: !hasResolvedEntryFocus && !awaitsGridEntry) {
+                hasResolvedEntryFocus = true
+            }
+        }
+        #endif
         .environment(\.plozzCardCaptionView, .watchlist)
         .task(id: visibility) {
             await viewModel.loadIfNeeded(for: visibility)
@@ -99,55 +131,67 @@ public struct WatchlistBrowseView: View {
         _ items: [MediaItem],
         loadingPlaceholderCount: Int
     ) -> some View {
-        if items.isEmpty, loadingPlaceholderCount == 0 {
-            ContentUnavailableView {
-                Label("Your Watchlist is empty", systemImage: "bookmark")
-            } description: {
-                Text("Add a movie or show from Plozz or any connected Watchlist.")
+        let filteredItems = viewModel.watchlistBrowse.preferences.items(from: items)
+        if filteredItems.isEmpty, loadingPlaceholderCount == 0 {
+            WatchlistEmptyStateView(isFiltered: !items.isEmpty) {
+                viewModel.watchlistBrowse.preferences.filter = .all
             }
         } else {
-            ScrollView(.vertical) {
-                LazyVStack(
-                    alignment: .leading,
-                    spacing: metrics.sectionTitleSpacing
-                ) {
-                    WatchlistBrowseHeader()
-                        .padding(.leading, contentLeadingPadding)
-                        .padding(.trailing, HomeLayout.horizontalPadding)
-
-                    LazyVGrid(
-                        columns: metrics.posterColumns,
-                        spacing: metrics.gridSpacing
-                    ) {
-                        ForEach(MediaRowView.presentationElements(
-                            items: items,
-                            loadingPlaceholderCount: loadingPlaceholderCount
-                        )) { element in
-                            switch element {
-                            case .item(let item):
-                                PosterCardView(
-                                    item: item,
-                                    style: .poster,
-                                    spoilerSettings: spoilerSettings,
-                                    isPendingRemoval: isPendingRemoval(item)
-                                ) {
-                                    onSelect(item)
-                                }
-                            case .loadingPlaceholder:
-                                SkeletonCardView(style: .poster)
-                            }
+            LazyVGrid(columns: metrics.posterColumns, spacing: metrics.gridSpacing) {
+                ForEach(MediaRowView.presentationElements(
+                    items: filteredItems,
+                    loadingPlaceholderCount: loadingPlaceholderCount
+                )) { element in
+                    switch element {
+                    case .item(let item):
+                        PosterCardView(
+                            item: item,
+                            style: .poster,
+                            spoilerSettings: spoilerSettings,
+                            isPendingRemoval: isPendingRemoval(item)
+                        ) {
+                            onSelect(item)
                         }
+                        .navigationEntryFocus(.content)
+                        #if os(tvOS)
+                        .disabled(!hasResolvedEntryFocus && item.stablePresentationID != filteredItems.first?.stablePresentationID)
+                        .prefersDefaultFocus(
+                            !hasResolvedEntryFocus && item.stablePresentationID == filteredItems.first?.stablePresentationID,
+                            in: entryFocusScope
+                        )
+                        #endif
+                    case .loadingPlaceholder:
+                        SkeletonCardView(style: .poster)
                     }
-                    .padding(.leading, contentLeadingPadding)
-                    .padding(.trailing, HomeLayout.horizontalPadding)
-                    .padding(.bottom, PlozzTheme.Metrics.screenVerticalPadding)
-                    .focusSection()
                 }
-                .padding(.top, PlozzTheme.Spacing.large)
             }
-            .scrollClipDisabled()
+            .padding(.leading, contentLeadingPadding)
+            .padding(.trailing, HomeLayout.horizontalPadding)
+            .padding(.bottom, PlozzTheme.Metrics.screenVerticalPadding)
+            .focusSection()
+            .accessibilityIdentifier("watchlist-grid")
+            #if os(tvOS)
+            .background {
+                NativeFocusRegionObserver(isEnabled: !hasResolvedEntryFocus) { hasResolvedEntryFocus = true }
+            }
+            #endif
         }
     }
+
+    #if os(tvOS)
+    private var awaitsGridEntry: Bool {
+        guard !hasResolvedEntryFocus else { return false }
+        switch viewModel.state {
+        case .idle, .loading:
+            return true
+        case let .loaded(content):
+            return viewModel.watchlistLoadingPlaceholderCount > 0
+                || !viewModel.watchlistBrowse.preferences.items(from: content.watchlist).isEmpty
+        case .empty, .failed:
+            return false
+        }
+    }
+    #endif
 
     private var contentLeadingPadding: CGFloat {
         HomeLayout.horizontalPadding
@@ -163,10 +207,4 @@ public struct WatchlistBrowseView: View {
     }
 }
 
-private struct WatchlistBrowseHeader: View {
-    var body: some View {
-        Text("Watchlist")
-            .font(.largeTitle.bold())
-    }
-}
 #endif

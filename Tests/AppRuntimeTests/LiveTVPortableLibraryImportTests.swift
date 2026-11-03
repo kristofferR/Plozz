@@ -381,7 +381,7 @@ final class LiveTVPortableLibraryImportTests: XCTestCase {
         XCTAssertEqual(bridge.statuses[profileID], .unavailable)
     }
 
-    func testExportPreparationReusesOnlyAnExactlyMatchingValidatedInput() async throws {
+    func testExportPreparationReusesOnlyMatchingSnapshotInputsAndKeepsDefinitionEdits() async throws {
         let builds = PortableExportBuilds()
         let worker = LiveTVPortableLibraryPreparation(makeExport: builds.make)
         let (snapshot, definition) = try library(profileID: "profile")
@@ -401,10 +401,12 @@ final class LiveTVPortableLibraryImportTests: XCTestCase {
         paused.isEnabled = false
         let edited = try await worker.prepare(definitions: [paused], snapshots: [changed])
         XCTAssertEqual(edited.state.definitions, [paused])
-        XCTAssertEqual(builds.count, 3)
+        XCTAssertEqual(edited.state.snapshots, [changed])
+        XCTAssertEqual(updated.state.definitions, [definition])
+        XCTAssertEqual(builds.count, 2, "A definition edit must not re-encode unchanged snapshot inputs.")
         await worker.discardExport()
         _ = try await worker.prepare(definitions: [paused], snapshots: [changed])
-        XCTAssertEqual(builds.count, 4)
+        XCTAssertEqual(builds.count, 3)
     }
 
     func testImmutableInputsStayPinnedDuringConcurrentRetentionUntilDefinitionCommit() async throws {

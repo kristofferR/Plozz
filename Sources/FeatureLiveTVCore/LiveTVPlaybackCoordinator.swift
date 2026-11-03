@@ -78,6 +78,7 @@ public final class LiveTVPlaybackCoordinator {
         let channel: LiveTVPrototypeChannel
         let reference: LiveTVServerChannelReference?
         let origin: LiveTVGuideRowID?
+        let expandsPlayer: Bool
     }
 
     public init(
@@ -150,7 +151,8 @@ public final class LiveTVPlaybackCoordinator {
     @discardableResult
     public func watch(
         _ channelID: String,
-        origin: LiveTVGuideRowID? = nil
+        origin: LiveTVGuideRowID? = nil,
+        expandsPlayer: Bool = true
     ) -> Task<Bool, Never> {
         cancelWatch()
         guard isActive, isInteractionActive, let channel = model.channel(id: channelID) else {
@@ -159,8 +161,25 @@ public final class LiveTVPlaybackCoordinator {
         cancelPreviewPreparation()
         suppressedPreviewChannelID = nil
         return beginWatch(Target(
-            channel: channel, reference: reference(channelID), origin: origin
+            channel: channel, reference: reference(channelID), origin: origin, expandsPlayer: expandsPlayer
         ))
+    }
+
+    /// Expands the retained preview without entering another preparation state.
+    @discardableResult
+    public func expandPreview(presentationID: UUID, preparedID: UUID) -> Bool {
+        guard isInteractionActive, ownsPlayerPresentation(presentationID),
+              preparation.current?.id == preparedID else { return false }
+        validateAuthorization()
+        guard let current = preparation.current, current.id == preparedID,
+              authorizes(current.channel, current.serverReference) else { return false }
+        cancelWatch()
+        cancelPreviewPreparation()
+        suppressedPreviewChannelID = nil
+        preview.watch(current.channel.id, origin: preview.watchOrigin)
+        acceptedWatchID = UUID()
+        synchronizePlayerState()
+        return preview.isExpanded
     }
 
     /// Explicit recovery only. A stale alert never stops a replacement stream.
@@ -389,7 +408,9 @@ public final class LiveTVPlaybackCoordinator {
                     target.channel, serverReference: target.reference, isAuthorized: authorized,
                     commit: { [weak self] in
                         guard accepts(), let self else { return false }
-                        self.preview.watch(target.channel.id, origin: target.origin)
+                        self.preview.watch(
+                            target.channel.id, origin: target.origin, expandsPlayer: target.expandsPlayer
+                        )
                         guard !self.model.tuneFailed else {
                             self.model.clearTuneFailure()
                             return false

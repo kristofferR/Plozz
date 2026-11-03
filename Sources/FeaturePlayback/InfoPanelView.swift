@@ -53,6 +53,26 @@ struct InfoPanelView: View {
     }
 
     @Environment(\.playerCardMetrics) private var metrics
+    @Environment(\.playerControlForeground) private var foreground
+    @Environment(\.playerUsesNativeGlass) private var nativeGlass
+    @Environment(\.themePalette) private var palette
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var badgePalette: ThemePalette {
+        #if os(iOS)
+        nativeGlass ? .dark : palette
+        #else
+        palette
+        #endif
+    }
+
+    private var badgeColorScheme: ColorScheme {
+        #if os(iOS)
+        nativeGlass ? .dark : colorScheme
+        #else
+        colorScheme
+        #endif
+    }
 
     let model: PlayerControlsModel
     let actions: PlayerOptionsActions
@@ -119,11 +139,7 @@ struct InfoPanelView: View {
         // leave a well of empty glass under it.
         .modifier(PlayerCardHeight(metrics: metrics))
         .frame(maxWidth: .infinity, alignment: .leading)
-        .modifier(PanelGlassBackground(cornerRadius: metrics.panelCornerRadius))
-        // Playback stays dark even when browsing is light; badges read the
-        // custom palette independently of SwiftUI's color scheme.
-        .environment(\.themePalette, .dark)
-        .environment(\.colorScheme, .dark)
+        .modifier(PanelGlassBackground(cornerRadius: metrics.panelCornerRadius, mediaGlass: true))
     }
 
     /// The phone card: no thumbnail, and the three columns folded into rows.
@@ -215,13 +231,13 @@ struct InfoPanelView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(model.infoCard.headline.isEmpty ? "Now Playing" : model.infoCard.headline)
                 .font(metrics.titleFont)
-                .foregroundStyle(.white)
+                .foregroundStyle(foreground)
                 .fixedSize(horizontal: false, vertical: true)
 
             if !model.infoCard.overview.isEmpty {
                 Text(model.infoCard.overview)
                     .font(metrics.bodyFont)
-                    .foregroundStyle(.white.opacity(0.82))
+                    .foregroundStyle(foreground.opacity(0.82))
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -235,7 +251,7 @@ struct InfoPanelView: View {
             if !line.isEmpty {
                 Text(line)
                     .font(metrics.captionFont)
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(foreground.opacity(0.6))
                     .lineLimit(1)
                     // Holds its size, like the badges beside it — see the note at
                     // the call site.
@@ -243,6 +259,8 @@ struct InfoPanelView: View {
             }
             if includingBadges, !model.infoCard.badges.isEmpty {
                 MediaBadgeRow(badges: model.infoCard.badges)
+                    .environment(\.themePalette, badgePalette)
+                    .environment(\.colorScheme, badgeColorScheme)
             }
             Spacer(minLength: 0)
         }
@@ -261,14 +279,16 @@ struct InfoPanelView: View {
                 metaRow(includingBadges: false, includingRelease: false)
                 if model.infoCard.badges.isEmpty {
                     Text("Reading stream details…")
-                        .font(metrics.captionFont).foregroundStyle(.white.opacity(0.6))
+                        .font(metrics.captionFont).foregroundStyle(foreground.opacity(0.6))
                 } else {
                     WrappingHStackLayout(spacing: 10 * metrics.badgeScale, lineSpacing: 6) {
                         Text("Transcoded")
                             .font(metrics.captionFont)
-                            .foregroundStyle(.white.opacity(0.6))
+                            .foregroundStyle(foreground.opacity(0.6))
                         ForEach(model.infoCard.badges) { badge in
                             MediaBadgeChip(badge: badge)
+                                .environment(\.themePalette, badgePalette)
+                                .environment(\.colorScheme, badgeColorScheme)
                         }
                     }
                 }
@@ -289,7 +309,7 @@ struct InfoPanelView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(model.infoCard.headline.isEmpty ? "Now Playing" : model.infoCard.headline)
                     .font(metrics.titleFont)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(foreground)
                     .lineLimit(2)
                     .truncationMode(.tail)
                 if !model.infoCard.overview.isEmpty {
@@ -318,7 +338,7 @@ struct InfoPanelView: View {
                     // leave room, and truncating to one when it isn't.
                     Text(model.infoCard.overview)
                         .font(metrics.bodyFont)
-                        .foregroundStyle(.white.opacity(0.82))
+                        .foregroundStyle(foreground.opacity(0.82))
                         // Four lines now that the card is 40pt taller. Still a
                         // cap rather than a reservation — see the note above.
                         .lineLimit(metrics.overviewLineLimit)
@@ -442,17 +462,24 @@ struct InfoPanelView: View {
             // and text colours — applied OUTSIDE this scope — change instantly.
             .animation(.easeOut(duration: 0.2), value: isFocused)
         }
+        #if os(iOS)
+        .playerTouchPanelAction()
+        .accessibilityAddTraits(prominent ? .isSelected : [])
+        #else
         .buttonStyle(InfoActionButtonStyle(
             focused: isFocused,
             prominent: prominent,
             hPadding: metrics.actionHPadding,
             vPadding: metrics.actionVPadding
         ))
+        #endif
+        .accessibilityLabel(Text(title))
         .focused($focus, equals: slot)
     }
 }
 
 private struct PlayerInfoArtwork: View {
+    @Environment(\.playerControlForeground) private var foreground
     let urls: [URL]
     let item: MediaItem?
     let policy: ArtworkPresentationPolicy
@@ -476,11 +503,11 @@ private struct PlayerInfoArtwork: View {
                     variant: .landscapeCard, artworkPolicy: policy,
                     asyncFallbackURL: fallback, pinIdentity: item?.stablePresentationID
                 ) {
-                    Rectangle().fill(Color.white.opacity(0.08))
+                    Rectangle().fill(foreground.opacity(0.08))
                         .overlay(
                             Image(systemName: "photo")
                                 .font(.system(size: 34, weight: .regular))
-                                .foregroundStyle(.white.opacity(0.28))
+                                .foregroundStyle(foreground.opacity(0.28))
                         )
                 }
             }

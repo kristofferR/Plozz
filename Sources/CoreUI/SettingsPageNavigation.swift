@@ -55,7 +55,7 @@ public final class SettingsPageNavigation<Route: Hashable> {
     public private(set) var returnSourceID: UUID?
     public private(set) var returnGeneration = 0
     fileprivate var entryPageID: UUID?
-    fileprivate var isTransitioning = false
+    public private(set) var isTransitioning = false
     public var animationsEnabled = true
     private var transitionGeneration = 0
 
@@ -124,6 +124,14 @@ public final class SettingsPageNavigation<Route: Hashable> {
         returnGeneration = 0
     }
 
+    fileprivate func completeFullScreenDismissal() {
+        guard pages.isEmpty, returnSourceID != nil else { return }
+        // The root cannot accept focus until the native cover has finished dismissing.
+        transitionGeneration += 1
+        isTransitioning = false
+        returnGeneration += 1
+    }
+
     private func change(isReturning: Bool, _ update: () -> Void) {
         transitionGeneration += 1
         let generation = transitionGeneration
@@ -165,8 +173,10 @@ public extension EnvironmentValues {
 public struct SettingsPageStack<Route: Hashable, Root: View, Destination: View>: View {
     let navigation: SettingsPageNavigation<Route>
     let pageWidth: CGFloat
-    let onRootBack: () -> Void
+    let onRootBack: (() -> Void)?
     let fullWidthDestination: (Route) -> Bool
+    let presentsSubpagesFullScreen: Bool
+    let onSubpagesDismiss: (() -> Void)?
     let root: () -> Root
     let destination: (Route) -> Destination
     @Environment(\.isEnabled) private var isEnabled
@@ -174,8 +184,10 @@ public struct SettingsPageStack<Route: Hashable, Root: View, Destination: View>:
 
     public init(
         navigation: SettingsPageNavigation<Route>, pageWidth: CGFloat,
-        onRootBack: @escaping () -> Void,
+        onRootBack: (() -> Void)?,
         fullWidthDestination: @escaping (Route) -> Bool = { _ in false },
+        presentsSubpagesFullScreen: Bool = false,
+        onSubpagesDismiss: (() -> Void)? = nil,
         @ViewBuilder root: @escaping () -> Root,
         @ViewBuilder destination: @escaping (Route) -> Destination
     ) {
@@ -183,6 +195,8 @@ public struct SettingsPageStack<Route: Hashable, Root: View, Destination: View>:
         self.pageWidth = pageWidth
         self.onRootBack = onRootBack
         self.fullWidthDestination = fullWidthDestination
+        self.presentsSubpagesFullScreen = presentsSubpagesFullScreen
+        self.onSubpagesDismiss = onSubpagesDismiss
         self.root = root
         self.destination = destination
     }
@@ -192,25 +206,54 @@ public struct SettingsPageStack<Route: Hashable, Root: View, Destination: View>:
             let columnSize = CGSize(width: min(pageWidth, geometry.size.width), height: geometry.size.height)
             ZStack(alignment: .topLeading) {
                 layer(id: nil, size: columnSize, viewport: geometry.size, content: root)
-                ForEach(navigation.pages) { page in
-                    layer(
-                        id: page.id,
-                        size: page.route.map(fullWidthDestination) == true ? geometry.size : columnSize,
-                        viewport: geometry.size
-                    ) {
-                        if let route = page.route {
-                            destination(route)
-                        } else {
-                            page.content
-                        }
-                    }
-                    .transition(reduceMotion ? .identity : SettingsPageMotion.transition(edge: .trailing))
+                if !presentsSubpagesFullScreen {
+                    subpages(in: geometry.size)
                 }
+            }
+        }
+        .plozzFullScreenCover(isPresented: Binding(
+            get: { presentsSubpagesFullScreen && !navigation.pages.isEmpty },
+            set: { if !$0, !navigation.pages.isEmpty { navigation.reset() } }
+        ), onDismiss: {
+            navigation.completeFullScreenDismissal()
+            onSubpagesDismiss?()
+        }) {
+            GeometryReader { geometry in
+                subpages(in: geometry.size)
+            }
+            .safeAreaPadding(.top, 36)
+            .ignoresSafeArea(.container, edges: .vertical)
+            .background {
+                SettingsPageBackground()
+                    .environment(\.settingsInWorkspace, false)
             }
         }
         .mask { Rectangle().ignoresSafeArea(.container, edges: .vertical) }
         .onChange(of: reduceMotion, initial: true) { _, value in
             navigation.animationsEnabled = !value
+        }
+    }
+
+    private func subpages(in viewport: CGSize) -> some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(navigation.pages) { page in
+                layer(
+                    id: page.id,
+                    size: CGSize(
+                        width: page.route.map(fullWidthDestination) == true
+                            ? viewport.width : min(pageWidth, viewport.width),
+                        height: viewport.height
+                    ),
+                    viewport: viewport
+                ) {
+                    if let route = page.route {
+                        destination(route)
+                    } else {
+                        page.content
+                    }
+                }
+                .transition(reduceMotion ? .identity : SettingsPageMotion.transition(edge: .trailing))
+            }
         }
     }
 
@@ -233,7 +276,7 @@ public struct SettingsPageStack<Route: Hashable, Root: View, Destination: View>:
             remove: navigation.remove,
             pop: {
                 guard navigation.pages.last?.id == id else { return }
-                id == nil ? onRootBack() : navigation.pop()
+                id == nil ? onRootBack?() : navigation.pop()
             }
         )
         return content()
@@ -249,20 +292,21 @@ public struct SettingsPageStack<Route: Hashable, Root: View, Destination: View>:
             .accessibilityElement(children: interactive ? .contain : .ignore)
             .accessibilityHidden(!interactive)
             .settingsPageVisibility(current)
-            .onExitCommand { if current { context.pop() } }
+            .onExitCommand(perform: current && (id != nil || onRootBack != nil) ? context.pop : nil)
     }
 }
 
 private struct SettingsPageEntryFocus: ViewModifier {
     let enabled: Bool
     @Environment(\.settingsPageContext) private var context
+    @Environment(SettingsSearchRequest.self) private var searchRequest: SettingsSearchRequest?
     @FocusState private var focused: Bool
 
     func body(content: Content) -> some View {
         content
             .focused($focused)
             .task(id: context?.requestsEntryFocus) {
-                guard enabled, context?.requestsEntryFocus == true else { return }
+                guard enabled, searchRequest?.revealed != false, context?.requestsEntryFocus == true else { return }
                 await Task.yield()
                 guard !Task.isCancelled else { return }
                 focused = true

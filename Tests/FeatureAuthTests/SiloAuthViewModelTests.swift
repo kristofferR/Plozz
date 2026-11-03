@@ -10,6 +10,111 @@ import XCTest
 
 @MainActor
 final class SiloAuthViewModelTests: XCTestCase {
+    func testDroppedPollRetainsCodeAndContinuesWithBackoffWithoutReportingRecoveredFailure() async throws {
+        let http = SiloOnboardingHTTP(pollFailures: [1: .serverUnreachable])
+        let diagnostics = SiloSetupDiagnostics()
+        let buffer = SiloAuthDiagnosticBuffer()
+        diagnostics.start { buffer.append($0) }
+        let model = makeModel(http, diagnostics: diagnostics)
+        defer { model.cancel() }
+        model.start()
+        try await waitForPoll(http)
+        guard case let .pairing(code, _, _, expiry) = model.phase else {
+            return XCTFail("A dropped poll must retain the active pairing")
+        }
+        XCTAssertEqual(code, "ABCD12")
+        XCTAssertNotNil(model.verificationURL)
+        XCTAssertGreaterThan(expiry, Date())
+        try await wait(timeout: 6) { if case .profiles = model.phase { return true }; return false }
+        let starts = await http.count("/api/v2/auth/device/start")
+        let pollTimes = await http.pollTimes
+        XCTAssertEqual(starts, 1)
+        XCTAssertEqual(pollTimes.count, 2)
+        if pollTimes.count == 2 {
+            XCTAssertGreaterThanOrEqual(pollTimes[1].timeIntervalSince(pollTimes[0]), 1.9)
+        }
+        XCTAssertTrue(buffer.values.isEmpty)
+    }
+
+    func testRepeatedNetworkFailuresStopAfterThreePollsAndReportTheFinalFailure() async throws {
+        let http = SiloOnboardingHTTP(pollFailures: [1: .serverUnreachable, 2: .serverUnreachable, 3: .serverUnreachable])
+        let diagnostics = SiloSetupDiagnostics()
+        let buffer = SiloAuthDiagnosticBuffer()
+        diagnostics.start { buffer.append($0) }
+        let model = makeModel(http, diagnostics: diagnostics)
+        defer { model.cancel() }
+        model.start()
+        try await wait(timeout: 12) { if case .error = model.phase { return true }; return false }
+        let polls = await http.count("/api/v2/auth/device/poll")
+        let starts = await http.count("/api/v2/auth/device/start")
+        XCTAssertEqual(polls, 3)
+        XCTAssertEqual(starts, 1)
+        XCTAssertNil(model.verificationURL)
+        XCTAssertEqual(buffer.values.count, 1)
+        XCTAssertEqual(buffer.values.first?.stage, .poll)
+        XCTAssertEqual(buffer.values.first?.reason, .network)
+    }
+
+    func testExpiryDuringPollBackoffDoesNotSendAnotherPoll() async throws {
+        let http = SiloOnboardingHTTP(expiresIn: 2, pollFailures: [1: .serverUnreachable])
+        let model = makeModel(http)
+        defer { model.cancel() }
+        model.start()
+        try await wait { model.phase == .expired }
+        let polls = await http.count("/api/v2/auth/device/poll")
+        XCTAssertEqual(polls, 1)
+        XCTAssertNil(model.verificationURL)
+    }
+
+    func testCancellationDuringPollBackoffCannotRestartPairing() async throws {
+        let http = SiloOnboardingHTTP(pollFailures: [1: .serverUnreachable])
+        let model = makeModel(http)
+        defer { model.cancel() }
+        model.start()
+        try await waitForPoll(http)
+        model.cancel()
+        try await Task.sleep(for: .seconds(3))
+        let polls = await http.count("/api/v2/auth/device/poll")
+        let starts = await http.count("/api/v2/auth/device/start")
+        XCTAssertEqual(polls, 1)
+        XCTAssertEqual(starts, 1)
+        XCTAssertEqual(model.phase, .idle)
+        XCTAssertNil(model.verificationURL)
+    }
+
+    func testConsumedOrDeniedApprovalAfterADroppedResponseRemainsTerminal() async throws {
+        for status in ["consumed", "denied"] {
+            let http = SiloOnboardingHTTP(pollStatus: status, pollFailures: [1: .serverUnreachable])
+            let model = makeModel(http)
+            defer { model.cancel() }
+            model.start()
+            try await wait(timeout: 6) {
+                if case .error = model.phase { return true }
+                return model.phase == .expired
+            }
+            if status == "consumed" { XCTAssertEqual(model.phase, .expired) }
+            let polls = await http.count("/api/v2/auth/device/poll")
+            let starts = await http.count("/api/v2/auth/device/start")
+            let profiles = await http.count("/api/v2/profiles")
+            XCTAssertEqual(polls, 2)
+            XCTAssertEqual(starts, 1)
+            XCTAssertEqual(profiles, 0)
+            XCTAssertNil(model.verificationURL)
+        }
+    }
+
+    func testRejectedAndMalformedPollsAreNotRetried() async throws {
+        for error in [AppError.unauthorized, .notFound, .decoding, .rateLimited(retryAfter: nil)] {
+            let http = SiloOnboardingHTTP(pollFailures: [1: error])
+            let model = makeModel(http)
+            defer { model.cancel() }
+            model.start()
+            try await wait { if case .error = model.phase { return true }; return false }
+            let polls = await http.count("/api/v2/auth/device/poll")
+            XCTAssertEqual(polls, 1)
+        }
+    }
+
     func testFirstPairingFailureCanRecoverInPlaceLikeReopeningSavedServer() async throws {
         let http = SiloOnboardingHTTP(failFirstStart: true)
         let diagnostics = SiloSetupDiagnostics()
@@ -281,19 +386,49 @@ final class SiloAuthViewModelTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
+    func testRejectedRecoveryRetainsTemporaryLoginForCancellationCleanup() async throws {
+        let http = SiloOnboardingHTTP()
+        let model = makeModel(http, verificationOnly: true) { _ in throw AppError.conflict }
+        defer { model.cancel() }
+        model.start()
+        try await wait { if case .profiles = model.phase { return true }; return false }
+        guard case let .profiles(profiles) = model.phase,
+              let open = profiles.first(where: { !$0.has_pin }) else { return XCTFail("Missing open profile") }
+        model.select(open)
+        try await wait { if case .error = model.phase { return true }; return false }
+        model.cancel()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while await http.count("/api/v2/auth/logout") == 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let count = await http.count("/api/v2/auth/logout")
+        XCTAssertEqual(count, 1, "A rejected login must not leak a newly paired Silo session.")
+    }
+
     private func makeModel(_ http: SiloOnboardingHTTP, verificationOnly: Bool = false,
-                           completed: @escaping (UserSession) -> Void = { _ in XCTFail("Unexpected sign-in") }) -> SiloAuthViewModel {
+                           diagnostics: SiloSetupDiagnostics = SiloSetupDiagnostics(),
+                           completed: @escaping (UserSession) throws -> Void = { _ in XCTFail("Unexpected sign-in") }) -> SiloAuthViewModel {
         let url = URL(string: "https://silo.test")!
         return SiloAuthViewModel(
             server: MediaServer(id: "silo", name: "Silo", baseURL: url, provider: .silo),
             deviceID: "fixture", service: SiloAuthentication(baseURL: url, http: http),
+            diagnostics: diagnostics,
             verificationOnly: verificationOnly,
             onAuthenticated: completed
         )
     }
 
-    private func wait(_ condition: () -> Bool) async throws {
+    private func waitForPoll(_ http: SiloOnboardingHTTP) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(4))
+        while await http.count("/api/v2/auth/device/poll") == 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let polls = await http.count("/api/v2/auth/device/poll")
+        XCTAssertGreaterThan(polls, 0)
+    }
+
+    private func wait(timeout: TimeInterval = 4, _ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
         while !condition(), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -312,6 +447,8 @@ private actor SiloOnboardingHTTP: HTTPClient {
     let failFirstStart: Bool
     let extendsExpiry: Bool
     let emptyMatch: Bool
+    let pollFailures: [Int: AppError]
+    private(set) var pollTimes: [Date] = []
     private var requests: [Endpoint] = []
     private var finish: CheckedContinuation<Void, Never>?
     var isFinishHeld: Bool { finish != nil }
@@ -319,7 +456,8 @@ private actor SiloOnboardingHTTP: HTTPClient {
     init(failFirstProfiles: Bool = false, holdFinish: Bool = false, expiresIn: Int = 600,
          interval: Int = 1, pollStatus: String = "approved",
          foreignManual: Bool = false, foreignApproval: Bool = false,
-         failFirstStart: Bool = false, extendsExpiry: Bool = false, emptyMatch: Bool = false) {
+         failFirstStart: Bool = false, extendsExpiry: Bool = false, emptyMatch: Bool = false,
+         pollFailures: [Int: AppError] = [:]) {
         self.failFirstProfiles = failFirstProfiles
         self.holdFinish = holdFinish
         self.expiresIn = expiresIn
@@ -330,6 +468,7 @@ private actor SiloOnboardingHTTP: HTTPClient {
         self.failFirstStart = failFirstStart
         self.extendsExpiry = extendsExpiry
         self.emptyMatch = emptyMatch
+        self.pollFailures = pollFailures
     }
 
     func count(_ path: String) -> Int { requests.filter { $0.path == path }.count }
@@ -357,6 +496,8 @@ private actor SiloOnboardingHTTP: HTTPClient {
              "expires_in":\(expiresIn),"interval":\(interval)}
             """
         case "/api/v2/auth/device/poll":
+            pollTimes.append(Date())
+            if let failure = pollFailures[count(endpoint.path)] { throw failure }
             if extendsExpiry, count(endpoint.path) == 1 {
                 let expiry = ISO8601DateFormatter().string(from: Date().addingTimeInterval(20))
                 return (Data("""

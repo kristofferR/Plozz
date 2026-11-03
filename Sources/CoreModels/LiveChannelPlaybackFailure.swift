@@ -35,6 +35,8 @@ public enum LiveChannelPlaybackFailure: Equatable, Sendable {
             "Plozz could not reach the channel’s streaming server."
         case .rateLimited:
             "The channel provider is limiting requests."
+        case .conflict:
+            "No tuner is currently available. Keep watching or try again later."
         case .invalidResponse:
             "The channel’s playlist or video data could not be opened."
         case .decoding:
@@ -64,6 +66,7 @@ public enum LiveChannelPlaybackFailure: Equatable, Sendable {
             case .accessRestricted: "accessRestricted"
             case .notFound: "notFound"
             case .rateLimited: "rateLimited"
+            case .conflict: "tunerUnavailable"
             case .decoding: "decoding"
             case .cancelled: "cancelled"
             default: "unknown"
@@ -83,7 +86,14 @@ public struct LiveChannelFailureReport: Equatable, Sendable {
     }
 
     public var message: LocalizedStringResource {
-        switch failure {
+        if case .engine(.invalidResponse) = failure,
+           let diagnostic, diagnostic.reason == .invalidResponse,
+           diagnostic.httpStatus.map({ (200...299).contains($0) }) == true,
+           let message = diagnostic.format.nonVideoMessage {
+            return message
+        }
+        return switch failure {
+        case .engine(.conflict): failure.message
         case .engine:
             PlaybackDiagnosticReport.providerMessage(
                 httpStatus: diagnostic?.httpStatus,

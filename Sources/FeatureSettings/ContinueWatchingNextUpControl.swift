@@ -11,28 +11,26 @@ public struct ContinueWatchingNextUpControl: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Toggle(
-                "Merge Next Up rows",
-                isOn: Binding(
-                    get: { visibility.visibility.mergeNextUpIntoContinueWatching },
-                    set: { visibility.setMergeNextUpIntoContinueWatching($0) }
-                )
-            )
-            .toggleStyle(SettingsSwitchToggleStyle())
-            .disabled(!visibility.isGlobalRowEnabled(.continueWatching))
-            .accessibilityIdentifier("home-merge-next-up")
-
-            if visibility.isGlobalRowEnabled(.continueWatching) {
-                Text("Include next episodes in this section.")
-                    .settingsHelperText()
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                Text("Add Continue Watching to Home to include Next Up.")
-                    .settingsHelperText()
-                    .fixedSize(horizontal: false, vertical: true)
+        Toggle(isOn: Binding(
+            get: { visibility.visibility.mergeNextUpIntoContinueWatching },
+            set: { visibility.setMergeNextUpIntoContinueWatching($0) }
+        )) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Include Next Up")
+                if visibility.isGlobalRowEnabled(.continueWatching) {
+                    Text("Combines Next Up rows here.")
+                        .settingsHelperText()
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("Add Continue Watching to Home to include Next Up.")
+                        .settingsHelperText()
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
+        .toggleStyle(SettingsSwitchToggleStyle())
+        .disabled(!visibility.isGlobalRowEnabled(.continueWatching))
+        .accessibilityIdentifier("home-merge-next-up")
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

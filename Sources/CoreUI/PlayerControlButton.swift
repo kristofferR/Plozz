@@ -35,10 +35,11 @@ public extension View {
 private struct PlayerGlassButtonModifier: ViewModifier {
     let prominent: Bool
     @Environment(\.plozzReducePanelGlass) private var reducePanelGlass
+    @Environment(\.plozzReduceTransparency) private var reduceTransparency
 
     func body(content: Content) -> some View {
         Group {
-            if reducePanelGlass {
+            if reducePanelGlass || reduceTransparency {
                 content.buttonStyle(PlayerFrostedButtonStyle(prominent: prominent))
             } else if #available(iOS 26.0, tvOS 26.0, *) {
                 if prominent {
@@ -54,23 +55,25 @@ private struct PlayerGlassButtonModifier: ViewModifier {
                 }
             }
         }
+        .playerPlatformAppearance()
     }
 }
 
 private struct PlayerFrostedButtonStyle: ButtonStyle {
     let prominent: Bool
     @Environment(\.isFocused) private var isFocused
+    @Environment(\.colorScheme) private var colorScheme
 
     func makeBody(configuration: Configuration) -> some View {
         let shape = Capsule(style: .continuous)
         configuration.label
             .font(.body.weight(.semibold))
-            .foregroundStyle(isFocused ? Color.black : Color.white)
+            .foregroundStyle(isFocused ? (colorScheme == .light ? Color.white : .black) : .primary)
             .padding(.horizontal, 24)
             .padding(.vertical, 14)
             .background {
                 if isFocused {
-                    shape.fill(.white)
+                    shape.fill(Color.primary)
                 } else {
                     Color.clear.plozzFrostedBackground(shape, raised: prominent)
                 }

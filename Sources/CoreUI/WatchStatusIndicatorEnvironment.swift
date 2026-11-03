@@ -15,11 +15,29 @@ private struct PlozzUnwatchedEpisodeCountKey: EnvironmentKey {
     static let defaultValue = WatchStatusIndicatorSettingsStore.defaultShowsUnwatchedEpisodeCount
 }
 
+private struct PlozzProgressBarsKey: EnvironmentKey {
+    static let defaultValue = WatchStatusIndicatorSettingsStore.defaultShowsProgressBars
+}
+
 private struct PlozzWatchIndicatorColorKey: EnvironmentKey {
     static let defaultValue: WatchIndicatorColor = .default
 }
 
+private struct PlozzEpisodeCountBadgeStyleKey: EnvironmentKey {
+    static let defaultValue = EpisodeCountBadgeStyle.default
+}
+
 public extension EnvironmentValues {
+    var plozzShowsProgressBars: Bool {
+        get { self[PlozzProgressBarsKey.self] }
+        set { self[PlozzProgressBarsKey.self] = newValue }
+    }
+
+    var plozzEpisodeCountBadgeStyle: EpisodeCountBadgeStyle {
+        get { self[PlozzEpisodeCountBadgeStyleKey.self] }
+        set { self[PlozzEpisodeCountBadgeStyleKey.self] = newValue }
+    }
+
     /// The live, per-profile colour of the watched badge and unwatched flag.
     var plozzWatchIndicatorColor: WatchIndicatorColor {
         get { self[PlozzWatchIndicatorColorKey.self] }

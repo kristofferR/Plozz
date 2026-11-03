@@ -18,7 +18,13 @@ func waitForHostedLayout(
             + (model.sublayers ?? []).flatMap(geometry)
     }
     func animating(_ layer: CALayer) -> Bool {
-        !(layer.animationKeys() ?? []).isEmpty || (layer.sublayers ?? []).contains(where: animating)
+        let pending = (layer.animationKeys() ?? []).contains { key in
+            guard let animation = layer.animation(forKey: key) else { return false }
+            // Native glass retains untimed geometry bindings even at rest.
+            // Their sampled geometry must settle, but the bindings never finish.
+            return animation.duration != .infinity || animation.repeatCount != 0 || animation.repeatDuration != 0
+        }
+        return pending || (layer.sublayers ?? []).contains(where: animating)
     }
     let deadline = ContinuousClock.now + timeout
     var previous: [Geometry] = []
@@ -74,5 +80,14 @@ final class HostedRenderingTests: XCTestCase {
         } catch is HostedRenderingTimeout {
             // The bounded wait must fail rather than capture a transient frame.
         }
+        view.layer.removeAnimation(forKey: "nonsettling")
+        let binding = CABasicAnimation(keyPath: "bounds")
+        binding.fromValue = NSValue(cgRect: view.bounds)
+        binding.toValue = NSValue(cgRect: view.bounds)
+        binding.duration = .infinity
+        view.layer.add(binding, forKey: "persistent-geometry")
+        defer { view.layer.removeAnimation(forKey: "persistent-geometry") }
+        try await waitForHostedLayout(window)
+        XCTAssertNotNil(view.layer.animation(forKey: "persistent-geometry"))
     }
 }

@@ -133,100 +133,217 @@ struct PrototypeBrowseToolbar: View {
 }
 
 #if os(iOS)
-/// Touch: the guide's top-row controls as a cluster of icon buttons, level
-/// with the profile avatar — Search, the category filter, Multiviews, and
-/// "now", which brings the timeline back to the current programme after
-/// scrolling away. Icons rather than labelled pills so the row fits a phone
-/// without truncating.
-struct PrototypeTouchBrowseBar: View {
+import UIKit
+
+struct PrototypeTouchBrowseToolbar: ToolbarContent {
     @Bindable var model: LiveTVPrototypeModel
-    var isSearching = false
-    let search: () -> Void
+    let configuration: LiveTVSourcesConfiguration
+    let isSearching: Bool
+    let showsDirectory: Bool
+    let hasSidebar: Bool
+    let isDisabled: Bool
+    let showGuide: () -> Void
+    let showCategories: () -> Void
+    let selectSource: (String?) -> Void
+    let addSource: () -> Void
+    let selectCategory: (String?) -> Void
     let filters: () -> Void
+    let search: () -> Void
+    let sources: () -> Void
     var multiviews: (() -> Void)?
-    let goToNow: () -> Void
-    @Environment(\.themePalette) private var palette
+    let cancelSelection: (() -> Void)?
+    let settings: (() -> Void)?
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
-    static let diameter: CGFloat = 40
-
-    var body: some View {
-        HStack(spacing: PrototypeLayout.smallGap) {
-            Button(action: search) {
-                Label(isSearching ? "Back to guide" : "Search",
-                      systemImage: isSearching ? "chevron.backward" : "magnifyingglass")
+    var body: some ToolbarContent {
+        ToolbarItemGroup(placement: .topBarLeading) {
+            if let cancelSelection {
+                Button("Cancel", action: cancelSelection)
+            } else if !hasSidebar && !showsDirectory && !isSearching {
+                Button("Categories", systemImage: "chevron.backward", action: showCategories)
                     .labelStyle(.iconOnly)
-                    .circleControl(active: false, palette: palette)
+                    .accessibilityIdentifier("live-tv-categories")
+                    .disabled(isDisabled)
             }
-            .buttonStyle(.plain)
-            .accessibilityValue(model.query)
-            .accessibilityIdentifier("live-tv-search")
-
-            Menu {
-                Picker("Category", selection: $model.category) {
-                    Text("All categories").tag(String?.none)
-                    ForEach(model.categories, id: \.self) { category in
-                        Text(category).tag(Optional(category))
+            if (showsDirectory || hasSidebar) && !isSearching {
+                Menu {
+                    Picker("Source", selection: Binding(
+                        get: { model.configuredSourceID }, set: selectSource
+                    )) {
+                        Text("All").tag(String?.none)
+                        ForEach(configuration.playlists.filter(\.isEnabled)) { source in
+                            Text(verbatim: source.name).tag(Optional(source.id))
+                        }
+                        ForEach(configuration.servers.filter(\.isEnabled)) { source in
+                            Text(verbatim: source.name).tag(Optional(source.id))
+                        }
                     }
-                }
-                .pickerStyle(.inline)
-                Divider()
-                Button("More filters", systemImage: "line.3.horizontal.decrease", action: filters)
-            } label: {
-                Label("Categories", systemImage: hasActiveFilters
-                      ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease")
-                    .labelStyle(.iconOnly)
-                    .circleControl(active: hasActiveFilters, palette: palette)
-            }
-            .menuOrder(.fixed)
-            .accessibilityValue(Text(verbatim: model.category ?? ""))
-            .accessibilityIdentifier("live-tv-category")
-
-            if let multiviews {
-                Button(action: multiviews) {
-                    Label("Multiviews", systemImage: "rectangle.split.2x2")
-                        .labelStyle(.iconOnly)
-                        .circleControl(active: false, palette: palette)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("live-tv-multiview-favorites")
-            }
-
-            if !isSearching {
-                Button(action: goToNow) {
-                    Label {
-                        Text("Now", comment: "Guide button that scrolls the timeline back to the programmes airing now.")
-                    } icon: {
-                        Image(systemName: "arrow.right.and.line.vertical.and.arrow.left")
+                    .pickerStyle(.inline)
+                    Divider()
+                    Button(action: addSource) {
+                        Label {
+                            Text(SettingsCopy.addSource)
+                        } icon: {
+                            Image(systemName: "plus")
+                        }
                     }
-                    .labelStyle(.iconOnly)
-                    .circleControl(active: false, palette: palette)
+                    .accessibilityIdentifier("live-tv-add-source")
+                } label: {
+                    HStack(spacing: 6) {
+                        sourceLabel
+                            .font(.headline)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Image(systemName: "chevron.down").font(.caption.weight(.semibold))
+                    }
+                    .frame(maxWidth: sizeClass == .compact ? 160 : 220)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("live-tv-guide-now")
+                .menuOrder(.fixed)
+                .accessibilityLabel("Source")
+                .accessibilityValue(sourceLabel)
+                .accessibilityIdentifier("live-tv-source")
+                .disabled(isDisabled)
             }
         }
-        .font(.body.weight(.medium))
+        if #available(iOS 26.0, *), !hasSidebar && !showsDirectory && !isSearching {
+            ToolbarSpacer(.fixed, placement: .topBarLeading)
+        }
+        ToolbarItem(placement: .topBarLeading) {
+            if !hasSidebar && !showsDirectory && !isSearching {
+                Menu {
+                    Picker("Category", selection: Binding(get: { model.category }, set: selectCategory)) {
+                        Text("All channels").tag(String?.none)
+                        ForEach(model.browsingCategories) { category in
+                            Text(verbatim: category.name).tag(Optional(category.name))
+                        }
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    HStack(spacing: 6) {
+                        categoryLabel.lineLimit(1).truncationMode(.tail)
+                        Image(systemName: "chevron.down").font(.caption)
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: sizeClass == .compact ? 160 : 320)
+                }
+                .menuOrder(.fixed)
+                .accessibilityLabel("Category")
+                .accessibilityValue(categoryLabel)
+                .accessibilityIdentifier("live-tv-category")
+                .disabled(isDisabled)
+            }
+        }
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            if !isSearching {
+                Button("Search", systemImage: "magnifyingglass", action: search)
+                    .labelStyle(.iconOnly)
+                    .disabled(isDisabled)
+                Menu {
+                    if showsDirectory {
+                        Button("Guide", systemImage: "list.bullet.rectangle", action: showGuide)
+                            .accessibilityIdentifier("live-tv-open-guide")
+                    }
+                    Button("Filters", systemImage: "line.3.horizontal.decrease", action: filters)
+                        .accessibilityIdentifier("live-tv-filters")
+                    if !hasSidebar && !showsDirectory, let multiviews {
+                        Button("Multiviews", systemImage: "rectangle.split.2x2", action: multiviews)
+                            .accessibilityIdentifier("live-tv-multiview-favorites")
+                    }
+                    Divider()
+                    Button("TV Sources", systemImage: "antenna.radiowaves.left.and.right", action: sources)
+                        .accessibilityIdentifier("live-tv-sources")
+                    if let settings {
+                        Divider()
+                        Button("Settings", systemImage: "gearshape", action: settings)
+                            .accessibilityIdentifier("live-tv-settings")
+                    }
+                } label: {
+                    Label("More", systemImage: "ellipsis")
+                }
+                .labelStyle(.iconOnly)
+                .menuOrder(.fixed)
+                .accessibilityIdentifier("live-tv-more")
+                .disabled(isDisabled)
+            }
+        }
     }
 
-    private var hasActiveFilters: Bool {
-        model.category != nil || model.guideOnly || model.source != nil
-            || model.language != nil || model.country != nil || model.favoritesOnly
+    private var sourceLabel: Text {
+        if let source = configuration.playlists.first(where: { $0.id == model.configuredSourceID }) {
+            Text(verbatim: source.name)
+        } else if let source = configuration.servers.first(where: { $0.id == model.configuredSourceID }) {
+            Text(verbatim: source.name)
+        } else {
+            Text("All")
+        }
+    }
+
+    private var categoryLabel: Text {
+        if let category = model.category { Text(verbatim: category) }
+        else { Text("All channels") }
     }
 }
 
-private extension View {
-    func circleControl(active: Bool, palette: ThemePalette) -> some View {
-        self
-            .foregroundStyle(active ? palette.onAccent : palette.primaryText)
-            .frame(width: PrototypeTouchBrowseBar.diameter, height: PrototypeTouchBrowseBar.diameter)
-            .background {
-                if active {
-                    Circle().fill(palette.accent)
-                } else {
-                    PrototypeControlSurface().clipShape(Circle())
+struct PrototypeToolbarBottomReader: UIViewControllerRepresentable {
+    let onChange: (CGFloat) -> Void
+
+    func makeUIViewController(context: Context) -> PrototypeToolbarBottomController {
+        PrototypeToolbarBottomController()
+    }
+
+    func updateUIViewController(_ controller: PrototypeToolbarBottomController, context: Context) {
+        controller.onChange = onChange
+        controller.reportControlsBottom()
+    }
+}
+
+final class PrototypeToolbarBottomController: UIViewController {
+    var onChange: ((CGFloat) -> Void)?
+    private var lastBottom: CGFloat?
+    private var updatePending = false
+
+    override func loadView() {
+        view = UIView()
+        view.isUserInteractionEnabled = false
+        view.accessibilityElementsHidden = true
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        reportControlsBottom()
+    }
+
+    func reportControlsBottom() {
+        guard !updatePending else { return }
+        updatePending = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            updatePending = false
+            guard let bar = navigationController?.navigationBar,
+                  let window = view.window else { return }
+            // Native toolbar buttons discard SwiftUI background geometry readers.
+            // Read their public accessibility bounds in the shared window instead.
+            func bottoms(in container: UIView) -> [CGFloat] {
+                guard !container.isHidden, container.alpha > 0 else { return [] }
+                if container is UIControl, container.isAccessibilityElement {
+                    let frame = window.convert(container.accessibilityFrame, from: window.screen.coordinateSpace)
+                    return frame.isEmpty ? [] : [frame.maxY]
                 }
+                return container.subviews.flatMap { bottoms(in: $0) }
             }
-            .contentShape(Circle())
+            let barFrame = bar.convert(bar.bounds, to: window)
+            let bottom: CGFloat
+            if bar.isHidden || barFrame.height > barFrame.width {
+                bottom = window.safeAreaInsets.top
+            } else {
+                guard let controlsBottom = bottoms(in: bar).max() else { return }
+                bottom = controlsBottom
+            }
+            guard bottom != lastBottom else { return }
+            lastBottom = bottom
+            onChange?(bottom)
+        }
     }
 }
 #endif
@@ -273,7 +390,7 @@ struct PrototypeSheetPresentation<SheetContent: View>: ViewModifier {
 extension PrototypeSheet {
     var usesManagementPage: Bool {
         switch self {
-        case .sources, .addPlaylist, .serverSetup, .organization: true
+        case .sources, .addSource, .addPlaylist, .serverSetup, .organization: true
         default: false
         }
     }
@@ -305,7 +422,11 @@ struct PrototypeSheetContent: View {
             navigationContent
         }
         #else
-        navigationContent
+        if case .diagnostics(let report) = destination {
+            PlaybackDiagnosticDetailsSheet(report: report)
+        } else {
+            navigationContent
+        }
         #endif
     }
 
@@ -321,11 +442,15 @@ struct PrototypeSheetContent: View {
                     LiveTVMultiviewFavoritesView(model: model, open: openMultiview)
                 case .filters:
                     PrototypeFilterForm(model: model, imports: imports, canMutate: canMutate)
+                        #if os(iOS)
+                        .navigationTitle("Filters")
+                        #else
                         .navigationTitle("Categories")
+                        #endif
                 case .guideTime:
                     PrototypeGuideTimeForm(guideOffset: $guideOffset, goToNow: goToNow, guideStart: guideStart)
                         .navigationTitle("Guide time")
-                case .sources, .addPlaylist, .serverSetup:
+                case .sources, .addSource, .addPlaylist, .serverSetup:
                     if let sourceManagement {
                         sourceManagement(destination)
                     } else {
@@ -395,19 +520,21 @@ private struct PrototypeGuideTimeForm: View {
                     guideOffset = max(-86_400, guideOffset - 7_200)
                     dismiss()
                 }
+                .buttonStyle(SettingsFormButtonStyle())
                 .disabled(guideOffset <= -86_400)
                 Button("Now", systemImage: "clock") {
                     goToNow()
                     dismiss()
                 }
+                .buttonStyle(SettingsFormButtonStyle())
                 Button("Later", systemImage: "chevron.forward") {
                     guideOffset = min(604_800, guideOffset + 7_200)
                     dismiss()
                 }
+                .buttonStyle(SettingsFormButtonStyle())
                 .disabled(guideOffset >= 604_800)
             }
         }
-        .buttonStyle(SettingsFocusButtonStyle(size: .contained))
     }
 }
 
@@ -424,7 +551,7 @@ private struct PrototypeFilterForm: View {
                 } label: {
                     Label("Manage IPTV channels", systemImage: "slider.horizontal.3")
                 }
-                .buttonStyle(SettingsFocusButtonStyle(size: .contained))
+                .buttonStyle(SettingsFormButtonStyle())
             }
             SettingsSectionGroup("Browse filters") {
                 PrototypeSelectionLink(
@@ -457,7 +584,7 @@ private struct PrototypeFilterForm: View {
             }
             SettingsSectionGroup {
                 Button("Reset filters") { model.resetFilters() }
-                    .buttonStyle(SettingsFocusButtonStyle(size: .contained))
+                    .buttonStyle(SettingsFormButtonStyle())
                 Text("\(model.visibleChannels.count) matching channels")
             }
         }
@@ -509,7 +636,7 @@ struct PrototypeSelectionList<Option: Hashable, OptionLabel: View>: View {
                             if option == selection { SettingsSelectionIndicator() }
                         }
                     }
-                    .buttonStyle(SettingsFocusButtonStyle(size: .contained))
+                    .buttonStyle(SettingsFormButtonStyle())
                     .accessibilityAddTraits(option == selection ? .isSelected : [])
                 }
             }
@@ -606,7 +733,7 @@ private struct PrototypeSourcesForm: View {
                 Text("Repeats the imported channels into labeled copies; it does not add stations. Favorites and recently watched channels are saved separately for each profile.")
             }
             Section {
-                Text("Channel history is separate from movie and episode progress. Jellyfin and Emby can play channels from a configured Live TV server. Plex currently supports channels and guide listings, not playback.")
+                Text("Channel history is separate from movie and episode progress. Jellyfin, Emby, and Plex can play channels from a configured Live TV server.")
             }
             #endif
         }

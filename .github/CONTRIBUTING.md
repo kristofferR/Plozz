@@ -32,15 +32,21 @@ limits](../docs/discord-bridge.md); ordinary chat channels are not mirrored.
 
 ## Development pipeline
 
-Fix defects, review findings, UI adjustments, and test failures introduced during
-active unreleased work within that task or its existing feature issue. Do not
-create a separate issue merely to fix something before users receive it. A
-development branch or local test installation is not a distributed release.
+Keep defects, review findings, UI adjustments, and test failures arising from
+active unreleased work in that task or its existing feature issue. Never create
+a new bug issue merely to fix or commit that work, including a problem introduced
+and solved in the same session. Calling it deferred or independently actionable
+does not make it a user-facing defect.
 
-Create an issue for a problem in a build delivered to users (including TestFlight),
-work being deferred beyond the current task, independently actionable work, or an
-explicit request to file one. Search for existing tracking first. Keep issue
-status accurate and distinguish a branch fix from a fix delivered to users.
+A commit, push, merge to `main`, or local test installation is not a distributed
+release. Create a new bug issue only for a problem actually affecting users of a
+delivered build (including TestFlight), or an explicit maintainer request to file
+one. Genuine feature requests can be tracked before implementation.
+
+Search open **and closed** issues and their discussions before filing. Reuse the
+canonical issue for the same report, link related-but-distinct problems, and
+preserve genuine post-fix regressions as unresolved work. Keep issue status
+accurate: a branch fix or main merge alone is not delivery.
 
 ### Commit issue references
 
@@ -53,16 +59,43 @@ The pushed commit should create GitHub's built-in "added a commit that reference
 this issue" timeline entry. A PR reference alone is not a substitute. Do not post
 a separate issue comment just to link the commit.
 
-Use `Fixes #123` (or the fully qualified equivalent) only when the commit fully
-resolves the issue and automatic closure on landing in the default branch is
-intended. Otherwise use the non-closing `Refs` form.
+For app fixes and features, use the non-closing `Refs` form: merging a fix is not
+delivery. Keep GitHub and linked Discord reports open until the affected
+platforms are available to external TestFlight testers. Do not use GitHub's
+`Fixes`, `Closes`, or `Resolves` keywords in commits or PR descriptions for these
+reports.
+
+When the entire report is resolved, add a final commit-trailer block declaring
+the affected platforms (exactly `tvOS`, `iOS`, or `tvOS,iOS`):
+
+```text
+Fix episode detail entry
+
+Refs #177
+
+TestFlight-Issue: 177 [tvOS]
+```
+
+Use one trailer per fully resolved issue; partial work keeps only `Refs`.
+The trailer deliberately uses a numeric issue ID without `#` and no closing
+keyword. Do not use the old `TestFlight-Fix: #...` spelling: GitHub interprets
+that as an immediate closing reference even though it is inside a trailer.
+`iOS` includes iPhone and iPad. The hosted watcher records an `awaiting release`
+status and, after verifying tagged source and external TestFlight availability,
+publishes build-specific comments and closes both reports. It does not infer
+resolution from commit subjects or ask an LLM. A reopened issue requires a new
+fixing-commit declaration. See [delivery-gated issue resolution](../docs/discord-bridge.md#delivery-gated-issue-resolution)
+for activation, retries, and limitations. Non-app work that does not ship through
+TestFlight remains a maintainer-managed closure.
 
 ## Building & running
 
 ### Requirements
 
 - macOS with the Xcode/SDK configuration supported by [CI](workflows/ci.yml)
-  (currently Xcode 26.2). The app deployment targets are iOS 18.0 and tvOS 18.0.
+  (currently Xcode 27 on the `xcode-27` runner image, matching the pinned playback
+  engine's toolchain requirement). The app deployment targets remain iOS 18.0
+  and tvOS 18.0.
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen): `brew install xcodegen`
 
 ### Generate the project and run

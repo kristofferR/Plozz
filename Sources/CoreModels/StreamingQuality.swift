@@ -138,7 +138,7 @@ public enum StreamingQuality: Hashable, CaseIterable, Codable, Sendable, Identif
 
 public struct CustomStreamingQuality: Hashable, Sendable {
     public static let supportedHeights = [240, 480, 720, 1080, 1440, 2160]
-    // Jellyfin/Emby's MaxStreamingBitrate is signed 32-bit bits per second.
+    // The shared custom ceiling must fit Jellyfin's signed-32-bit bitrate field.
     public static let maximumBitrateKbps = Int(Int32.max) / 1_000
     public let maximumHeight: Int
     /// Total audio + video budget, in decimal kilobits per second.
@@ -406,7 +406,7 @@ public protocol StreamingSessionMaintaining: MediaProvider {
 }
 
 public enum StreamingQualityError: Error, Equatable, Sendable {
-    public enum RefusalReason: String, Sendable {
+    public enum RefusalReason: String, Codable, Sendable {
         case sessionExpired = "session_expired"
         case transcodingDisabled = "transcoding_disabled"
         case conversionToolUnavailable = "conversion_tool_unavailable"
@@ -418,6 +418,8 @@ public enum StreamingQualityError: Error, Equatable, Sendable {
     case invalidQuality(StreamingQualityValidationError)
     case unavailable, unsupported
     case authenticationRequired, permissionDenied, noCompatibleStream, sourceUnavailable, malformedResponse, negotiationFailed
+    /// A successful inventory lookup explicitly reported no playable sources.
+    case noStreams
     case serverHTTP(Int)
     case plexDecision(Int)
     case codecUnavailable(DirectPlayVideoCodec)
@@ -451,6 +453,8 @@ public enum StreamingQualityError: Error, Equatable, Sendable {
             "The server reported that no compatible stream is available."
         case .sourceUnavailable:
             "The server could not find the requested title or version."
+        case .noStreams:
+            "No streams found"
         case .malformedResponse:
             "Plozz couldn’t read the server’s playback response."
         case .negotiationFailed:
@@ -476,6 +480,7 @@ public enum StreamingQualityError: Error, Equatable, Sendable {
         case .permissionDenied: "NotAllowed"
         case .noCompatibleStream: "NoCompatibleStream"
         case .sourceUnavailable: "MediaSourceUnavailable"
+        case .noStreams: "NoStreamsFound"
         case .malformedResponse: "InvalidPlaybackResponse"
         case .negotiationFailed: "PlaybackNegotiationFailed"
         case .serverHTTP(let status): "HTTP \(status)"
@@ -491,13 +496,13 @@ public enum StreamingQualityError: Error, Equatable, Sendable {
 }
 
 public struct StreamingPlaybackFailure: Equatable, Sendable {
-    public enum Kind: String, Sendable {
+    public enum Kind: String, Codable, Sendable {
         case network, timedOut, accessDenied, unavailable, unsupportedFormat
         case hdrConversion, hdrConversionUnconfirmed, server, unknown
         case rateLimited, accessRestricted, storageExhausted, audioOutputFailed
         case readinessTimedOut, processingFailed
     }
-    public enum Domain: String, Sendable { case avFoundation = "AVFoundation", url = "URL", coreMedia = "CoreMedia" }
+    public enum Domain: String, Codable, Sendable { case avFoundation = "AVFoundation", url = "URL", coreMedia = "CoreMedia" }
     public let kind: Kind
     public let domain: Domain?
     public let code: Int?
@@ -525,7 +530,18 @@ public struct StreamingPlaybackFailure: Equatable, Sendable {
     }
 
     public var allowsCodecFallback: Bool {
-        kind == .unsupportedFormat || kind == .processingFailed || kind == .unknown || kind == .hdrConversionUnconfirmed
+        if kind == .unavailable {
+            // Native URL -1008 alone does not establish missing or expired media.
+            // Keep bounded compatibility recovery unless stronger failure evidence exists.
+            return domain == .url && code == URLError.resourceUnavailable.rawValue
+                && httpStatus == nil && providerReason == nil
+                && (engineFailure == nil || engineFailure == .nativeItemFailed)
+                && underlyingErrors.allSatisfy {
+                    $0.domain != .posix
+                        && ($0.domain != .url || $0.code == URLError.resourceUnavailable.rawValue)
+                }
+        }
+        return kind == .unsupportedFormat || kind == .processingFailed || kind == .unknown || kind == .hdrConversionUnconfirmed
     }
     public var diagnosticCode: String? {
         let components = [

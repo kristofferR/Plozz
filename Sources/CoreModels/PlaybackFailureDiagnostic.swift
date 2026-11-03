@@ -2,11 +2,11 @@ import Foundation
 
 /// Closed vocabulary only; never retain a URL, header, title, or error description.
 public struct PlaybackFailureDiagnostic: Codable, Equatable, Sendable {
-    public enum Layer: String, Codable, Sendable { case iptvProxy, liveEngine }
+    public enum Layer: String, Codable, Sendable { case iptvProxy, liveEngine, plexLiveTune }
     public enum Content: String, Codable, Sendable { case live, onDemand }
     public enum Stage: String, Codable, Sendable { case response, body, manifest, load, playback, audioSession }
     public enum Format: String, Codable, Sendable {
-        case unknown, hls, transportStream, html, other
+        case unknown, hls, transportStream, html, json, xml, empty, other
 
         public init(mimeType: String?) {
             switch mimeType?.lowercased().split(separator: ";").first?.trimmingCharacters(in: .whitespaces) {
@@ -15,7 +15,18 @@ public struct PlaybackFailureDiagnostic: Codable, Equatable, Sendable {
                 self = .hls
             case "video/mp2t": self = .transportStream
             case "text/html", "application/xhtml+xml": self = .html
+            case "application/json", "application/problem+json": self = .json
+            case "text/xml", "application/xml": self = .xml
             default: self = .other
+            }
+        }
+
+        public var nonVideoMessage: LocalizedStringResource? {
+            switch self {
+            case .html: "The provider returned a web page instead of a video stream."
+            case .json, .xml: "The provider returned a data document instead of a video stream."
+            case .empty: "The provider returned an empty video response."
+            default: nil
             }
         }
     }

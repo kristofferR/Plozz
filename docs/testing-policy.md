@@ -12,29 +12,114 @@ workloads once, keeps five measured repetitions, checks work-count invariants,
 and compares source-identified baseline/candidate evidence without hardware
 deployment or automatic retries. Normal suites skip those opt-in probes.
 
+Render-dependent playback transitions belong in the app-hosted suite. Use a
+mounted video surface and a real HLS fixture for native-player continuity; a
+local MP4 may select the software decoder and cannot prove AVPlayer item reuse.
+Capture a native pause baseline from `AVPlayer.currentTime()`, not the engine's
+last periodic progress notification.
+Keep decoded-frame sampling independent of concurrent guide/network requests so
+their retry waits are not counted as video stalls. Hosted focus comparisons must
+establish the starting focus and observe presented geometry, not just a layout
+target published before an animation finishes. Top-bar chrome fixtures open
+Settings through the mounted destination handoff and request focus through the
+containing native owner, not directly from an unfocused leaf. Fade captures must
+prove an intermediate rendered state; screenshot capture time can allow a later
+sample to reach the final state sooner than its nominal sleep interval suggests.
+
+Asynchronous transport fixture waits use bounded elapsed deadlines, not a count
+of `Task.yield()` calls. Yield counts do not guarantee that cancellation,
+shutdown, or lease-release workers have received time to finish.
+
+Native subtitle coverage adopts externally selected HLS renditions both
+immediately and after fixed callback-scheduling delays. Every case must retain
+the paused position and fence the previous extraction output; the delays are
+separate required cases, not retries. Failure diagnostics retain decoded cue
+timing, visible text, and the actual native selection, plus the last 32 cue
+updates with their selection phase, extraction-output identity, and native
+rendering suppression. This distinguishes missing delivery from cues that
+arrived and were subsequently cleared without logging production captions.
+
+## Live Emby transcoding
+
+The Emby cases in `ServerLiveTranscodingTests` in the iOS presentation suite are
+opt-in real-server checks, not hermetic CI fixtures. Supply `PLOZZ_LIVE_EMBY_CONFIGURATION` to the
+test process as JSON containing `baseURL`, `username`, and one to three explicit
+`itemIDs`. Use an authorized passwordless, non-administrator internal test user;
+never supply a personal owner's identity or external review credentials.
+Do not commit the configuration or put a token in it.
+
+Choose representative SDR, HDR10, and Dolby Vision sources. The H.264 case uses
+`JellyfinProvider`; the HEVC case uses the production `JellyfinClient`, rendition
+bounds, and authenticated locator with an explicit HEVC-capable device profile.
+Simulators can report no hardware HEVC support, so that second case verifies
+the capable-device protocol and native decoder, not hardware detection.
+Both use the app's authenticated resolver and `NativeVideoEngine`.
+
+The checks inspect the actual decoded codec, retain secret-free range/dimension
+and startup measurements, and require more than ten seconds of progress in a
+twelve-second interval after AVPlayer enters playing. A displayed first frame
+is not proof that cold-encoder buffering has finished. The server's returned
+range is recorded rather than assumed to be SDR from a request parameter.
+Each owned encoding session and test login is released, including on failure.
+
+The native presenting layer must be ready and attached to the active player.
+Where the OS supports PiP, the test also starts and stops the real controller.
+Where it does not, the evidence explicitly records that limitation; layer
+readiness is not a successful PiP activation. These bounded smoke checks do not
+establish physical-device HDR output, long-duration performance, or correctness
+for every item on the server.
+
+### Live Plex and Jellyfin transcoding
+
+The same suite has forced H.264 and HEVC playback cases for Plex and Jellyfin,
+using the authenticated resolver and native player. H.264 uses the production
+providers; HEVC exercises the production clients and rendition locators with an
+explicit HEVC-capable profile because simulator hardware detection reports no
+HEVC support. This does not verify physical-device capability detection.
+The cases require
+more than 28 seconds of playback progress over a 30-second measurement after
+playback starts, verify the decoded codec and H.264 SDR output, and record the
+actual dynamic range, AVPlayer stall/dropped-frame counts and transfer bitrate. Select explicit
+SDR, HDR and Dolby Vision sources; an SDR original does not prove tone mapping.
+PiP uses the same conditional activation checks and simulator limitations as
+the Emby cases above.
+
+Set `PLOZZ_LIVE_TRANSCODE_BROKER` to a bounded, private loopback HTTP endpoint.
+Its `/plex` and `/jellyfin` responses contain `baseURL`, `username`, `userID`,
+`serverID`, `deviceID`, `token`, and one to three explicit `itemIDs`. The broker
+must validate dedicated internal test identities, resolve credentials into
+memory, disable request logging and response caching, and close when the run
+ends. It owns any temporary login and releases it after the test process exits;
+the tests maintain and release each encoding session. Never put passwords or tokens in
+environment variables, command arguments, configuration files or attachments.
+The broker endpoint must use an unguessable run-specific path and bind only to
+`127.0.0.1`; never publish it as a preview or expose it to the LAN.
+
 ## The two speed wins
 
 ### 1. Build once, run many (`tools/run-tests.sh`)
 The old runner looped `xcodebuild test` **once per test target** — 23 separate
 build + simulator-install + launch cycles. Since the tests themselves execute in
 well under a minute of CPU, ~all the wall-clock was 23× compile + simulator
-orchestration. The runner now does **one** `xcodebuild test` against the
-always-present `Plozz-Package` scheme:
-- **Full sweep:** `xcodebuild test -scheme Plozz-Package` (no `-only-testing`).
-- **Subset:** `-scheme Plozz-Package -only-testing:<Suite>` for each selected suite.
-- **Single suite with a materialised native `<Suite>` scheme:** used directly (rare
-  locally — SPM publishes per-*module* schemes like `CoreModels`, not
-  `CoreModelsTests`, and module schemes are not test-configured — so single-suite
-  runs normally also go through `Plozz-Package -only-testing`).
+orchestration. The runner now builds once with `xcodebuild build-for-testing`,
+then runs `test-without-building -xctestrun` against the generated manifest:
+- **Full sweep:** build `Plozz-Package`, then run every test bundle.
+- **Known subset:** generate a scoped scheme containing just the requested test
+  targets, so only their dependency subtrees build.
+- **Other selectors:** build `Plozz-Package` and preserve each `-only-testing`
+  selector in the manifest-driven test invocation.
 
-`Plozz-Package` is the only test-capable scheme, so build-once relies on the
-existing self-heal: a stray generated `Plozz.xcodeproj` shadows the Swift package
+The test invocation does not reopen a scheme or SwiftPM workspace. This avoids
+Xcode 27 invalidating package test-bundle blueprints during a mid-run package
+graph refresh. Build failure, a missing manifest, or multiple matching manifests
+fail closed rather than selecting potentially stale test products.
+
+Build-once relies on the existing self-heal: a stray generated `Plozz.xcodeproj` shadows the Swift package
 and blocks `Plozz-Package`; the runner moves it aside when needed and restores it
 on exit.
 
-`-only-testing` filters which suites **run**, not what is **built** — a subset run
-still compiles the full test graph once. The win is collapsing 23 build +
-orchestration cycles into **one**, not compiling less.
+`-only-testing` alone filters which suites **run**, not what is **built**; scoped
+schemes additionally reduce compilation for known subsets.
 
 **Flake guard:** if the single run reports specific failed suite bundles, each is
 retried **once** in isolation; a suite only fails if it fails twice. A build/compile
@@ -134,6 +219,8 @@ including when package-test evidence is reused.
 
 Keep the authoritative passing summary and expected-bundle
 evidence, not just a success marker; missing or changed evidence reruns the gate.
+Package integrity scans have a two-minute per-checkout bound for large dependency
+trees; metadata reads retain their 30-second bound. A timeout is never clean evidence.
 A failed fresh attempt invalidates an earlier success. Inputs changing between
 phases prevent the combined candidate from being declared ready. Invalidating a
 cached full-suite result does not itself require running that suite: reassess
@@ -257,6 +344,8 @@ Set `PLOZZ_VERDICT_GRACE=0` to check results as soon as the bundles report.
 last bundle reports, allowing Xcode's 600-second simulator diagnostic collection
 to finish. This is a ceiling, not a fixed wait. A readable result bundle is
 always required; reaching the grace period alone never interrupts its writer.
+If finalization or the no-progress watchdog times out, the run fails even if a
+later summary becomes readable after termination.
 
 Large scale fixtures emit unbuffered checkpoints from completed work. The
 million-programme XMLTV test reports preparation phases and every 10,000 indexed
@@ -319,11 +408,39 @@ Runner verdict regressions use the existing host-side unittest runner:
 Episode-panel fixtures activate native window focus before reissuing their
 SwiftUI Browse entry request. Repeated window handoffs must start on Browse and
 still allow the playing episode to receive actual native focus.
+The rapid native-tab and Live TV Sources editor fixtures wait for each real
+navigation push and pop to finish before issuing the next stack mutation or
+tearing down their window. The native-tab fixture also verifies that a subsequent
+window receives focus. Mutating or removing a stack during its transition can
+leave UIKit focus updates postponed and contaminate unrelated hosted tests.
+Library return-scroll geometry is measured after the native scroll reaches its
+original offset, not after a fixed delay or merely remounting the target cell.
 
-`PlayerSkipMarkerHostedTests` updates one live scrub track and waits for stable
-rendered frames before comparing native fills. Liquid Glass can keep changing
-after layout; comparing its first frames must not be mistaken for a marker color
-regression or worked around by relaxing the pixel assertions.
+OCR fixtures preserve point-scale measurements when cropping rendered content.
+Recognize settings within their page bounds, and reprocess merged version-badge
+rows even when their observation box is taller than the individual glyphs.
+Profile alignment uses OCR to locate each title, then measures its rendered ink:
+character boxes can interpolate across an adjacent icon misrecognized as text.
+Copy, minimum glyph sizes, and alignment tolerances remain asserted.
+
+Hero return-focus checks wait for the native handoff before synchronous OCR,
+then still require the focused frame to contain the originating link. Backdrop
+fixtures mount their overlay with normal child-controller containment after the
+source controller has appeared; replacing a root during its appearance can leave
+UIKit focus postponed in subsequent tests. Episode fixtures declare Browse as
+their native default entry and wait for its actual focus, not just its SwiftUI
+binding while a row still owns focus. Their
+window-handoff coverage also returns to Browse and waits for native focus
+animations to finish, ensuring an earlier entry request cannot steal focus back.
+The scroll-guard restoration fixture needs a window-backed view hierarchy, not
+a visible key-window controller appearance. The circular-tile pixel fixture
+explicitly requests its native monogram and verifies that exact focused item
+before capture; it measures the focused rendering, not automatic window entry.
+
+`PlayerSkipMarkerHostedTests` compares one live scrub track before and after
+adding skip boundaries, at the same screen coordinates. Separate native-glass
+instances at different positions are not pixel-identical reference materials.
+Retain extended-range capture precision before converting to comparison pixels.
 Capture at the window's native display scale and sample every backing pixel in
 the asserted point ranges. Downsampling a 2x TV render to 1x introduces ringing
 even around plain opaque capsules; a separate capsule fixture protects snapshot
@@ -344,6 +461,11 @@ the original root without widening its browse boundary. Deep scrolling must
 realize onscreen native focus targets. The bounded folder viewport uses recycled
 native cells: fewer than 20 are visible for the large fixture, short lists retain
 their natural height, and the table/cells do not clip horizontal focus overflow.
+Before each folder open, the root's presented geometry and finite animations
+must settle. Fixture presentation is outside the unchanged 150 ms navigation
+ceiling; the timed window still includes the folder request and its resulting
+native layout. The worst sample also reports wake delay and forced-layout
+duration separately; neither component is subtracted from the asserted delay.
 This is isolated UI coverage, not a live-server network benchmark.
 
 `ShareFolderNavigationTests` launches `PlozzFocusHost --share-folder-fixture`
@@ -400,9 +522,29 @@ use synthetic received data, not pairing services or stored household credential
 Package-only UIKit snapshots cannot replace this gate:
 without an application scene, `drawHierarchy` returns an empty image.
 
+`SystemAppearanceTests` changes the scene's device appearance while keeping the
+same window and pushed sheet alive. System leaves the window override unspecified
+and follows light/dark changes; explicit Light, Dark, and Pure Black remain pinned.
+The iOS root owns UIKit appearance from the selected theme, not its resolved
+palette. Sheets inherit that window instead of freezing the opening appearance.
+`PlayerSurfaceAppearanceHostedTests` and `PlayerGlassAppearanceInteractionTests`
+compare player panels against stock regular Liquid Glass in each appearance,
+rather than requiring a fixed dark compositor output.
+`PlayerLayoutInteractionTests` measures actual iPhone 16 Pro Max portrait and
+landscape control frames against the native-player reference, including the
+different skip spacing, edge margins, and non-stretching tabs.
+`PlayerTransportPositionTests` also checks VOD/Live resizing and compact
+landscape clearance. Grouped glass must span adjacent controls without merging
+their actions; compositor coverage checks the bridge and both tap targets.
+
 `PlayerOrientationTests` checks the UIKit player owner's close path without
 another update from the hidden SwiftUI presenter, including disappearance
 cleanup, closing during presentation, reopening, and stale close callbacks.
+Its dismissal-frame regression checks that browsing is already portrait and
+untransformed when revealed from portrait or either landscape direction on
+iPhone, including a full-size, one-axis slide for landscape exits. Player
+entry checks landscape bounds from the first presented frame, without a
+portrait-first player or a second orientation change after opening.
 Its in-place Live TV fixture checks real scene rotation for Landscape/Portrait,
 Auto and preference changes, restoration on collapse, per-window ownership,
 stale-owner teardown, and retained content lifecycle across expansion. The
@@ -411,6 +553,10 @@ standalone grid and checks the current-program surface pixels with normal and
 reduced transparency at phone/tablet widths and larger text.
 `PlayerRotationInteractionTests` verifies actual X taps and return to a hittable
 presenting screen across rotation preferences and nested navigation. Its
+pre-play cases finish or cancel version selection inside the already-presented
+player, and its slow-player case compares loading and ready Close-button frames.
+Its near-end local-video fixture also checks natural end-of-video dismissal in portrait
+and landscape, without synthesizing an engine-ended event. Its
 synthetic Emby-quality fixture serves local HTTP video so quality changes are
 available; cancelling preserves the rendition, and applying a changed selection
 reloads once before X closes the player. This is presentation coverage, not
@@ -421,11 +567,33 @@ to the UIKit presentation owner.
 
 `ProfilePickerPresentationTests` covers compact/adaptive avatar sizing, small
 and large households, themes/gradients, landscape, iPad, accessible names and RTL.
-Hosted animation frames check the stagger and settled scale; Reduce Motion
-reveals every tile immediately. `ProfilePickerInteractionTests` exercises
+Hosted animation frames check native presentation readiness, individually
+staggered reveals without a capped batch, settled scale, and six or sixteen
+avatars substantially settled within one second. Launch preserves its visible
+cascade after presentation; manual switching must already be revealing avatars
+when the native cover finishes opening. Reduce Motion
+reveals every tile immediately. Scrolling a 40-profile household also checks
+that newly realized cells do not inherit long entrance delays.
+`ProfilePickerInteractionTests` exercises
 selection, cancellation, reopening, Edit/Done, long-press editing, separate
 adult/kids creation entry points, and launch/restricted management visibility.
-Its fixture disables sync and uses only synthetic host-sandbox profiles.
+Its selection fixture keeps the real picker and PIN components mounted across
+profile-scoped content identity changes. Actual taps cover Plex cancellation,
+profile-to-Plex PIN sequencing, launch selection retention, and choosing again
+after cancellation targets a locked fallback. Existing profile locks and Plex
+requests must leave the picker visible until a profile is explicitly tapped;
+choosing another profile must not show the old target's PIN.
+Slow Plex verification moves the selected Plozz avatar/name into the PIN layout
+without an avatar spinner, server-user identity substitution, or premature
+keypad. Cancellation must suppress late PIN presentation and restore the
+original tile position; confirmed unprotected users complete without a PIN page.
+Failed checks retain identity and allow retry/cancel. The native keypad reveal
+must be ordered and bypass its movement/delays with Reduce Motion.
+Hosted PIN layouts cover phone/tablet portrait and landscape plus accessible
+long names: no horizontal overflow, no truncation, and a reachable Cancel.
+A contrasting Home backdrop must stay covered
+and untappable until selection completes. Fixtures disable sync and use only
+synthetic host-sandbox profiles and in-memory Plex credentials.
 
 `DownloadActivityLifecycleTests` and `DownloadNotificationDeliveryTests` cover
 continued-processing admission, expiration, profile retirement, real-progress
@@ -501,7 +669,14 @@ Cards and Display Size, independent theme and playback menus, caption previews
 and per-view overrides, and neighboring Home, subtitle, spoiler, Circadian Mode,
 and Live TV controls. These tests must synthesize taps: direct accessibility
 activation and screenshots alone miss a native List cell intercepting a
-neighbor's tap. Keep the shared lease, private package workspace, serial
+neighbor's tap. Collection-section coverage selects a collection, changes its source
+and layout, saves it, and reopens it. Its fixture passes card settings through the
+production Home settings page, not above the navigation stack, so missing nested
+destination dependencies still crash the test host.
+Featured-card touch coverage includes the logo, metadata, bottom padding and
+vertical scrolling with the native context menu attached. Shared hosted pixel
+coverage checks black, white and dark coloured logos in both page themes.
+Keep the shared lease, private package workspace, serial
 execution, and retained `xcresult` used by the presentation suite; select
 `-scheme PlozziOSInteractionTests -only-testing:PlozziOSInteractionTests/SettingsInteractionTests`
 with the explicit owned iOS simulator destination.
@@ -533,9 +708,9 @@ frames, artwork-only pause, ordered foreground stages, early Back, direct-play
 bypass, missing/replaced source fallback, nested-page ownership, and removal of
 input guards and visual covers. Real framed and borderless poster tests also
 check that the source crop excludes the caption under Reduce Transparency.
-The entrance uses 400ms for the zoom, a 250ms visible-artwork pause, and overlapping
-240ms foreground reveals spaced 120ms apart. Shows reveal the episode browser
-after the controls, retaining the navigation guard through its final 240ms fade;
+The entrance uses 400ms for the zoom, a 100ms visible-artwork pause, and overlapping
+450ms foreground reveals spaced 90ms apart. Shows reveal the episode browser
+after the controls, retaining the navigation guard through its final 720ms fade;
 movies do not acquire that extra stage. Back uses a 280ms return without
 the pause. Reduce Motion bypasses the custom sequence and its input wait.
 Source snapshots are per-activation, not per-frame; full-window covers are
@@ -545,6 +720,12 @@ without overshoot. The early artwork blend belongs to that same property animato
 so pausing or canceling the zoom also pauses or cancels the blend. Foreground
 reveals use the matching curve with 10-point travel; timings and reveal order are
 unchanged. Hosted checks cover curve monotonicity and coordinated pause behavior.
+Cancellation regressions deliberately keep the main actor occupied until each
+reveal sleep expires, then finish the entrance before its continuation resumes.
+Ready actions, disappearance, and immediate completion must retain `.complete`,
+paint the metadata and controls, and release covers/input guards. This is an
+ordering test, not a frame-pacing benchmark. Source replacement during entry
+must neither hide the destination nor return to the replacement's artwork.
 
 `DetailTransitionVisualRegressionTests` uses the production show page and real
 poster cards. It asserts that the outgoing thumbnail is transparent within the
@@ -559,8 +740,9 @@ Back starts toward that shape immediately while native focus restores underneath
 A replaced source or changed window size uses a nonspatial fallback. A temporarily
 unrealized source still returns to its captured shape without waiting for focus.
 The episode browser keeps its layout while masked until its final reveal and
-cannot take entry focus during a whole-show entrance. Episode-context opens
-retain their existing initial-focus behavior; Reduce Motion reveals it directly.
+cannot take entry focus during a whole-show or episode-context entrance.
+Both routes must reach the actual native Hero Play control; Reduce Motion
+retains the same entry destination.
 Its rendered keyline check waits for native focus completion and the artwork's
 painted width to settle, then compares artwork and About in one captured frame.
 The settling condition is independent of x-position, so real misalignment still
@@ -582,7 +764,7 @@ stack change without a second native navigation animation. Unprepared routes
 retain their normal animation. A UIKit appearance observer keeps the opening
 cover until both the artwork has landed and the destination has appeared.
 Production detail pages also wait for a displayed backdrop preview before
-starting the 250ms pause and title/button reveals. Full-resolution upgrades do
+starting the artwork pause and title/button reveals. Full-resolution upgrades do
 not restart that sequence. Exhausted artwork candidates release the cover and
 controls without a picture; Back remains available while artwork is pending,
 and a playing trailer satisfies backdrop readiness without waiting for a still.
@@ -890,8 +1072,8 @@ gated until the episode reveal finishes.
 Lower detail content first mounts after the episode row has received focus and the browser's recede
 animation has completed, so rapid early Down presses cannot enter its blank
 scroll region. The page remains at least one viewport tall before that reveal.
-Explicit episode entry keeps its immediate browser behavior; Reduce Motion uses
-an immediate completion. Once revealed, lower content remains mounted so later
+Episode-context entry keeps the hero visible and the prepared episode unfocused;
+Reduce Motion uses an immediate completion. Once revealed, lower content remains mounted so later
 navigation preserves its state. No extra hosting controller divides native
 button focus from the original page tree.
 `DetailTransitionVisualRegressionTests` also moves horizontally between real
@@ -901,8 +1083,47 @@ must be restored afterward. Pixel checks compare the season pill's outer edge,
 resting episode artwork, and About's leading keyline. Coverage includes all
 card focus styles, explicit episode entry, and scroll-guard
 removal without disabling nested rails or overriding an existing entrance gate.
-The same production test samples the rail's presented position after completion:
-it must stay within one point of its final position. Checking page offset alone
+Single-season round trips through the lower information sections must preserve
+the horizontal episode offset, restore the page to the browser's vertical stage,
+and settle native focus without leaving scrolling disabled. The isolated
+episode-row regression repeats re-entry across all card focus styles and retains
+the browsed card while its entry geometry remounts.
+`testRelatedReturnsDirectlyToVisibleEpisodeWithoutSeasonFocus` separately returns
+from the second Related poster straight to the episode, without a season-chip
+handoff. Across every focus style and three round trips, actual native focus must
+remain on the episode, its full frame must be onscreen, the page must return to
+zero, and the horizontal row offset must remain unchanged. Screenshots retain
+the rendered result; testing only the focused item misses an offscreen selection.
+Presentation-layer samples also require at least eight intermediate positions
+and 300-600ms between 5% and 95% of the normal-motion return. The 0.6-second
+page animation must not inherit the much shorter focus-effect duration; its
+visible duration must match an unforced native downward reveal within 150ms.
+Compare native Up and Down over the same settled endpoints, separately from
+the manually positioned deep-return cases. Both directions retain 1.2 seconds
+of samples and verify the captured endpoint has settled; a partial downward
+trace must not redefine the 5%-95% distance.
+Nine-move native-focus bursts at 0, 30, 80, 150, and 300ms intervals end on each
+row, across all three focus styles. The final focused item must be fully visible,
+its page destination correct, and scrolling enabled. These exact-target bursts
+exercise animation races, not directional candidate selection.
+`DetailReturnFocusRemoteTests.testEpisodeRelatedDirectionsRevealTheFocusedRow`
+separately uses actual remote Up/Down on the production series detail. Remote
+calls may wait for idle; the hosted burst matrix supplies the rapid timing.
+Its sparse-row cases use real remote directions from left, middle, right, and
+horizontally scrolled episode positions with one or three Related cards and a
+competing Cast row. Every populated Related row must receive focus before Cast;
+an empty Related row must allow direct Cast entry. Both directions and all card
+focus styles are covered.
+`testRapidPassThroughEpisodesPreservesTheBrowsedEpisode` moves among Related
+columns, immediately sends three Up presses through Episodes and Seasons to the
+hero, then returns Down. Across every focus style, actual native focus must
+return to Episode 1 (then a deliberately browsed Episode 4), rather than
+replacing its remembered selection with Episode 2 during the upward pass.
+Remote calls in the reproduction arrive about 220ms apart, before the page
+animations finish.
+System Reduce Motion must reach the same destination without the full-page animation.
+The production browser-layout test also samples the rail's presented position
+after completion: it must stay within one point of its final position. Checking page offset alone
 misses the spring's measured 7–8.5pt post-completion movement of the whole browser.
 
 `NativePosterComparisonTests` is an opt-in, simulator-only comparison, enabled by
@@ -1238,7 +1459,7 @@ job log. CI configuration regressions run without simulator builds:
 ### CI lanes and required check
 
 CI first runs every deterministic preflight guard and host-side regression
-suite. Successful preflight unlocks **three independent `macos-15` runners**:
+suite. Successful preflight unlocks **three independent `xcode-27` runners**:
 the tvOS simulator app build, the complete package test matrix, and app-hosted
 focus integration. A failed preflight stops expensive work; a failure in one
 build/test lane does not suppress either sibling. There is no change-scoped CI
@@ -1250,15 +1471,32 @@ Failed, cancelled, skipped, missing, or unexpected dependencies fail closed.
 Push-to-main, pull-request, manual triggers, and per-ref cancellation remain
 unchanged.
 
-Each test runner selects its own tvOS simulator matching Xcode 26.2's SDK; no
+Each test runner selects its own tvOS simulator matching Xcode 27's SDK; no
 simulator or mutable build directory crosses runners. A missing runtime fails
-instead of choosing an older installed runtime. The full matrix retains its
-40-minute wall-clock deadline. Hosted integration builds once with
-`build-for-testing`, then runs `test-without-building`, with separate 40-minute
-deadlines and retained build/test logs and result bundles. Cold compilation must
-not consume the test execution budget: run `38059892922` spent about 19 minutes
+instead of choosing an older installed runtime. The full package matrix has a
+60-minute combined build/execution deadline inside an 80-minute job budget.
+Run `39888935447` spent about 23 minutes on setup and compilation, then passed
+41 complete test bundles before the former 40-minute limit interrupted the
+still-progressing CoreModels bundle. The longer total budget preserves the
+runner's existing no-progress watchdog and result-finalization checks, with
+outer headroom for setup, termination, and retained diagnostic uploads.
+Hosted integration builds once with
+`build-for-testing`, then runs `test-without-building`, with separate build/test
+deadlines and retained build/test logs and result bundles. It uses optimized
+Debug (`-O`) so the large-catalog main-thread budget measures optimized code
+without losing `DEBUG` test seams or relaxing its one-second threshold. Package
+logic tests retain their ordinary Debug configuration. For hosted tests, cold
+compilation must not consume the test execution budget: run `38059892922` spent about 19 minutes
 building before the former combined 40-minute limit killed still-progressing
-tests. The hosted job has a 90-minute outer limit for both phases and setup;
+tests. Run `39857697957` also exhausted a full 40-minute execution window while
+still progressing through the expanded hosted suite. Both attempts of run
+`41421118241` reached the 40-minute compilation deadline before tests could
+start; the retry was still compiling the hosted test target. CI now allows
+60 minutes for compilation and 90 minutes for hosted execution, within a
+170-minute job limit including setup and evidence retention. This changes only
+the cold-build budget, not test assertions, performance thresholds, or the
+execution deadline. Local build and execution defaults remain 40 minutes unless
+`PLOZZ_FOCUS_BUILD_TIMEOUT` or `PLOZZ_FOCUS_TEST_TIMEOUT` is set;
 test failures, timeouts, and unreadable `xcresult` summaries still fail closed.
 Each lane uploads
 uniquely named diagnostics on success or failure, retained for seven days.

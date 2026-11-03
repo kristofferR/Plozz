@@ -25,7 +25,7 @@ struct PlozziOSSyncSetupSettingsView: View {
 
     init(appModel: PlozziOSAppModel) {
         self.appModel = appModel
-        _model = State(initialValue: SyncSetupPairingModel(service: appModel.syncSetup))
+        _model = State(initialValue: appModel.makeSyncSetupSender())
     }
 
     var body: some View {
@@ -59,7 +59,11 @@ struct PlozziOSSyncSetupSettingsView: View {
         .navigationTitle("iCloud Sync")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { if case .idle = model.phase { model.startDiscovery() } }
-        .onDisappear { model.stopDiscovery() }
+        .onChange(of: model.canSend, initial: true) { _, _ in model.authorizationDidChange() }
+        .onDisappear {
+            model.stopDiscovery()
+            model.cancelSending()
+        }
         .plozzFullScreenCover(isPresented: $showReceive) {
             PlozziOSSyncSetupReceiveView(appModel: appModel, sourceInvite: scannedSourceInvite) {
                 showReceive = false
@@ -168,7 +172,7 @@ struct PlozziOSSyncSetupSettingsView: View {
                 )) {
                     Label("iCloud Sync", systemImage: "icloud")
                 }
-                .disabled(appModel.cloudSyncStatus.isRecovering)
+                .disabled(appModel.cloudSyncStatus.isRecovering).settingsSearchAnchor("icloud-sync")
                 if appModel.syncSetup.isEnabled {
                     HStack {
                         SyncStatusLine(provider: syncStatusProvider)

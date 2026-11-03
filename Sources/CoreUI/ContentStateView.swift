@@ -14,6 +14,7 @@ public struct ContentStateView<Value: Sendable, Content: View>: View {
     private let emptyMessage: LocalizedStringResource
     private let errorMessage: LocalizedStringResource?
     private let errorServers: [MediaServer]
+    private let errorReport: PlaybackDiagnosticReport?
     /// Optional custom view for the `.idle`/`.loading` states. When `nil` the
     /// default `LoadingMessagesView` (spinner → playful messages) is shown; Home
     /// passes a 1:1 skeleton here so the loading state matches the loaded layout.
@@ -24,6 +25,7 @@ public struct ContentStateView<Value: Sendable, Content: View>: View {
         emptyMessage: LocalizedStringResource = "Nothing here yet.",
         errorMessage: LocalizedStringResource? = nil,
         errorServers: [MediaServer] = [],
+        errorReport: PlaybackDiagnosticReport? = nil,
         onRetry: @escaping () -> Void,
         @ViewBuilder content: @escaping (Value) -> Content
     ) {
@@ -31,6 +33,7 @@ public struct ContentStateView<Value: Sendable, Content: View>: View {
         self.emptyMessage = emptyMessage
         self.errorMessage = errorMessage
         self.errorServers = errorServers
+        self.errorReport = errorReport
         self.onRetry = onRetry
         self.content = content
         self.loadingContent = nil
@@ -43,6 +46,7 @@ public struct ContentStateView<Value: Sendable, Content: View>: View {
         emptyMessage: LocalizedStringResource = "Nothing here yet.",
         errorMessage: LocalizedStringResource? = nil,
         errorServers: [MediaServer] = [],
+        errorReport: PlaybackDiagnosticReport? = nil,
         onRetry: @escaping () -> Void,
         @ViewBuilder loadingContent: @escaping () -> Loading,
         @ViewBuilder content: @escaping (Value) -> Content
@@ -51,6 +55,7 @@ public struct ContentStateView<Value: Sendable, Content: View>: View {
         self.emptyMessage = emptyMessage
         self.errorMessage = errorMessage
         self.errorServers = errorServers
+        self.errorReport = errorReport
         self.onRetry = onRetry
         self.content = content
         self.loadingContent = { AnyView(loadingContent()) }
@@ -81,14 +86,16 @@ public struct ContentStateView<Value: Sendable, Content: View>: View {
                 icon: error == .serverUnreachable ? "wifi.slash" : "exclamationmark.triangle",
                 title: errorMessage ?? error.userMessage,
                 showRetry: true,
-                servers: errorServers
+                servers: errorServers,
+                report: errorReport
             )
         }
     }
 
     private func messageView(
         icon: String, title: LocalizedStringResource, showRetry: Bool,
-        servers: [MediaServer] = []
+        servers: [MediaServer] = [],
+        report: PlaybackDiagnosticReport? = nil
     ) -> some View {
         VStack(spacing: 24) {
             Image(systemName: icon)
@@ -103,12 +110,53 @@ public struct ContentStateView<Value: Sendable, Content: View>: View {
                 .plozzForeground(.secondary)
                 .frame(maxWidth: 800)
             if showRetry {
-                Button("Try Again", action: onRetry)
-                    .plozzActionButton()
+                if let report {
+                    ContentFailureActions(report: report, onRetry: onRetry)
+                } else {
+                    Button("Try Again", action: onRetry)
+                        .plozzActionButton()
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
+    }
+}
+
+/// Native recovery actions and the same optional details sheet used by playback and setup.
+public struct ContentFailureActions: View {
+    private let report: PlaybackDiagnosticReport?
+    private let onRetry: () -> Void
+    @State private var showsDetails = false
+
+    public init(report: PlaybackDiagnosticReport?, onRetry: @escaping () -> Void) {
+        self.report = report
+        self.onRetry = onRetry
+    }
+
+    public var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) { actions }
+            VStack(alignment: .leading, spacing: 12) { actions }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .plozzSheet(isPresented: $showsDetails) {
+            if let report { PlaybackDiagnosticDetailsSheet(report: report) }
+        }
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        if report != nil {
+            Button("Details", systemImage: "info.circle") { showsDetails = true }
+                .plozzActionButton(role: .secondary)
+                .fixedSize(horizontal: true, vertical: true)
+                .accessibilityIdentifier("content-failure-details")
+        }
+        Button("Try Again", action: onRetry)
+            .plozzActionButton()
+            .fixedSize(horizontal: true, vertical: true)
+            .accessibilityIdentifier("content-failure-retry")
     }
 }
 

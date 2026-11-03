@@ -4,13 +4,19 @@ import os
 public enum CardCaptionView: String, CaseIterable, Codable, Sendable {
     case home, recommended, browse, collections, playlists, search, watchlist
     case related, episodes, extras, filmography
+    // Retain the override originally introduced for portrait cards.
+    case continueWatching = "continueWatchingPortrait"
+    case homeLibraries
+
+    public var isRowOverride: Bool { self == .continueWatching || self == .homeLibraries }
 
     public static var customizableCases: [Self] {
         allCases
     }
 
     public var customizationChoices: [CardCaptionOverride] {
-        self == .home || self == .recommended ? [.show, .hide, .mixed] : [.show, .hide]
+        if isRowOverride { return [.automatic, .show, .hide] }
+        return self == .home || self == .recommended ? [.show, .hide, .mixed] : [.show, .hide]
     }
 
     public var displayName: LocalizedStringResource {
@@ -26,6 +32,8 @@ public enum CardCaptionView: String, CaseIterable, Codable, Sendable {
         case .episodes: "Episode browser"
         case .extras: "Extras"
         case .filmography: "Filmography"
+        case .continueWatching: "Continue Watching"
+        case .homeLibraries: "Libraries"
         }
     }
 }
@@ -88,6 +96,7 @@ public struct CardCaptionSettings: Codable, Equatable, Sendable {
     }
 
     public func customization(in view: CardCaptionView) -> CardCaptionOverride {
+        if view.isRowOverride { return override(for: view) }
         if view.customizationChoices.contains(.mixed),
            mixedOverrides.contains(view) || (preference == .recommended && overrides[view] == nil) {
             return .mixed
@@ -120,8 +129,17 @@ public struct CardCaptionSettings: Codable, Equatable, Sendable {
     }
 
     public func showsLabels(
-        in view: CardCaptionView, isShowcase: Bool = false, hasArtworkTitle: Bool = false
+        in view: CardCaptionView, isShowcase: Bool = false, hasArtworkTitle: Bool = false,
+        isContinueWatching: Bool = false
     ) -> Bool {
+        if view == .homeLibraries {
+            return overrides[view] ?? showsLabels(
+                in: .home, isShowcase: isShowcase, hasArtworkTitle: hasArtworkTitle
+            )
+        }
+        if isContinueWatching, let override = overrides[.continueWatching] {
+            return override
+        }
         if mixedOverrides.contains(view) { return !(isShowcase || hasArtworkTitle) }
         return overrides[view] ?? inheritedShowsLabels(
             in: view, isShowcase: isShowcase, hasArtworkTitle: hasArtworkTitle
@@ -221,7 +239,9 @@ public final class CardCaptionSettingsStore: CardCaptionSettingsStoring, @unchec
     public func load() -> CardCaptionSettings {
         do {
             if let data = defaults.data(forKey: key) {
-                defaults.set(true, forKey: key + ".migrated")
+                if !defaults.bool(forKey: key + ".migrated") {
+                    defaults.set(true, forKey: key + ".migrated")
+                }
                 return try JSONDecoder().decode(CardCaptionSettings.self, from: data)
             }
             guard !defaults.bool(forKey: key + ".migrated") else { return .default }

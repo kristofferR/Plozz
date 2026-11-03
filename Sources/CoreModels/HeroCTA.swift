@@ -23,10 +23,20 @@ public enum HeroCTA: Equatable, Sendable {
     /// (`pending`) or approved and still searching (`processing` with no active
     /// queue item). Shown as a "Requested" status.
     case requested
-    /// No Play/Request button: a featured title that isn't owned and can't be
-    /// requested because Seerr isn't connected. The slide still shows in the
-    /// carousel; it just offers no primary action.
+    /// An approved request for a future release, without library or queue evidence.
+    case awaitingRelease
+    /// No Play/Request button: no verified playable copy, and requesting is
+    /// unavailable or the server already reports availability. The title remains
+    /// navigable without offering an unverified Play or a redundant Request.
     case unavailable
+
+    public var requestStatusTitle: LocalizedStringResource {
+        self == .awaitingRelease ? "Requested · Unreleased" : "Requested"
+    }
+
+    public var requestStatusSystemImage: String {
+        self == .awaitingRelease ? "calendar" : "clock"
+    }
 }
 
 public struct MediaOwnershipPresentation: Equatable, Sendable {
@@ -55,18 +65,26 @@ public extension MediaItem {
     }
 
     var playActionTitle: LocalizedStringResource {
-        startsWatching
+        if let source = externalSourceVersion {
+            return source.externalLink?.actionTitle ?? LocalizedStringResource("Open Link", comment: "Open an imported external title link whose destination has not loaded yet.")
+        }
+        return startsWatching
             ? LocalizedStringResource("Start watching", comment: "Play an unstarted first episode. The season and episode numbers follow this label.")
             : "Play"
     }
 
     /// The hero primary CTA for this item given the current Seerr connection.
-    func heroCTA(seerConnected: Bool) -> HeroCTA {
+    func heroCTA(
+        seerConnected: Bool, now: Date = Date(), calendar: Calendar = .current
+    ) -> HeroCTA {
         Self.heroCTA(
             availability: availability,
             downloadProgress: downloadProgress,
             hasValidatedPlayableSource: hasPlayableLibraryTarget(),
-            seerConnected: seerConnected
+            seerConnected: seerConnected,
+            releaseDate: releaseDate,
+            hasDownloadActivity: hasRequestDownloadActivity == true,
+            now: now, calendar: calendar
         )
     }
 
@@ -124,15 +142,18 @@ public extension MediaItem {
     /// Pure decision used by ``heroCTA(seerConnected:)`` and directly by the hero
     /// (which may apply a just-tapped optimistic `availability` override).
     ///
-    /// - Ordinary library items (`availability == nil`) always ``HeroCTA/play``.
-    /// - Owned featured titles (`available`/`partiallyAvailable`) also ``play``.
-    /// - Everything else needs Seerr connected to offer any action; otherwise
-    ///   ``unavailable`` (the slide shows with no Play/Request button).
+    /// Verified library copies offer Play. Server availability alone cannot
+    /// establish access for this profile, but must not offer a duplicate request.
+    /// Other request states require a connected Seerr service.
     static func heroCTA(
         availability: MediaAvailabilityStatus?,
         downloadProgress: Double?,
         hasValidatedPlayableSource: Bool,
-        seerConnected: Bool
+        seerConnected: Bool,
+        releaseDate: Date? = nil,
+        hasDownloadActivity: Bool = false,
+        now: Date = Date(),
+        calendar: Calendar = .current
     ) -> HeroCTA {
         if hasValidatedPlayableSource { return .play }
         guard seerConnected else { return .unavailable }
@@ -143,8 +164,16 @@ public extension MediaItem {
             if let downloadProgress {
                 return .downloading(progress: downloadProgress)
             }
+            if !hasDownloadActivity,
+               SeasonEpisodeAvailability.scheduled(
+                   airDate: releaseDate, now: now, calendar: calendar
+               ) == .unaired {
+                return .awaitingRelease
+            }
             return .requested
-        case .none, .unknown, .deleted, .available, .partiallyAvailable:
+        case .available, .partiallyAvailable:
+            return .unavailable
+        case .none, .unknown, .deleted:
             return .request
         }
     }

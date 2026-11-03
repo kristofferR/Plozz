@@ -17,9 +17,10 @@ first-class backends; co-equal with `ProviderJellyfin`.
 - `PlexConnectionResolver` + `PlexConnectionSelector` — pick the best
   reachable server connection from `plex.tv` (LAN vs WAN vs relayed),
   prioritising local & direct over relayed.
-- `PlexDeviceProfile` — the direct-play / transcode capability matrix sent
-  to the server, parameterised by whether the on-device decode engine
-  (Plozzigen) is linked.
+- `PlexDeviceProfile` — the client identity sent to Plex.tv and media servers.
+  Defaults report the runtime device family, friendly device name, OS version,
+  and app bundle version on both platforms. The per-install client identifier
+  stays stable; playback capabilities remain separate from this identity.
 - `PlexDTOs` — Plex JSON shapes, mapped into `CoreModels` at the seam.
 
 ## Invariants
@@ -43,6 +44,47 @@ first-class backends; co-equal with `ProviderJellyfin`.
 - Home-user identity changes happen **in-memory only** — Plozz never
   rewrites the stored admin account's token; per-user tokens live in a
   short-lived override map.
+- An empty Home user's library access is not an expired login. After a server
+  rejects section discovery, a successful Plex cloud resources response that
+  omits that server confirms an empty video/music library inventory for this user.
+  A present grant, rejected cloud credential, malformed response, network failure,
+  or cancellation is never converted to an empty result. Resource-token lookup
+  reads the server grant directly, without requiring advertised connection URLs
+  or probing servers just to resolve credentials.
+  Browsing providers receive a live cloud-credential reader fenced to their
+  account and effective credential revision. Sharing verification uses that
+  Home-user token, never the server-scoped token, and rechecks identity after
+  the cloud response before publishing an empty inventory.
+
+## Live TV tuning
+
+Plex DVR tuning uses the lineup's native channel `id`, never its display number
+(`vcn`). Channels without display numbers remain playable. Native IDs are
+validated as a single path component; invalid IDs do not fall back to another
+channel or tuner.
+
+Failed tune requests use the consent-gated playback diagnostics sink under
+`plexLiveTune`. Evidence retains HTTP status, numeric Plex failure status,
+response format, and bounded transport error codes, never server messages,
+channel identifiers, URLs, credentials, or response bodies. Cancellation and
+successful tunes do not emit failure events. Existing owned-session cleanup
+and no-speculative-retry behavior remain unchanged.
+
+## Format badges
+
+Detail and version badges preserve the same source's Dolby Vision compatibility
+and HDR10+ hints together. A base compatibility ID of 1 does not downgrade
+confirmed HDR10+ to HDR10. HLG/SDR/none compatibility remains authoritative;
+profile 8 alone and false DoVi flags do not establish an HDR10 base layer.
+Selected audio profile/title hints use the shared normalization, including
+E-AC-3 JOC, without changing playback negotiation or adding metadata requests.
+
+## Playback chapters
+
+Playback detail requests opt into `includeChapters=1` and carry the server's
+item-level chapter starts, titles, and optional images in `PlaybackRequest`.
+Millisecond offsets become seconds; missing and invalid starts are omitted.
+Ordinary browsing requests do not add this chapter query.
 
 ## Episode identity and order
 
@@ -72,7 +114,59 @@ excluded. The library Recommended view retains `libraryHubs` behavior.
 Home continues to use the canonical Continue Watching feed rather than
 duplicating a resume/on-deck hub inside each library.
 
+Match server retains each promoted row's sanitized native shelf key separately
+from its stable row identity. If the content response omits that row or truncates
+its inline items, Home loads that exact shelf rather than substituting the full
+recommendation menu. Older rows without a shelf key get one shared retry per
+library; unrecoverable rows report an error without discarding successful siblings.
+Surviving shelves match their saved keys before positional recommendation slots,
+so an omitted sibling cannot shift another shelf into two rows. Unmatched slots
+can still adopt genuinely new recommendation subjects.
+Explicitly empty shelves remain empty. Key-only promotions have a stable identity
+derived from the credential-free key, never the translated display title.
+Persisted keys are revalidated before use, and recovery keeps the active viewer's
+credentials and library filtering. Browse continuation verifies preview anchors
+before falling back to a saved shelf, so a rotating recommendation cannot silently
+open an unrelated subject.
+Fresh server-row content also carries its sanitized continuation beside its
+items. Curated hubs issue a new `curatedHubSeed` on each promoted-hub request;
+See all pages use the preview's seed directly rather than rediscovering the hub
+or using the older layout-discovery key. Recovered rows carry the exact recovery
+key. Legacy previews without a captured key retain the anchor-checked fallback.
+
+Home and library Continue Watching share the same endpoint selection: items hub,
+plain hub, then legacy on-deck only after an initial unsupported, invalid-response,
+or decode failure. An empty successful hub is authoritative. Authentication,
+rate-limit, cancellation, transport, and failures after a decoded page do not
+switch feeds or publish partial results. Home still applies its video and
+hidden-library filtering after the complete feed is available.
+
+Exhaustive feed pagination detects repeated server items using namespaced
+`ratingKey` and metadata `key` aliases. A global Plex GUID is only a fallback
+when both local identifiers are absent: copies or editions in different
+libraries can legitimately share it. Size, total, offset, and forward-progress
+validation remain strict.
+Failed reads also record the failing endpoint category and paging invariant for
+the shared Details sheet. These opt-in diagnostics preserve error/fallback
+behavior and never export item identities or response bodies.
+
+## Hero artwork
+
+Plex's selected `Image` entry with type `backgroundSquare` is retained as
+`.squareHero`, separately from posters, logos, and landscape backgrounds.
+Compact iPhone Home and detail heroes prefer it under Recommended or Library
+artwork preferences; an explicit Metadata providers preference still wins.
+Relative paths use the existing server-authenticated artwork route, while
+Discover paths remain on Discover. Missing square art retains the existing
+fallback, and landscape heroes and poster cards are unchanged.
+
 ## Continue Watching artwork
+
+Persisted artwork first matches the connection resolver's live in-memory origins.
+Only unmatched URLs load historical origins from preferences, avoiding a
+preferences read for each poster and cast credit during cached Home restoration.
+Historical origins remain server-scoped and live, including reverse-proxy paths;
+reauthentication still uses the current provider's credentials and route.
 
 The existing parent-series metadata batches (at most 50 referenced series per
 request) provide both recency and artwork context. Episodes retain their own
@@ -83,6 +177,17 @@ Unrequested or non-series records are rejected, and a failed parent lookup keeps
 the original feed available.
 
 ## Collections
+
+Movie Browse follows the server's library collection policy and per-collection
+overrides automatically under All + Name sorting. Its existing section query
+sends `includeCollections=1`; Plex supplies the mixed rows and authoritative
+total, without a client membership scan or a second global collection listing.
+Stream enrichment uses `includeOptionalElements` so collection containers survive
+response customization. Other sorts, filters, background inventories and feeds
+request individual titles. There is no new setting or persistent Browse control.
+For grouped Browse, A-Z targets resolve against the actual paged mixed result
+on demand, not the movie-only `firstCharacter` facet. Ordinary paging does not
+enumerate the library; a late-letter jump can read multiple cancellable pages.
 
 `libraries()` returns actual server sections only. Collection discovery is an
 option inside a movie/TV library, exposed by `.libraryCollections` and
@@ -182,6 +287,15 @@ options translate selected audio/subtitle indexes to Plex's database stream
 IDs, using the selected media version's stream inventory. Decision and playback
 requests must carry identical selections and limits.
 
+Before negotiating a server rendition with a selected audio track, Plozz awaits
+`PUT /library/parts/{partID}?audioStreamID={streamID}&allParts=1` using the active
+Plex user's credentials. Plex can ignore the audio selection in decision/start
+URLs alone. The part and database stream ID come from the selected version;
+the player's container index remains unchanged. Selection failures or cancellation
+stop negotiation rather than silently playing the previous language. Direct-file
+playback does not write the server's track selection. This follows
+[`MediaPart.setSelectedAudioStream` in PlexAPI](https://github.com/pushingkarmaorg/python-plexapi/blob/master/plexapi/media.py).
+
 Bounded video encoding reserves the quality policy's audio budget. Plex receives
 the documented `audioChannelCount` parameter and a `videoAudioCodec` /
 `audio.bitrate` profile limitation, rather than relying on `audioChannels` or
@@ -218,7 +332,12 @@ Tests: `PlexStreamingQualityTests` and `StreamingPlaybackTests`.
 
 ## Original-file playback versus downloads
 
-Native playback, Plozzigen's local-remux source, and scrub-frame extraction use
+Aether-enabled direct-play negotiation uses `PlozzigenMediaFormats`, including
+linked software-decoded video/audio families rather than only native formats.
+The selected rendition still controls playback; an original-file descriptor is
+not permission to bypass conversion or quality limits.
+
+Original-file playback and scrub-frame extraction use
 the original `/library/parts/...` URL without `download=1`. Only the explicit
 offline-download source includes that flag. Reusing the download URL for player
 buffering can make Plex's activity dashboard show transient download tasks.
@@ -226,7 +345,7 @@ Both variants retain the same selected media part, credential-free locator,
 original bytes, and current-account authentication. This does not change engine
 selection, quality limits, or server-transcode negotiation.
 
-Tests: `ProviderPlexTests` covers MKV local remux, native MP4 playback, scrubbing,
+Tests: `ProviderPlexTests` covers MKV and MP4 original-file playback, scrubbing,
 selected media versions, and the separately preserved offline-download URL.
 
 ## Playback session reporting

@@ -13,26 +13,61 @@ struct TouchFeedbackFixture: View {
     @State private var events = 0
     @State private var previews = 0
     @State private var commits = 0
+    @State private var committedPosition: TimeInterval = -1
+    @State private var gestureMinimum: TimeInterval = 0
+    @State private var gestureMaximum: TimeInterval = 0
+    @State private var isScrubbing = false
+
+    private let segmented = ProcessInfo.processInfo.arguments.contains("--segmented-touch-feedback")
+    private let segments: [MediaSegment] = [
+        .init(kind: .intro, start: 75, end: 84.375),
+        .init(kind: .recap, start: 120, end: 165),
+        .init(kind: .commercial, start: 174.375, end: 225)
+    ]
 
     var body: some View {
         VStack(spacing: 30) {
             PlayerTouchScrubBar(
                 currentSeconds: position, duration: duration, bufferedFraction: 1,
-                onScrub: { position = $0; previews += 1 },
-                onScrubbingChanged: { if !$0 { commits += 1 } },
+                segments: segmented ? segments : [],
+                onScrub: {
+                    position = $0
+                    previews += 1
+                    gestureMinimum = min(gestureMinimum, $0)
+                    gestureMaximum = max(gestureMaximum, $0)
+                },
+                onScrubbingChanged: {
+                    isScrubbing = $0
+                    if $0 {
+                        gestureMinimum = .infinity
+                        gestureMaximum = -.infinity
+                    } else {
+                        commits += 1
+                        committedPosition = position
+                    }
+                },
                 feedback: TouchFeedback(
                     output: { _ in events += 1 },
                     isActive: { true }
                 )
             )
+            .frame(maxWidth: segmented ? 240 : .infinity)
+            .accessibilityLabel("Playback position")
             .accessibilityIdentifier("touch-scrubber")
             Text("Feedback \(events)").accessibilityIdentifier("feedback-count")
             Text("Previews \(previews)").accessibilityIdentifier("preview-count")
             Text("Commits \(commits)").accessibilityIdentifier("commit-count")
+            if segmented {
+                Text(verbatim: String(format: "%.3f", committedPosition)).accessibilityIdentifier("committed-position")
+                Text(verbatim: String(format: "%.3f", gestureMinimum)).accessibilityIdentifier("gesture-minimum")
+                Text(verbatim: String(format: "%.3f", gestureMaximum)).accessibilityIdentifier("gesture-maximum")
+                Text(verbatim: isScrubbing ? "yes" : "no").accessibilityIdentifier("scrubbing-active")
+            }
             Button("Playback tick") { position += 1 }
             Button("Unknown duration") { duration = 0 }
         }
         .padding(40)
+        .background(segmented ? Color(red: 0.15, green: 0.35, blue: 0.6) : .clear)
         .preferredColorScheme(.dark)
     }
 }
@@ -53,7 +88,7 @@ struct WatchlistFeedbackFixture: View {
             PlozziOSHomeHeroForeground(
                 item: item, detailItem: item, watchlistItem: item,
                 presentation: .init(item: item, artworkStyle: .compactPortrait, surface: .home),
-                style: .compactPortrait, provider: nil, onPlay: { _ in }
+                style: .compactPortrait, onPlay: { _ in }
             )
             .id(revision)
             Text("Taps \(probe.taps)").accessibilityIdentifier("watchlist-taps")

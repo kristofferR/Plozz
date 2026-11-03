@@ -24,8 +24,11 @@ public struct EpisodeWatchStatePill: View {
     private let playGlyphHeight: CGFloat?
     private let detailText: String?
     private let showsPlayGlyphWhenIdle: Bool
+    private let spacing: CGFloat
+    private var fittingFontSize: CGFloat?
 
     @Environment(\.plozzChromeIsFocused) private var isFocused
+    @Environment(\.plozzShowsProgressBars) private var showsProgressBars
 
     /// - Parameters:
     ///   - detailText: a short qualifier shown immediately before the duration
@@ -43,7 +46,8 @@ public struct EpisodeWatchStatePill: View {
         barHeight: CGFloat = 5,
         playGlyphHeight: CGFloat? = nil,
         detailText: String? = nil,
-        showsPlayGlyphWhenIdle: Bool = false
+        showsPlayGlyphWhenIdle: Bool = false,
+        spacing: CGFloat = 8
     ) {
         self.item = item
         self.showsRuntimeWhenIdle = showsRuntimeWhenIdle
@@ -54,6 +58,13 @@ public struct EpisodeWatchStatePill: View {
         self.playGlyphHeight = playGlyphHeight
         self.detailText = detailText
         self.showsPlayGlyphWhenIdle = showsPlayGlyphWhenIdle
+        self.spacing = spacing
+    }
+
+    fileprivate func fittingText(size: CGFloat?) -> Self {
+        var result = self
+        result.fittingFontSize = size
+        return result
     }
 
     private enum State {
@@ -109,25 +120,7 @@ public struct EpisodeWatchStatePill: View {
                 .fontWeight(.bold)
                 .accessibilityLabel("Watched")
         case let .inProgress(fraction, remaining):
-            HStack(spacing: 8) {
-                playGlyph
-                ResumeProgressCapsule(
-                    progress: fraction,
-                    onLight: false,
-                    width: barWidth,
-                    height: barHeight,
-                    flexesToFitRow: true
-                )
-                // The bar yields before the label does. An `HStack` otherwise
-                // splits a shortfall between them, so a long string at a large
-                // text size lost characters while the gauge beside it kept its
-                // full width — the label is the only part that says *which*
-                // episode, and a truncated "S4, E1 ·…" says nothing.
-                .layoutPriority(0)
-                if let trailing = joined(remaining) {
-                    Text(verbatim: trailing).layoutPriority(1)
-                }
-            }
+            playbackContent(fraction: fraction, text: joined(remaining), showsPlay: true)
             .accessibilityLabel(
                 remaining.map { Text("\($0) left") }
                     ?? Text(
@@ -144,14 +137,48 @@ public struct EpisodeWatchStatePill: View {
             // the bar rather than drawing an empty one keeps the chip honest — an
             // unstarted episode showing a 0% bar reads as a stalled download.
             if let label = joined(text) {
-                if showsPlayGlyphWhenIdle {
-                    HStack(spacing: 8) {
-                        playGlyph
-                        Text(verbatim: label)
-                    }
-                } else {
-                    Text(verbatim: label)
+                playbackContent(fraction: nil, text: label, showsPlay: showsPlayGlyphWhenIdle)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func playbackContent(fraction: Double?, text: String?, showsPlay: Bool) -> some View {
+        if let fittingFontSize, let text {
+            ViewThatFits(in: .horizontal) {
+                playbackRow(fraction: fraction, text: text, showsPlay: showsPlay)
+                    .fixedSize(horizontal: true, vertical: true)
+                if showsPlay {
+                    playbackRow(fraction: fraction, text: text, showsPlay: false)
+                        .fixedSize(horizontal: true, vertical: true)
                 }
+                Text(verbatim: text)
+                    .fixedSize(horizontal: true, vertical: true)
+                // Only after both decorations yield may the label get smaller.
+                // Extreme widths wrap rather than ellipsize or shrink indefinitely.
+                Text(verbatim: text)
+                    .font(.system(size: fittingFontSize * 0.85, weight: .semibold))
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .minimumScaleFactor(1)
+        } else {
+            playbackRow(fraction: fraction, text: text, showsPlay: showsPlay)
+        }
+    }
+
+    private func playbackRow(fraction: Double?, text: String?, showsPlay: Bool) -> some View {
+        HStack(spacing: spacing) {
+            if showsPlay { playGlyph }
+            if showsProgressBars, let fraction {
+                ResumeProgressCapsule(
+                    progress: fraction, onLight: false,
+                    width: barWidth, height: barHeight, flexesToFitRow: fittingFontSize == nil
+                )
+                .layoutPriority(0)
+            }
+            if let text {
+                Text(verbatim: text).layoutPriority(1)
             }
         }
     }
@@ -209,9 +236,11 @@ public struct ResumeChipOverlay: View {
     private let showsPlayGlyphWhenIdle: Bool
     private let bottomScrimStart: CGFloat?
     private let bottomScrimDepth: CGFloat?
+    private let compactHorizontalLayout: Bool
     private var rendersScrim = true
 
     @Environment(\.plozzMetrics) private var metrics
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     /// - Parameters:
     ///   - downloadState: optional trailing download affordance. `nil` renders the
@@ -234,7 +263,8 @@ public struct ResumeChipOverlay: View {
         detailText: String? = nil,
         showsPlayGlyphWhenIdle: Bool = false,
         bottomScrimStart: CGFloat? = nil,
-        bottomScrimDepth: CGFloat? = nil
+        bottomScrimDepth: CGFloat? = nil,
+        compactHorizontalLayout: Bool = false
     ) {
         self.item = item
         self.downloadState = downloadState
@@ -243,6 +273,7 @@ public struct ResumeChipOverlay: View {
         self.showsPlayGlyphWhenIdle = showsPlayGlyphWhenIdle
         self.bottomScrimStart = bottomScrimStart
         self.bottomScrimDepth = bottomScrimDepth
+        self.compactHorizontalLayout = compactHorizontalLayout
     }
 
     public var body: some View {
@@ -273,11 +304,17 @@ public struct ResumeChipOverlay: View {
                 // was tried instead and gave a gauge that ran most of the way
                 // across a wide tvOS card.
                 GeometryReader { geometry in
+                    let spacingInset = compactHorizontalLayout
+                        ? min(metrics.resumeChipInset, geometry.size.width * 0.05) : metrics.resumeChipInset
                     let barWidth = min(
                         metrics.resumeChipBarWidth,
                         max(20, geometry.size.width * 0.42)
                     )
-                    HStack(alignment: .center, spacing: metrics.resumeChipInset * 0.5) {
+                    let stacksDownload = prioritizesText && dynamicTypeSize.isAccessibilitySize && downloadState != nil
+                    let layout = stacksDownload
+                        ? AnyLayout(VStackLayout(alignment: .leading, spacing: spacingInset * 0.5))
+                        : AnyLayout(HStackLayout(alignment: .center, spacing: spacingInset * 0.5))
+                    layout {
                         if item.cardRuntimeText != nil
                             || item.resumeProgressFraction != nil
                             || (showsPlayGlyphWhenIdle && detailText?.isEmpty == false) {
@@ -289,8 +326,10 @@ public struct ResumeChipOverlay: View {
                                 barWidth: barWidth,
                                 barHeight: metrics.resumeChipBarHeight,
                                 detailText: detailText,
-                                showsPlayGlyphWhenIdle: showsPlayGlyphWhenIdle
+                                showsPlayGlyphWhenIdle: showsPlayGlyphWhenIdle,
+                                spacing: compactHorizontalLayout ? spacingInset * 0.5 : 8
                             )
+                            .fittingText(size: prioritizesText ? metrics.resumeChipFontSize : nil)
                             .font(.system(size: metrics.resumeChipFontSize, weight: .semibold))
                             // The card grows with Dynamic Type to keep this label
                             // whole (see `PlozzMetrics.continueWatchingWidth`),
@@ -303,12 +342,25 @@ public struct ResumeChipOverlay: View {
                         }
                         // Keeps the download badge pinned trailing whether or not
                         // the pill is present, so it never drifts to the leading edge.
-                        Spacer(minLength: metrics.resumeChipInset * 0.5)
+                        if !stacksDownload {
+                            Spacer(minLength: spacingInset * 0.5)
+                        }
                         if let downloadState {
                             MediaDownloadBadge(
                                 state: downloadState,
                                 size: metrics.resumeChipAccessorySize
                             )
+                            .frame(maxWidth: stacksDownload ? .infinity : nil, alignment: .trailing)
+                        }
+                    }
+                    .background {
+                        if prioritizesText {
+                            GeometryReader { contentGeometry in
+                                Color.clear.preference(
+                                    key: PortraitPlaybackHeightKey.self,
+                                    value: ceil(contentGeometry.size.height) + metrics.resumeChipInset + 4
+                                )
+                            }
                         }
                     }
                     .padding(metrics.resumeChipInset)
@@ -327,6 +379,14 @@ public struct ResumeChipOverlay: View {
         var result = self
         result.rendersScrim = false
         return result
+    }
+
+    private var prioritizesText: Bool {
+        #if os(iOS)
+        compactHorizontalLayout
+        #else
+        false
+        #endif
     }
 
     var artworkScrim: MediaArtworkChromeScrim? {

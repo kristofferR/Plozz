@@ -2,6 +2,127 @@ import XCTest
 @testable import CoreModels
 
 final class CardCaptionSettingsTests: XCTestCase {
+    func testHomeLibrariesInheritHomeAndOverrideOnlyLibraryCards() throws {
+        try withDefaults { defaults in
+            let source = CardCaptionSettingsStore(defaults: defaults, namespace: "source")
+            for preset in CardCaptionPreference.allCases {
+                for parent in [CardCaptionOverride.automatic, .show, .hide, .mixed] {
+                    for choice in CardCaptionView.homeLibraries.customizationChoices {
+                        var settings = CardCaptionSettings(preference: preset)
+                        settings.setOverride(parent, for: .home)
+                        settings.setOverride(.hide, for: .continueWatching)
+                        let inherited = settings
+                        settings.setOverride(choice, for: .homeLibraries)
+                        source.save(settings)
+                        let entries = ProfileSettingsTransfer.capture(namespace: "source", defaults: defaults)
+                        ProfileSettingsTransfer.apply(entries, namespace: "target", defaults: defaults)
+                        let restored = CardCaptionSettingsStore(defaults: defaults, namespace: "target").load()
+                        XCTAssertEqual(restored, settings)
+                        XCTAssertEqual(restored.customization(in: .homeLibraries), choice)
+                        for showcase in [false, true] {
+                            XCTAssertEqual(restored.showsLabels(in: .homeLibraries, isShowcase: showcase),
+                                           choice == .automatic
+                                               ? inherited.showsLabels(in: .home, isShowcase: showcase)
+                                               : choice == .show)
+                            for other in CardCaptionView.allCases where other != .homeLibraries {
+                                XCTAssertEqual(restored.showsLabels(in: other, isShowcase: showcase),
+                                               inherited.showsLabels(in: other, isShowcase: showcase))
+                            }
+                        }
+                        XCTAssertEqual(CardCaptionSettingsStore(defaults: defaults, namespace: "unrelated").load(),
+                                       .default)
+                        settings.applyPreset(preset)
+                        XCTAssertEqual(settings, CardCaptionSettings(preference: preset))
+                        XCTAssertEqual(settings.customization(in: .homeLibraries), .automatic)
+                    }
+                }
+            }
+        }
+        let legacy = Data(#"{"preference":"show","overrides":{"home":false},"homeDefaultVersion":1}"#.utf8)
+        let restored = try JSONDecoder().decode(CardCaptionSettings.self, from: legacy)
+        XCTAssertEqual(restored.customization(in: .homeLibraries), .automatic)
+        XCTAssertFalse(restored.showsLabels(in: .homeLibraries))
+        XCTAssertTrue(restored.showsLabels, "Library directories retain the global preset.")
+    }
+
+    func testContinueWatchingInheritsItsParentAndOverridesOnlyThatRow() {
+        for preference in CardCaptionPreference.allCases {
+            for parent in [CardCaptionView.home, .recommended] {
+                for parentChoice in [CardCaptionOverride.automatic, .show, .hide, .mixed] {
+                    var settings = CardCaptionSettings(preference: preference)
+                    settings.setOverride(parentChoice, for: parent)
+                    let inheritedSettings = settings
+                    for choice in CardCaptionView.continueWatching.customizationChoices {
+                        settings.setOverride(choice, for: .continueWatching)
+                        XCTAssertEqual(settings.customization(in: .continueWatching), choice)
+                        for artworkTitle in [false, true] {
+                            for showcase in [false, true] {
+                                let expected = inheritedSettings.showsLabels(
+                                    in: parent, isShowcase: showcase, hasArtworkTitle: artworkTitle
+                                )
+                                XCTAssertEqual(settings.showsLabels(
+                                    in: parent, isShowcase: showcase, hasArtworkTitle: artworkTitle,
+                                    isContinueWatching: true
+                                ), choice == .automatic ? expected : choice == .show)
+                                XCTAssertEqual(settings.showsLabels(
+                                    in: parent, isShowcase: showcase, hasArtworkTitle: artworkTitle
+                                ), expected)
+                            }
+                        }
+                        XCTAssertEqual(settings.override(for: parent), parentChoice)
+                        XCTAssertEqual(settings.showsLabels(in: .browse),
+                                       CardCaptionSettings(preference: preference).showsLabels(in: .browse))
+                    }
+                }
+            }
+        }
+    }
+
+    func testContinueWatchingLabelsTransferWithExistingCaptionSettingsAndResetWithPresets() throws {
+        try withDefaults { defaults in
+            let source = CardCaptionSettingsStore(defaults: defaults, namespace: "portrait-source")
+            for choice in [CardCaptionOverride.show, .hide] {
+                var settings = CardCaptionSettings.default
+                settings.setOverride(.show, for: .home)
+                settings.setOverride(.hide, for: .recommended)
+                settings.setOverride(choice, for: .continueWatching)
+                source.save(settings)
+                let entries = ProfileSettingsTransfer.capture(namespace: "portrait-source", defaults: defaults)
+                ProfileSettingsTransfer.apply(entries, namespace: "portrait-target", defaults: defaults)
+                let target = CardCaptionSettingsStore(defaults: defaults, namespace: "portrait-target")
+                XCTAssertEqual(target.load(), settings)
+                XCTAssertNil(target.load().selectedPreset)
+                settings.resetOverrides()
+                XCTAssertEqual(settings.customization(in: .continueWatching), .automatic)
+                for preset in CardCaptionPreference.allCases {
+                    var reset = target.load()
+                    reset.applyPreset(preset)
+                    XCTAssertEqual(reset, CardCaptionSettings(preference: preset))
+                    XCTAssertEqual(reset.customization(in: .continueWatching), .automatic)
+                }
+                XCTAssertEqual(source.load().customization(in: .continueWatching), choice)
+            }
+        }
+    }
+
+    func testExistingPortraitCaptionOverrideRemainsTheSharedContinueWatchingChoice() throws {
+        for value in [false, true] {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "preference": "recommended", "overrides": ["continueWatchingPortrait": value]
+            ])
+            let restored = try JSONDecoder().decode(CardCaptionSettings.self, from: data)
+            XCTAssertEqual(restored.customization(in: .continueWatching), value ? .show : .hide)
+            for artworkTitle in [false, true] {
+                XCTAssertEqual(restored.showsLabels(
+                    in: .home, hasArtworkTitle: artworkTitle, isContinueWatching: true
+                ), value)
+            }
+            XCTAssertEqual(try JSONDecoder().decode(
+                CardCaptionSettings.self, from: JSONEncoder().encode(restored)
+            ), restored)
+        }
+    }
+
     func testCustomStateAndPresetReplacementSurviveProfileStorageAndTransfer() throws {
         try withDefaults { defaults in
             let source = CardCaptionSettingsStore(defaults: defaults)

@@ -7,6 +7,24 @@ import XCTest
 
 @MainActor
 final class PlexSyncAuthorizationTests: XCTestCase {
+    func testRepeatedPlexSignInReusesLegacyAccountWithoutReplacingTheHomeUser() async throws {
+        try await withApp { app in
+            await authenticate(app)
+            let original = try XCTUnwrap(app.accountsProviders.accounts.first { $0.id == "plex" })
+            let binding = app.profiles.activeProfile.homeUserBinding(forPlexAccount: original.id)
+            let membership = app.activeAccountIDs(for: app.profiles.activeProfileID)
+
+            XCTAssertTrue(app.persist([original.session(token: "FIXTURE-OWNER")]))
+            await app.plexHomeUsers.waitForPlexPINRequirementCheck()
+
+            XCTAssertEqual(app.accountsProviders.accounts, [original])
+            XCTAssertEqual(app.profiles.activeProfile.homeUserBinding(forPlexAccount: original.id), binding)
+            XCTAssertEqual(app.activeAccountIDs(for: app.profiles.activeProfileID), membership)
+            XCTAssertNil(app.plexHomeUsers.pendingPlexPINRequest)
+            XCTAssertEqual(app.accountsProviders.tokenResolver(original.id), "FIXTURE-SERVER")
+        }
+    }
+
     func testCosmeticSyncDoesNotAskForTheSamePlexPINAgain() async throws {
         try await withApp { app in
             await authenticate(app)

@@ -3,107 +3,375 @@ import SwiftUI
 import CoreModels
 import CoreUI
 
-/// The shared section editor adapts existing row feeds without changing their identities.
+/// Home customization destinations share the active profile's existing settings.
 public struct HomeRowsSettingsView: View {
     public let libraries: [AggregatedLibrary]
     public let accounts: [ResolvedAccount]
     public let visibility: HomeLibraryVisibilityModel
+    public let spoilerSettings: SpoilerSettings
+    private let searchPage: SettingsSearchPage
     @Environment(HeroSettingsModel.self) private var hero
     @Environment(HeroBackgroundSettingsModel.self) private var heroBackground
+    @Environment(CardStyleSettingsModel.self) private var cards
+    @Environment(SettingsSearchRequest.self) private var searchRequest: SettingsSearchRequest?
     @State private var inventory: HomeSectionCatalogModel
-    @State private var isReordering = false
-    @State private var isLifting = false
-    @State private var reloadRevision = 0
-    @State private var editError: AppError?
 
     public init(
         libraries: [AggregatedLibrary], accounts: [ResolvedAccount],
-        visibility: HomeLibraryVisibilityModel
+        visibility: HomeLibraryVisibilityModel, spoilerSettings: SpoilerSettings = .default,
+        searchPage: SettingsSearchPage = .home
     ) {
-        self.init(libraries: libraries, accounts: accounts, visibility: visibility, inventory: HomeSectionCatalogModel())
+        self.init(
+            libraries: libraries, accounts: accounts, visibility: visibility,
+            inventory: HomeSectionCatalogModel(), spoilerSettings: spoilerSettings, searchPage: searchPage
+        )
     }
 
     init(
         libraries: [AggregatedLibrary], accounts: [ResolvedAccount],
-        visibility: HomeLibraryVisibilityModel, inventory: HomeSectionCatalogModel
+        visibility: HomeLibraryVisibilityModel, inventory: HomeSectionCatalogModel,
+        spoilerSettings: SpoilerSettings = .default, searchPage: SettingsSearchPage = .home
     ) {
         self.libraries = libraries
         self.accounts = accounts
         self.visibility = visibility
+        self.spoilerSettings = spoilerSettings
+        self.searchPage = searchPage
         _inventory = State(initialValue: inventory)
+    }
+
+    public var body: some View {
+        switch searchPage {
+        case .home: menu
+        #if os(tvOS)
+        case .homeRowStyle:
+            if searchRequest?.targetID == "showcase-discovery-row", hero.settings.spotlightEnabled {
+                HomeHeroSettingsView(libraries: libraries, accounts: accounts, visibility: visibility)
+            } else {
+                HomeRowStyleSettingsView(libraries: libraries, accounts: accounts)
+            }
+        case .heroDiscovery where hero.settings.style == .followsFocus:
+            if hero.settings.showsDiscoverRow {
+                HeroSettingsScreen(page: .discovery, libraries: libraries, accounts: accounts)
+            } else {
+                HomeRowStyleSettingsView(libraries: libraries, accounts: accounts)
+            }
+        #endif
+        case .hero, .heroContent, .heroRatings, .heroTrailers, .heroDiscovery, .heroLibraries, .heroCollections:
+            HomeHeroSettingsView(
+                libraries: libraries, accounts: accounts, visibility: visibility, initialPage: heroPage
+            )
+        case .homeRows:
+            HomeSectionsSettingsView(
+                libraries: libraries, accounts: accounts, visibility: visibility,
+                inventory: inventory, spoilerSettings: spoilerSettings
+            )
+        case .homeFiltering:
+            HomeFilteringSettingsView(visibility: visibility)
+        case .homeLabels:
+            CardCaptionCustomizationView(cards: cards, scope: .home, visibility: visibility)
+        case .continueWatching:
+            if let choice = HomeRowChoice.shared.first(where: { $0.id == .global(.continueWatching) }) {
+                HomeSectionSettingsView(
+                    choice: choice, inventory: inventory, visibility: visibility,
+                    libraries: libraries, accounts: accounts, showsRemoveAction: false
+                )
+            } else {
+                ContentUnavailableView("Setting unavailable", systemImage: "magnifyingglass")
+            }
+        default:
+            ContentUnavailableView("Setting unavailable", systemImage: "magnifyingglass")
+        }
+    }
+
+    private var heroPage: HeroSettingsPage? {
+        switch searchPage {
+        case .heroContent: .titles
+        case .heroRatings: .ratings
+        case .heroTrailers: .trailers
+        case .heroDiscovery: .discovery
+        case .heroLibraries: .libraries
+        case .heroCollections: .collections
+        default: nil
+        }
+    }
+
+    private var menu: some View {
+        HomeEditorPage(title: Text("Home"), showsHeader: true) {
+            HomeEditorLink {
+                HomeHeroSettingsView(libraries: libraries, accounts: accounts, visibility: visibility)
+                    .environment(hero)
+                    .environment(heroBackground)
+            } label: {
+                HomeEditorRowLabel(title: heroTitle, value: heroSummary)
+            }
+            .accessibilityLabel(heroTitle)
+            .accessibilityValue(heroSummary ?? Text(verbatim: ""))
+            .accessibilityIdentifier("home-section-hero")
+            .settingsSearchAnchor("home-hero")
+            #if os(tvOS)
+            HomeEditorLink {
+                HomeRowStyleSettingsView(libraries: libraries, accounts: accounts)
+                    .environment(hero)
+                    .environment(heroBackground)
+            } label: {
+                HomeEditorRowLabel(
+                    title: Text("Row style"),
+                    value: hero.settings.immersiveRows ? Text("Showcase") : Text("Classic")
+                )
+            }
+            .accessibilityLabel(Text("Row style"))
+            .accessibilityValue(hero.settings.immersiveRows ? Text("Showcase") : Text("Classic"))
+            .accessibilityIdentifier("home-row-style")
+            .settingsSearchAnchor("home-row-style")
+            #endif
+            HomeEditorLink {
+                CardCaptionCustomizationView(cards: cards, scope: .home, visibility: visibility)
+                    .environment(hero)
+            } label: {
+                HomeEditorRowLabel(title: Text("Card labels"))
+            }
+            .accessibilityIdentifier("home-customize-labels")
+            .settingsSearchAnchor("home-labels")
+            HomeEditorLink {
+                HomeSectionsSettingsView(
+                    libraries: libraries, accounts: accounts, visibility: visibility,
+                    inventory: inventory, spoilerSettings: spoilerSettings
+                )
+                .environment(hero)
+                .environment(heroBackground)
+                .environment(cards)
+            } label: {
+                HomeEditorRowLabel(title: Text("Rows"))
+            }
+            .accessibilityIdentifier("home-sections-settings")
+            .settingsSearchAnchor("home-rows")
+            HomeEditorLink {
+                HomeFilteringSettingsView(visibility: visibility)
+                    .environment(hero)
+            } label: {
+                HomeEditorRowLabel(title: Text("Filtering"))
+            }
+            .accessibilityIdentifier("home-filtering-settings")
+            .settingsSearchAnchor("home-filtering")
+        }
+    }
+
+    private var heroTitle: Text {
+        Text("Hero")
+    }
+
+    private var heroSummary: Text? {
+        #if os(tvOS)
+        return hero.settings.spotlightEnabled ? Text("On") : Text("Off")
+        #else
+        return hero.settings.isEnabled ? nil : Text("Off")
+        #endif
+    }
+}
+
+struct HomeFilteringSettingsView: View {
+    let visibility: HomeLibraryVisibilityModel
+    @Environment(HeroSettingsModel.self) private var hero
+
+    var body: some View {
+        @Bindable var hero = hero
+        HomeEditorPage(title: Text("Filtering"), showsHeader: true) {
+            SettingsSectionGroup("Hide watched content") {
+                Toggle("Recently Added", isOn: Binding(
+                    get: { visibility.visibility.hideWatchedRecentlyAdded },
+                    set: { visibility.setHideWatchedRecentlyAdded($0) }
+                ))
+                .accessibilityIdentifier("home-hide-watched-recently-added")
+                .settingsSearchAnchor("home-hide-watched-recently-added")
+                Toggle("Hero & discovery", isOn: $hero.settings.hideWatched)
+                    .accessibilityIdentifier("hero-hide-watched")
+                    .settingsSearchAnchor("hero-hide-watched")
+            }
+        }
+    }
+}
+
+struct HomeSectionsSettingsView: View {
+    let libraries: [AggregatedLibrary]
+    let accounts: [ResolvedAccount]
+    let visibility: HomeLibraryVisibilityModel
+    let spoilerSettings: SpoilerSettings
+    @State private var inventory: HomeSectionCatalogModel
+    @Environment(HeroSettingsModel.self) private var hero
+    @Environment(HeroBackgroundSettingsModel.self) private var heroBackground
+    @Environment(CardStyleSettingsModel.self) private var cards
+    @State private var reorderSession: HomeSectionReorderSession?
+    @State private var isLifting = false
+    @State private var reloadRevision = 0
+    @State private var editError: AppError?
+
+    init(
+        libraries: [AggregatedLibrary], accounts: [ResolvedAccount],
+        visibility: HomeLibraryVisibilityModel, inventory: HomeSectionCatalogModel? = nil,
+        spoilerSettings: SpoilerSettings = .default
+    ) {
+        self.libraries = libraries
+        self.accounts = accounts
+        self.visibility = visibility
+        _inventory = State(initialValue: inventory ?? HomeSectionCatalogModel())
+        self.spoilerSettings = spoilerSettings
     }
 
     private var requestID: HomeSectionCatalogModel.RequestID {
         HomeSectionCatalogModel.requestID(libraries: libraries, accounts: accounts, visibility: visibility)
     }
 
-    public var body: some View {
-        HomeEditorPage(title: Text("Customize Home")) {
-            #if os(tvOS)
-            HStack(spacing: SettingsFormMetrics.controlSpacing) {
-                SettingsPageHeader("Customize Home")
-                reorderButton
-            }
-            editorControls
-            #endif
-            HomeEditorLink {
-                HomeHeroSettingsView(libraries: libraries, accounts: accounts, visibility: visibility)
-                    .environment(hero)
-                    .environment(heroBackground)
-            } label: {
-                HomeEditorRowLabel(
-                    title: Text("Hero"), subtitle: heroSummary
-                )
-            }
-            .accessibilityIdentifier("home-section-hero")
-            .disabled(isReordering)
+    private var isReordering: Bool { reorderSession != nil }
+    private var sectionIssues: [HomeSectionIssue] {
+        visibility.sectionDiagnostics.issues(accounts: accounts, visibility: visibility.visibility)
+    }
 
-            let catalog = inventory.requestID == requestID ? inventory.catalog : HomeSectionCatalog(libraries: [])
-            let sections = catalog.sections(in: visibility.visibility)
-            let choices = catalog.editableChoices(in: visibility.visibility)
+    private var currentCatalog: HomeSectionCatalog {
+        inventory.currentCatalog(libraries: libraries, accounts: accounts, visibility: visibility)
+    }
+
+    var body: some View {
+        ScrollViewReader { scroll in
+            editor
+                #if os(iOS)
+                .task(id: reorderSession?.initialElement) {
+                    guard let target = reorderSession?.initialElement else { return }
+                    await Task.yield()
+                    guard !Task.isCancelled else { return }
+                    scroll.scrollTo(target)
+                }
+                #endif
+        }
+    }
+
+    private var editor: some View {
+        HomeEditorPage(title: Text("Home rows"), showsHeader: true) {
+            #if os(tvOS)
+            reorderButton
+            #endif
+        } content: {
+            SettingsSectionGroup {
+                editorControls
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("home-section-controls")
+
+            addSectionButton(identifier: "home-section-add")
+
+            let catalog = reorderSession?.catalog ?? currentCatalog
+            let arrangement = reorderSession?.visibility ?? visibility.visibility
+            let sections = catalog.sections(in: arrangement)
+            let choices = catalog.editableChoices(in: arrangement)
             if isReordering {
                 let byID = Dictionary(choices.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
                 LiftableReorderList(
                     sections: .init(enabled: sections.enabled, disabled: []),
                     disabledSectionTitle: "Hidden", disabledPlaceholder: "No hidden rows",
-                    isLifting: $isLifting, allowsHiding: false,
+                    isLifting: $isLifting, allowsHiding: false, removeTitle: "Remove from Home",
+                    onRemove: { id in
+                        do {
+                            try reorderSession?.remove(id, savingTo: visibility)
+                            editError = nil
+                        } catch { editError = (error as? AppError) ?? .invalidResponse }
+                    },
+                    initialElement: reorderSession?.initialElement,
                     row: { id in
                         let choice = byID[id]
                         return .init(
-                            title: choice?.homeEditorTitle ?? Text("Section"),
+                            title: choice?.homeEditorTitle ?? Text("Row"),
                             symbolName: "rectangle.grid.1x2",
-                            providerKind: choice?.library?.providerKind ?? choice?.serverRow?.providerKind,
+                            providerKind: choice?.homeEditorProvider(in: accounts),
                             mediaShareTransport: choice?.library?.transportKind,
-                            subtitle: choice?.homeEditorSource
+                            subtitle: choice?.homeEditorSource(in: accounts),
+                            providerMarkInSubtitle: true
                         )
                     },
                     onChange: { order in
                         do {
-                            try visibility.reorderHomeSections(order.enabled, catalog: catalog)
+                            try reorderSession?.move(order.enabled, savingTo: visibility)
                             editError = nil
                         } catch { editError = (error as? AppError) ?? .invalidResponse }
                     }
                 )
-                .disabled(inventory.isLoading)
                 .accessibilityIdentifier("home-section-reorder-list")
             } else {
                 ForEach(sections.enabled, id: \.self) { id in
                     if let choice = choices.first(where: { $0.id == id }) {
                         HomeEditorLink {
-                            HomeSectionSettingsView(
-                                choice: choice, inventory: inventory, visibility: visibility,
-                                libraries: libraries, accounts: accounts
-                            )
+                            if let section = choice.collectionSection {
+                                CollectionSectionSettingsView(
+                                    section: section, inventory: inventory, visibility: visibility,
+                                    libraries: libraries, accounts: accounts, spoilerSettings: spoilerSettings
+                                )
+                                .environment(cards)
+                            } else {
+                                HomeSectionSettingsView(
+                                    choice: choice, inventory: inventory, visibility: visibility,
+                                    libraries: libraries, accounts: accounts
+                                )
+                                .environment(cards)
+                            }
                         } label: {
-                            HomeSectionChoiceLabel(choice: choice)
+                            HomeSectionChoiceLabel(choice: choice, accounts: accounts)
                         }
                         .accessibilityIdentifier("home-section-\(id.presentationID)")
+                        .contextMenu {
+                            Button("Reorder", systemImage: "arrow.up.arrow.down") {
+                                beginReordering(at: id)
+                            }
+                            .disabled(sections.enabled.count < 2)
+                            Button("Remove from Home", systemImage: "minus.circle", role: .destructive) {
+                                do {
+                                    try visibility.setHomeSectionVisible(false, id: id, catalog: currentCatalog)
+                                    editError = nil
+                                } catch { editError = (error as? AppError) ?? .invalidResponse }
+                            }
+                        }
+                        if let issue = sectionIssues.first(where: { $0.id == id }) {
+                            sectionStatus(issue)
+                        }
                     }
                 }
+                ForEach(sectionIssues.filter { !sections.enabled.contains($0.id) }) { issue in
+                    sectionStatus(issue)
+                }
             }
-            addSectionButton(identifier: "home-section-add-bottom")
+            if !sections.enabled.contains(.global(.continueWatching)),
+               let watching = HomeRowChoice.shared.first(where: { $0.id == .global(.continueWatching) }) {
+                HomeEditorLink {
+                    HomeSectionSettingsView(
+                        choice: watching,
+                        inventory: inventory, visibility: visibility,
+                        libraries: libraries, accounts: accounts, showsRemoveAction: false
+                    )
+                    .environment(cards)
+                } label: {
+                    HomeEditorRowLabel(
+                        title: Text("Continue Watching settings")
+                    )
+                }
+                .disabled(isReordering)
+                .accessibilityIdentifier("home-hidden-continue-watching-settings")
+            }
+            #if os(tvOS)
+            if hero.settings.style == .followsFocus {
+                HomeEditorLink {
+                    HomeRowStyleSettingsView(libraries: libraries, accounts: accounts)
+                        .environment(hero)
+                        .environment(heroBackground)
+                } label: {
+                    HomeEditorRowLabel(
+                        title: Text("Discovery"),
+                        subtitle: Text("Managed by Row style.")
+                    )
+                }
+                .disabled(isReordering)
+                .accessibilityIdentifier("home-layout-discovery")
+            }
+            #endif
             if editError != nil {
-                InlineErrorMessage(Text("Couldn't update this section. Try again."))
+                InlineErrorMessage(Text("Couldn't update this row. Try again."))
             }
             HomeCatalogStatus(inventory: inventory, accounts: accounts, libraries: libraries) {
                 reloadRevision += 1
@@ -112,23 +380,7 @@ public struct HomeRowsSettingsView: View {
         }
         #if os(iOS)
         .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                SettingsPageLink {
-                    addSectionDestination
-                } label: {
-                    Label("Add section", systemImage: "plus")
-                }
-                .labelStyle(.iconOnly)
-                .disabled(isReordering)
-                .accessibilityIdentifier("home-section-add")
-                reorderButton
-            }
-        }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            editorControls
-                .padding(.horizontal, 24)
-                .padding(.vertical, 8)
-                .background { SettingsPageBackground() }
+            ToolbarItem(placement: .topBarTrailing) { reorderButton }
         }
         #endif
         .task(id: HomeSectionCatalogModel.loadID(
@@ -137,76 +389,121 @@ public struct HomeRowsSettingsView: View {
             await inventory.load(libraries: libraries, accounts: accounts, visibility: visibility)
         }
         .onChange(of: requestID) { _, _ in
-            isReordering = false
+            reorderSession = nil
             isLifting = false
             editError = nil
         }
     }
 
     private var editorControls: some View {
-        #if os(tvOS)
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 16) { controls }
-                .fixedSize(horizontal: true, vertical: false)
-            VStack(alignment: .leading, spacing: 8) { controls }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .focusSection()
-        #else
-        controls
+        HomeRowPresetPicker(visibility: visibility)
+            .id(ObjectIdentifier(visibility))
+            .disabled(isReordering)
             .frame(maxWidth: .infinity, alignment: .leading)
-        #endif
-    }
-
-    private var controls: some View {
-        Group {
-            HomeRowPresetPicker(visibility: visibility)
-                .id(ObjectIdentifier(visibility))
-                .disabled(isReordering)
             #if os(tvOS)
-            addSectionButton(identifier: "home-section-add")
+            .focusSection()
             #endif
-        }
     }
 
     private var reorderButton: some View {
         Button {
-            isReordering.toggle()
-            isLifting = false
+            if isReordering {
+                reorderSession = nil
+                isLifting = false
+            } else {
+                beginReordering()
+            }
         } label: {
             if isReordering { Text("Done").fixedSize(horizontal: false, vertical: true) }
-            else { Text("Reorder").fixedSize(horizontal: false, vertical: true) }
+            else { Text("Edit").fixedSize(horizontal: false, vertical: true) }
         }
-        .disabled(isLifting || (!isReordering && (inventory.isLoading
-            || inventory.catalog.sections(in: visibility.visibility).enabled.count < 2)))
+        .disabled(isLifting || (!isReordering && currentCatalog.sections(in: visibility.visibility).enabled.isEmpty))
         .accessibilityIdentifier("home-section-reorder")
+        .settingsSearchAnchor("home-row-arrangement")
         #if os(tvOS)
         .plozzActionButton(role: .secondary)
         #endif
+    }
+
+    private func beginReordering(at element: HomeRowID? = nil) {
+        let catalog = currentCatalog
+        if let element, !catalog.sections(in: visibility.visibility).enabled.contains(element) {
+            editError = .notFound
+            return
+        }
+        reorderSession = HomeSectionReorderSession(
+            catalog: catalog, visibility: visibility.visibility, initialElement: element
+        )
+        #if os(tvOS)
+        isLifting = element != nil
+        #else
+        isLifting = false
+        #endif
+        editError = nil
+    }
+
+    private func sectionStatus(_ issue: HomeSectionIssue) -> some View {
+        HomeSectionStatusView(issue: issue) {
+            Task {
+                await visibility.sectionDiagnostics.retry(accounts: accounts, visibility: visibility.visibility)
+            }
+        }
+        .padding(.vertical, SettingsFormMetrics.navigationRowSpacing)
+        .disabled(visibility.sectionDiagnostics.isLoading)
     }
 
     private func addSectionButton(identifier: String) -> some View {
         SettingsPageLink {
             addSectionDestination
         } label: {
-            Text("Add section").fixedSize(horizontal: false, vertical: true)
+            Label("Add row", systemImage: "plus")
+                .font(.body.weight(.semibold))
+                .frame(maxWidth: .infinity, minHeight: 44)
         }
         .plozzActionButton(role: .secondary)
+        .buttonBorderShape(.capsule)
         .disabled(isReordering)
         .accessibilityIdentifier(identifier)
+        .padding(.vertical, PlozzTheme.Spacing.medium)
     }
 
     private var addSectionDestination: some View {
         HomeAddSectionView(
-            inventory: inventory, visibility: visibility, libraries: libraries, accounts: accounts
+            inventory: inventory, visibility: visibility, libraries: libraries, accounts: accounts,
+            spoilerSettings: spoilerSettings
         )
+        .environment(cards)
     }
 
-    private var heroSummary: Text {
-        #if os(tvOS)
-        if hero.settings.style == .followsFocus { return Text("Showcase") }
-        #endif
-        return hero.settings.isEnabled ? Text("Pinned at top") : Text("Off")
+}
+
+/// Keep the rows under the user's hands stable while optional discovery finishes.
+@MainActor
+struct HomeSectionReorderSession {
+    let catalog: HomeSectionCatalog
+    let initialElement: HomeRowID?
+    private(set) var visibility: HomeLibraryVisibility
+
+    init(catalog: HomeSectionCatalog, visibility: HomeLibraryVisibility, initialElement: HomeRowID? = nil) {
+        self.catalog = catalog
+        self.visibility = visibility
+        self.initialElement = initialElement
+    }
+
+    mutating func move(_ order: [HomeRowID], savingTo model: HomeLibraryVisibilityModel) throws {
+        let updated = try catalog.reordering(order, in: visibility)
+        save(updated, to: model)
+    }
+
+    mutating func remove(_ id: HomeRowID, savingTo model: HomeLibraryVisibilityModel) throws {
+        let updated = try catalog.settingVisible(false, id: id, in: visibility)
+        save(updated, to: model)
+    }
+
+    private mutating func save(_ updated: HomeLibraryVisibility, to model: HomeLibraryVisibilityModel) {
+        guard updated != visibility else { return }
+        model.applyRows(catalog.sections(in: updated), choices: catalog.availableChoices(in: updated))
+        visibility = model.visibility
     }
 }
 #endif

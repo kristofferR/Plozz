@@ -135,6 +135,10 @@ extension LiveTVPrototypeImportModel {
             $0.isEnabled && (sourceID == nil || $0.id == sourceID)
         }
         var result = ReloadResult.completed
+        var pendingGuideDiscovery: [
+            (source: LiveTVServerSource, context: LiveTVAuthorizedServerProvider,
+             revision: Int, availability: ServerLiveTVAvailability)
+        ] = []
         for source in sources {
             guard request == serverRevision, !Task.isCancelled else { return .cancelled }
             let sourceRevision = serverSourceRevisions[source.id, default: 0]
@@ -235,7 +239,11 @@ extension LiveTVPrototypeImportModel {
                     $0.lastRefresh = Date()
                     $0.guideFailure = catalog.inlineGuideFailure
                 }
-                guard availability.supportsGuide, !channels.isEmpty else { continue }
+                guard !channels.isEmpty else { continue }
+                guard availability.supportsGuide else {
+                    pendingGuideDiscovery.append((source, context, sourceRevision, availability))
+                    continue
+                }
                 let warmup = context.kind == .plex
                     ? Array(catalog.channels.prefix(Self.serverGuideWarmupChannelLimit)) : catalog.channels
                 let guideResult = await reloadServerGuidesResult(
@@ -265,6 +273,44 @@ extension LiveTVPrototypeImportModel {
                     $0.failure = failure
                     $0.channelCount = cachedServerCatalogs[source.id]?.channels.count ?? 0
                 }
+            }
+        }
+        for pending in pendingGuideDiscovery {
+            guard !Task.isCancelled else { return .cancelled }
+            let source = pending.source
+            let context = pending.context
+            guard acceptServerResult(
+                source, context: context, request: request, sourceRevision: pending.revision, into: model
+            ) else { continue }
+            do {
+                guard let supportsGuide = try await context.provider.completeLiveTVGuideDiscovery() else { continue }
+                try Task.checkCancellation()
+                guard acceptServerResult(
+                    source, context: context, request: request, sourceRevision: pending.revision, into: model
+                ), let catalog = cachedServerCatalogs[source.id] else { continue }
+                updateServerStatus(source.id) {
+                    $0.availability = .init(
+                        status: pending.availability.status,
+                        channelCount: catalog.channels.count, supportsGuide: supportsGuide
+                    )
+                }
+                guard supportsGuide else { continue }
+                let warmup = context.kind == .plex
+                    ? Array(catalog.channels.prefix(Self.serverGuideWarmupChannelLimit)) : catalog.channels
+                result = result.merging(await reloadServerGuidesResult(
+                    channelIDs: warmup.map(\.id), from: model.now, to: model.now.addingTimeInterval(21_600),
+                    into: model, force: true
+                ))
+            } catch {
+                if isCancellation(error) { return .cancelled }
+                guard acceptServerResult(
+                    source, context: context, request: request, sourceRevision: pending.revision, into: model
+                ) else { continue }
+                updateServerStatus(source.id) {
+                    $0.guidePhase = .failed
+                    $0.guideFailure = .sanitizedGuide(error)
+                }
+                result = .failed
             }
         }
         return result

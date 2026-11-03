@@ -1,3 +1,4 @@
+import CoreModels
 import Foundation
 
 /// Bounded, namespace-tolerant `PROPFIND` multistatus parser, built on
@@ -133,6 +134,12 @@ public enum PropfindXMLParser {
             let reason = parser.parserError?.localizedDescription ?? delegate.firstParseErrorDescription ?? "unknown XML parse failure"
             throw TransportError.malformedMultistatus(reason: reason)
         }
+        if delegate.duplicateCount > 0 {
+            HandoffDiagnostics.emit(
+                "webdav PROPFIND_DUPLICATES collapsed=\(delegate.duplicateCount)"
+                    + " modifiedDiscarded=\(delegate.discardedModificationCount) entries=\(delegate.entries.count)"
+            )
+        }
         return delegate.entries
     }
 }
@@ -200,6 +207,10 @@ private final class MultistatusParserDelegate: NSObject, XMLParserDelegate {
     private let includeSelfEntry: Bool
 
     private(set) var entries: [WebDAVEntry] = []
+    private var entryIndexes: [WebDAVEntry: Int] = [:]
+    private var responseCount = 0
+    private(set) var duplicateCount = 0
+    private(set) var discardedModificationCount = 0
     private(set) var limitError: TransportError?
     private(set) var policyError: TransportError?
     private(set) var documentError: TransportError?
@@ -255,17 +266,13 @@ private final class MultistatusParserDelegate: NSObject, XMLParserDelegate {
         elementStack.append(local)
         textBuffer = ""
 
-        switch local {
-        case "response":
+        switch elementStack {
+        case ["multistatus", "response"]:
             resetResponseState()
-        case "propstat":
+        case ["multistatus", "response", "propstat"]:
             resetPendingPropstatState()
-        case "collection":
-            // Only meaningful inside <resourcetype>; a bare <collection>
-            // elsewhere (unlikely, but be tolerant) is ignored by context.
-            if elementStack.dropLast().last == "resourcetype" {
-                pendingIsCollection = true
-            }
+        case ["multistatus", "response", "propstat", "prop", "resourcetype", "collection"]:
+            pendingIsCollection = true
         default:
             break
         }
@@ -275,22 +282,25 @@ private final class MultistatusParserDelegate: NSObject, XMLParserDelegate {
         textBuffer += string
     }
 
+    func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
+        textBuffer += String(decoding: CDATABlock, as: UTF8.self)
+    }
+
     func parser(
         _ parser: XMLParser,
         didEndElement elementName: String,
         namespaceURI: String?,
         qualifiedName qName: String?
     ) {
-        let local = elementName.lowercased()
         let text = textBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
         textBuffer = ""
 
-        switch local {
-        case "href":
-            if elementStack.dropLast().last == "response" {
-                currentHref = text
-            }
-        case "status":
+        // Extension properties can contain DAV-named descendants. Only the
+        // protocol's exact structural positions may change response metadata.
+        switch elementStack {
+        case ["multistatus", "response", "href"]:
+            currentHref = text
+        case ["multistatus", "response", "propstat", "status"]:
             // "HTTP/1.1 200 OK" — only a 2xx propstat's properties are
             // trusted; a 404 propstat (common for "prop not found" filler
             // some servers emit) must not poison the entry with absent
@@ -298,27 +308,24 @@ private final class MultistatusParserDelegate: NSObject, XMLParserDelegate {
             // <propstat>, so this fires *after* the properties below have
             // already been staged into `pending*` — the actual commit into
             // `current*` happens at </propstat>, gated on this flag.
-            let parent = elementStack.dropLast().last
-            if parent == "propstat" {
-                pendingPropstatStatusIsSuccess = Self.statusLineIsSuccess(text)
-            } else if parent == "response" {
-                currentResponseStatusIsSuccess = Self.statusLineIsSuccess(text)
-            }
-        case "getcontentlength":
+            pendingPropstatStatusIsSuccess = Self.statusLineIsSuccess(text)
+        case ["multistatus", "response", "status"]:
+            currentResponseStatusIsSuccess = Self.statusLineIsSuccess(text)
+        case ["multistatus", "response", "propstat", "prop", "getcontentlength"]:
             if let length = Int64(text), length >= 0 {
                 pendingContentLength = length
             } else {
                 pendingContentLength = nil
             }
-        case "getlastmodified":
+        case ["multistatus", "response", "propstat", "prop", "getlastmodified"]:
             pendingLastModified = HTTPDate.parse(text)
-        case "getetag":
+        case ["multistatus", "response", "propstat", "prop", "getetag"]:
             pendingETag = ETag(headerValue: text)
-        case "getcontenttype":
+        case ["multistatus", "response", "propstat", "prop", "getcontenttype"]:
             pendingContentType = text.isEmpty ? nil : text
-        case "propstat":
+        case ["multistatus", "response", "propstat"]:
             commitPendingPropstatIfSuccessful()
-        case "response":
+        case ["multistatus", "response"]:
             finishCurrentResponse(parser: parser)
         default:
             break
@@ -418,12 +425,31 @@ private final class MultistatusParserDelegate: NSObject, XMLParserDelegate {
             etag: currentETag,
             contentType: currentContentType
         )
-        entries.append(entry)
-
-        if entries.count > maxEntries {
+        // Count before deduplication so repeated responses cannot bypass the cap.
+        responseCount += 1
+        if responseCount > maxEntries {
             limitError = .tooManyEntries(limit: maxEntries)
             parser.abortParsing()
+            return
         }
+        // A strong ETag already identifies bytes at this exact path. Conflicting
+        // dates are unusable metadata, not a second representation; discard them.
+        let key = !entry.isCollection && entry.contentLength != nil && entry.etag?.isValidStrongValidator == true
+            ? WebDAVEntry(
+                resolvedPath: entry.resolvedPath, isCollection: entry.isCollection,
+                contentLength: entry.contentLength, lastModified: nil,
+                etag: entry.etag, contentType: entry.contentType
+            ) : entry
+        if let index = entryIndexes[key] {
+            if entries[index].lastModified != entry.lastModified {
+                entries[index] = key
+                discardedModificationCount += 1
+            }
+            duplicateCount += 1
+            return
+        }
+        entryIndexes[key] = entries.count
+        entries.append(entry)
     }
 
     private static func statusLineIsSuccess(_ statusLine: String) -> Bool {

@@ -1,6 +1,7 @@
 #if os(iOS)
 import CoreModels
-import CoreUI
+@testable import CoreUI
+import Observation
 import FeatureHomeCore
 import SwiftUI
 import UIKit
@@ -10,6 +11,99 @@ import XCTest
 
 @MainActor
 final class SeasonRequestLayoutTests: XCTestCase {
+    func testMovieHeroShowsTheCompleteUnreleasedRequestStatus() throws {
+        let movie = MediaItem(
+            id: "future-movie", title: "Future Movie", kind: .movie,
+            releaseDate: MediaItem.calendarDayReleaseDate(from: "2099-10-20"),
+            availability: .processing, locallyValidatedPlayableSource: false
+        )
+        let button = PlozziOSHeroRequestButton(item: movie, request: .init(
+            cta: movie.heroCTA(seerConnected: true), isRequesting: false,
+            actingName: nil, onRequest: { _ in XCTFail("A status must not submit a request") }
+        ))
+        .environment(\.locale, Locale(identifier: "en"))
+        .environment(\.themePalette, ThemePalette.dark)
+        .environment(\.colorScheme, .dark)
+        for width in [CGFloat(276), 720] {
+            let image = try capture(button, width: width, name: "unreleased-movie-request-\(Int(width))pt")
+            let recognition = VNRecognizeTextRequest()
+            recognition.recognitionLevel = .accurate
+            recognition.recognitionLanguages = ["en-US"]
+            try VNImageRequestHandler(cgImage: XCTUnwrap(image.cgImage)).perform([recognition])
+            let text = (recognition.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
+            XCTAssertTrue(text.contains("Requested") && text.contains("Unreleased"), text)
+            XCTAssertLessThanOrEqual(size(button, width: width).width, width + 0.5)
+        }
+    }
+
+    func testAdaptiveHeroRetainsPresentedVersionMenuWhileMetadataChanges() async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !UIApplication.shared.connectedScenes.contains(where: { $0.activationState == .foregroundActive }),
+              ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let fixture = UpdatingDetailHero()
+        let host = UIHostingController(rootView: UpdatingDetailHeroView(fixture: fixture))
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            fixture.menu.isPresented = false
+            host.dismiss(animated: false)
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKeyAndVisible()
+        }
+        window.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(200))
+        fixture.menu.open(from: CGRect(x: 300, y: 180, width: 48, height: 48))
+        let presentationDeadline = ContinuousClock.now + .seconds(5)
+        while host.presentedViewController?.view.window == nil, ContinuousClock.now < presentationDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let presented = try XCTUnwrap(host.presentedViewController)
+        fixture.menu.page = .versions
+        try await Task.sleep(for: .milliseconds(300))
+
+        // Trailer arrival and narrowing force different ViewThatFits candidates.
+        for width in [350.0, 280.0, 390.0] {
+            fixture.hasTrailer.toggle()
+            fixture.width = width
+            fixture.versions.append(.init(id: "copy-\(width)", name: "Another copy", height: 1080))
+            window.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(350))
+            XCTAssertTrue(fixture.menu.isPresented)
+            XCTAssertEqual(fixture.menu.page, .versions, "Relayout must not reset the drill-in page.")
+            XCTAssertTrue(host.presentedViewController === presented, "Keep the original native presentation alive.")
+            XCTAssertFalse(presented.isBeingDismissed)
+            XCTAssertNotNil(presented.view.window)
+        }
+        let image = UIGraphicsImageRenderer(bounds: presented.view.bounds).image { _ in
+            XCTAssertTrue(presented.view.drawHierarchy(in: presented.view.bounds, afterScreenUpdates: true))
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "versions-survive-hero-enrichment"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["en-US"]
+        try VNImageRequestHandler(cgImage: XCTUnwrap(image.cgImage)).perform([request])
+        let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
+        XCTAssertTrue(text.localizedCaseInsensitiveContains("Version"), text)
+        XCTAssertTrue(text.localizedCaseInsensitiveContains("Another copy"), "Live inventory must still update: \(text)")
+        fixture.menu.isPresented = false
+        let dismissalDeadline = ContinuousClock.now + .seconds(5)
+        while host.presentedViewController != nil, ContinuousClock.now < dismissalDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNil(host.presentedViewController, "Deliberate dismissal must still work.")
+    }
+
     private let item = MediaItem(id: "unreleased-series", title: "Phony", kind: .series)
     private var availability: MediaRequestAvailability {
         .init(status: .processing, seasons: [
@@ -21,7 +115,7 @@ final class SeasonRequestLayoutTests: XCTestCase {
     private var request: PlozziOSHeroRequest {
         .init(
             cta: .requested, isRequesting: false, actingName: nil, onRequest: { _ in },
-            seasonAvailability: availability, onRequestSeasons: { _ in },
+            seasonAvailability: availability,
             onOpenSeasonRequests: {}
         )
     }
@@ -31,8 +125,11 @@ final class SeasonRequestLayoutTests: XCTestCase {
         let button = PlozziOSHeroRequestButton(item: item, request: request)
             .environment(\.dynamicTypeSize, .large)
         let primary = size(button, width: 2_000)
-        XCTAssertEqual(primary.height, 48, accuracy: 0.5,
-                       "The complete request status must remain a normal single-line button, not a subtitle card.")
+        let singleLine = size(Button("Play", action: {})
+            .buttonStyle(PlozziOSHeroActionButtonStyle(kind: .primary)), width: 2_000)
+        XCTAssertEqual(primary.height, singleLine.height, accuracy: 0.5,
+                       "The complete request status must remain a native single-line button, not a subtitle card.")
+        XCTAssertLessThan(primary.width, 500, "Request buttons must report their readable width, not fill the proposal.")
         let overflowSpacingAndWidth: CGFloat = 12 + 48
         for width in [primary.width + overflowSpacingAndWidth - 2,
                       primary.width + overflowSpacingAndWidth + 2, 500, 720] {
@@ -116,29 +213,132 @@ final class SeasonRequestLayoutTests: XCTestCase {
 
     private func foreground(
         app: PlozziOSAppModel, extras: Bool, typeSize: DynamicTypeSize = .large,
-        sources: [MediaSourceRef] = []
+        sources: [MediaSourceRef] = [], noStreams: Bool = false,
+        isRetrying: Bool = false, colorScheme: ColorScheme = .dark
     ) -> some View {
         let presentation = HeroPresentation(item: item, artworkStyle: .compactPortrait, surface: .detail)
         return PlozziOSDetailHeroForeground(
             item: item, rootItem: item, playableItem: nil,
+            onRetryPlaybackInventory: noStreams ? {} : nil,
+            isRetryingPlaybackInventory: isRetrying,
             sources: sources, selectedSourceAccountID: sources.first?.accountID,
             versions: [], selectedVersionID: nil,
             onSelectSource: { _ in }, onSelectVersion: { _ in },
             presentation: presentation, fallbackPresentation: presentation,
             style: .compactPortrait,
-            actionHandler: RequestLayoutActions(showsWatchlist: extras),
+            actionHandler: RequestLayoutActions(showsWatchlist: extras, includesWatched: noStreams && extras),
             onPlay: { _, _ in }, trailerItem: extras ? item : nil,
-            onPlayTrailer: extras ? { _ in } : nil, heroRequest: request
+            onPlayTrailer: extras ? { _ in } : nil, heroRequest: noStreams ? nil : request
         )
         .environment(app)
         .environment(\.dynamicTypeSize, typeSize)
         .environment(\.locale, Locale(identifier: "en"))
-        .environment(\.themePalette, ThemePalette.dark)
-        .environment(\.colorScheme, .dark)
+        .environment(\.themePalette, colorScheme == .dark ? ThemePalette.dark : .light)
+        .environment(\.colorScheme, colorScheme)
     }
 
     private func size(_ view: some View, width: CGFloat) -> CGSize {
         UIHostingController(rootView: view).sizeThatFits(in: CGSize(width: width, height: 3_000))
+    }
+
+    func testNoStreamsLabelKeepsSecondaryActionsInOverflowOnNarrowPhones() throws {
+        let app = PlozziOSAppModel()
+        let sources = [MediaSourceRef(accountID: "first", itemID: item.id),
+                       MediaSourceRef(accountID: "second", itemID: item.id)]
+        for width in [320.0, 345.0, 360.0, 390.0] {
+            for sources in [[], sources] {
+                let baseline = foreground(app: app, extras: false, sources: sources, noStreams: true)
+                let actual = foreground(app: app, extras: true, sources: sources, noStreams: true)
+                XCTAssertLessThanOrEqual(size(actual, width: width).width, width + 0.5)
+                XCTAssertEqual(size(actual, width: width).height, size(baseline, width: width).height, accuracy: 1)
+                let image = try capture(actual, width: width, name: "no-streams-\(Int(width))-sources-\(sources.count)")
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                request.recognitionLanguages = ["en-US"]
+                try VNImageRequestHandler(cgImage: XCTUnwrap(image.cgImage)).perform([request])
+                let lines = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+                let text = lines.joined(separator: " ")
+                XCTAssertTrue(lines.contains { $0.localizedCaseInsensitiveContains("No streams found") },
+                              "The complete label must occupy one line, not just appear somewhere in the button: \(lines)")
+                XCTAssertFalse(text.localizedCaseInsensitiveContains("Play"), text)
+            }
+        }
+    }
+
+    func testNoStreamsLabelReportsItsFullSingleLineWidthBeforeOverflow() {
+        for isLoading in [false, true] {
+            let label = NoStreamsButtonLabel(isLoading: isLoading, onLight: true)
+                .font(.headline.weight(.semibold))
+            let natural = size(label, width: 2_000)
+            for width in [natural.width - 30, natural.width / 2] {
+                let constrained = size(label, width: width)
+                XCTAssertEqual(constrained.width, natural.width, accuracy: 0.5)
+                XCTAssertEqual(constrained.height, natural.height, accuracy: 0.5)
+            }
+        }
+    }
+
+    func testNoStreamsSpinnerIsCompactAndContrastsWithTheActualButtonSurface() async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !UIApplication.shared.connectedScenes.contains(where: { $0.activationState == .foregroundActive }),
+              ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let app = PlozziOSAppModel()
+        for scheme in [ColorScheme.dark, .light] {
+            let window = UIWindow(windowScene: scene)
+            window.frame = CGRect(x: 0, y: 0, width: 393, height: 844)
+            window.overrideUserInterfaceStyle = scheme == .dark ? .dark : .light
+            window.rootViewController = UIHostingController(rootView:
+                foreground(app: app, extras: true, noStreams: true, isRetrying: true, colorScheme: scheme)
+                    .frame(width: 345)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            )
+            window.makeKeyAndVisible()
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+                previous?.makeKeyAndVisible()
+            }
+            window.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(300))
+            let indicators = activityIndicators(in: window).filter { $0.window != nil && !$0.isHidden }
+            XCTAssertFalse(indicators.isEmpty, "Inspect the real native spinner, not an ImageRenderer placeholder.")
+            for indicator in indicators {
+                XCTAssertTrue(indicator.isAnimating)
+                XCTAssertLessThanOrEqual(indicator.bounds.width, 20)
+                XCTAssertLessThanOrEqual(indicator.bounds.height, 20)
+                let color = try XCTUnwrap(indicator.color).resolvedColor(with: indicator.traitCollection)
+                var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+                XCTAssertTrue(color.getRed(&red, green: &green, blue: &blue, alpha: &alpha))
+                XCTAssertGreaterThanOrEqual(alpha, 0.8)
+                if scheme == .dark {
+                    XCTAssertLessThanOrEqual(max(red, green, blue), 0.2, "White primary button needs dark ink.")
+                } else {
+                    XCTAssertGreaterThanOrEqual(min(red, green, blue), 0.8, "Black primary button needs light ink.")
+                }
+            }
+            let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true))
+            }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "no-streams-native-spinner-\(scheme)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            let recognition = VNRecognizeTextRequest()
+            recognition.recognitionLevel = .accurate
+            recognition.recognitionLanguages = ["en-US"]
+            try VNImageRequestHandler(cgImage: XCTUnwrap(image.cgImage)).perform([recognition])
+            let lines = (recognition.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+            XCTAssertTrue(lines.contains { $0.localizedCaseInsensitiveContains("No streams found") }, "\(lines)")
+        }
+    }
+
+    private func activityIndicators(in view: UIView) -> [UIActivityIndicatorView] {
+        (view as? UIActivityIndicatorView).map { [$0] } ?? view.subviews.flatMap { activityIndicators(in: $0) }
     }
 
     private func assertBottomIconCount(
@@ -217,10 +417,52 @@ final class SeasonRequestLayoutTests: XCTestCase {
 @MainActor
 private final class RequestLayoutActions: MediaItemActionHandling {
     let showsWatchlist: Bool
-    init(showsWatchlist: Bool) { self.showsWatchlist = showsWatchlist }
+    let includesWatched: Bool
+    init(showsWatchlist: Bool, includesWatched: Bool = false) {
+        self.showsWatchlist = showsWatchlist
+        self.includesWatched = includesWatched
+    }
     func actions(for item: MediaItem, context: MediaItemActionContext) -> [MediaItemAction] {
-        showsWatchlist ? [.addToWatchlist] : []
+        (showsWatchlist ? [.addToWatchlist] : []) + (includesWatched ? [.markWatched] : [])
     }
     func perform(_ action: MediaItemAction, on item: MediaItem, context: MediaItemActionContext) {}
+}
+
+@MainActor @Observable
+private final class UpdatingDetailHero {
+    let app = PlozziOSAppModel()
+    let menu = PlaybackSourceMenuState()
+    var hasTrailer = false
+    var width = 350.0
+    var versions: [MediaVersion] = [
+        .init(id: "first", name: "Original copy", height: 2160),
+        .init(id: "second", name: "Another copy", height: 1080)
+    ]
+}
+
+private struct UpdatingDetailHeroView: View {
+    let fixture: UpdatingDetailHero
+
+    var body: some View {
+        let item = MediaItem(id: "movie", title: "Movie", kind: .movie)
+        let presentation = HeroPresentation(item: item, artworkStyle: .compactPortrait, surface: .detail)
+        PlozziOSDetailHeroForeground(
+            sourceMenu: fixture.menu,
+            item: item, rootItem: item, playableItem: item,
+            sources: [], selectedSourceAccountID: nil,
+            versions: fixture.versions, selectedVersionID: "first",
+            onSelectSource: { _ in }, onSelectVersion: { _ in },
+            presentation: presentation, fallbackPresentation: presentation, style: .compactPortrait,
+            actionHandler: RequestLayoutActions(showsWatchlist: true), onPlay: { _, _ in },
+            trailerItem: fixture.hasTrailer ? item : nil, onPlayTrailer: { _ in }
+        )
+        .frame(width: fixture.width)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.black)
+        .environment(fixture.app)
+        .environment(\.locale, Locale(identifier: "en_US"))
+        .environment(\.themePalette, .dark)
+        .environment(\.colorScheme, .dark)
+    }
 }
 #endif

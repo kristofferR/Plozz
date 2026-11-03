@@ -105,7 +105,7 @@ public final class PlaybackDiagnosticsSampler {
     ///     baseline, corrected by engine-probed source range when available.
     ///     For transcodes these live only in `originalSource`; primary video and
     ///     audio fields come from the active rendition.
-    ///   - engineName: the engine decoding the stream (e.g. `AVPlayer`, `VLCKit`),
+    ///   - engineName: the engine decoding the stream (e.g. `AVPlayer`, `AetherEngine v7.44.0`),
     ///     shown in the overlay so the user can see which engine is active.
     ///
     /// `playerProvider` follows engines that create or replace their internal
@@ -199,6 +199,7 @@ public final class PlaybackDiagnosticsSampler {
         probedFacts = nil
         latest?.audioPipelineDescription = nil
         latest?.audioOutput = nil
+        latest?.sessionCache = nil
     }
 
     var isSampling: Bool { timerTask != nil }
@@ -350,6 +351,7 @@ public final class PlaybackDiagnosticsSampler {
         if let t = engineTelemetry?() {
             if diagnostics.mode == .plozzigen {
                 diagnostics.audioPipelineDescription = t.audioPipelineDescription
+                diagnostics.sessionCache = t.sessionCache
             }
             if let drops = t.droppedFrameCount, diagnostics.droppedVideoFrames == nil {
                 diagnostics.droppedVideoFrames = drops
@@ -375,13 +377,23 @@ public final class PlaybackDiagnosticsSampler {
             if diagnostics.resolution == nil, let w = f.videoWidth, let h = f.videoHeight, w > 0, h > 0 {
                 diagnostics.resolution = .init(width: w, height: h)
             }
-            if diagnostics.audioCodec == nil, let codec = f.audioCodec {
-                diagnostics.audioCodec = PlaybackDiagnostics.friendlyAudioName(
-                    codec: codec, profile: f.audioIsAtmos ? "atmos" : nil
-                )
-            }
-            if diagnostics.audioChannels == nil, let ch = f.audioChannels, ch > 0 {
-                diagnostics.audioChannels = ch
+            if liveStream == nil, let audio = f.activeAudioTrack {
+                let source = PlaybackDiagnostics.base(from: .init(audio: audio), mode: diagnostics.mode)
+                diagnostics.audioCodec = source.audioCodec
+                diagnostics.audioProfile = source.audioProfile
+                diagnostics.audioChannels = source.audioChannels
+                diagnostics.audioChannelLayout = source.audioChannelLayout
+                diagnostics.audioSampleRate = source.audioSampleRate
+                diagnostics.audioBitrate = source.audioBitrate
+            } else {
+                if diagnostics.audioCodec == nil, let codec = f.audioCodec {
+                    diagnostics.audioCodec = PlaybackDiagnostics.friendlyAudioName(
+                        codec: codec, profile: f.audioIsAtmos ? "atmos" : nil
+                    )
+                }
+                if diagnostics.audioChannels == nil, let ch = f.audioChannels, ch > 0 {
+                    diagnostics.audioChannels = ch
+                }
             }
         }
 

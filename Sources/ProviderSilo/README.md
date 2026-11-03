@@ -41,6 +41,20 @@ rejected with an address-specific message. Pending polls honor Silo's extended
 expiry; canceled/consumed requests offer a fresh code. A failed start can be
 retried in place, while a failed profile lookup retains successful approval.
 
+Connection failures during polling retain the same code and approval link.
+Scheduled polling backs off after a transport failure, never below the server's
+interval, with at most three consecutive failed polls and no work past the
+current deadline or cancellation. A successful pending response resets the
+failure count. Authentication, malformed responses, rate limits and terminal
+statuses are not retried. Device-start and other credential exchanges are never
+automatically replayed.
+
+The server consumes approval while minting its login session. If an approved
+response is lost after that commit, a subsequent `consumed` response still
+requires a fresh code; the client cannot recover tokens it never received.
+Recovered transport interruptions are logged locally; only the terminal failure
+enters the existing consent-gated setup diagnostic path.
+
 Setup errors identify validation, code creation, polling, profile loading, PIN
 verification, or session completion. With crash-reporting consent, at most ten
 distinct failures per reporter lifetime are sent using fixed stage/reason/response
@@ -83,6 +97,20 @@ in an enabled library; title matches alone never establish membership. Continue
 Watching and Next Up resolve the server-selected playable episode and retain
 resume state and verified parent artwork. Shared Home composition still owns
 multi-server merging and explicit Plozz profile customizations.
+
+Missing catalog items referenced by progress or playable Home/Next Up cards are
+skipped with a secret-safe diagnostic; a stale entry cannot fail the entire row.
+Only catalog-item 404s are skippable. Missing Home/progress endpoints,
+authentication, rate limits (including `Retry-After`), transport failures,
+malformed responses and cancellation retain their normal error paths.
+Progress hydration uses at most four concurrent requests, deduplicates item
+lookups within a refresh, and stops when each enabled library's requested window
+is full. Missing entries are backfilled from subsequent pages with the same
+cursor page size. Each library is considered before the final newest-first merge.
+The [native progress contract](https://github.com/Silo-Server/silo-server/blob/3bc9e58c51970f261d41848ff411713894d53243/internal/apiv2/progress.go)
+orders entries by newest update first; bounded detail loading relies on that
+order. This reduces unnecessary traffic but does not bypass server rate limits.
+
 These Home and device-login contracts were checked at upstream revision
 `6144c45cd65ae0f49f9f3397bbc20f7e4d60a20e`.
 
@@ -120,6 +148,14 @@ These Home and device-login contracts were checked at upstream revision
   channels never imply stereo or surround. Detail heroes observe source-scoped
   episode metadata separately from the rail, so a later sparse season/resume
   result cannot erase badges or restore stale progress.
+  Explicit Dolby Vision/HDR10+ combinations survive profile mapping. Native
+  `dv_bl_compat_id` and its presence flag distinguish HDR10, HLG, SDR, and no
+  compatible base; an omitted zero with a true presence flag means no compatible
+  base, while a false flag does not authorize use of a legacy numeric value.
+  Profile 8 alone does not imply HDR10. The selected audio track's profile/title
+  retains declared Atmos/JOC and DTS:X hints without borrowing other tracks.
+  These facts reuse the detail response; no new media probes or card hydration
+  requests are added.
   Progress is read through the paged, library-scoped progress endpoint; Home's
   native next-up selections are corroborated before inclusion in a restricted
   library view. Versions use the original Silo file ID.
@@ -155,6 +191,106 @@ These Home and device-login contracts were checked at upstream revision
   requests carry an idempotent stop identifier.
 - Watched state and the native Silo watchlist write back to Silo. Batched resume
   synchronization checks each result, not only HTTP success.
+  Watched writes use `POST /api/v2/watched/{id}`; unwatched writes use `DELETE`.
+  Both accept the native `204 No Content` response and retain the selected
+  server-profile headers. This contract is pinned in the
+  [native API specification](https://github.com/Silo-Server/silo-server/blob/3bc9e58c51970f261d41848ff411713894d53243/contracts/api/v2/openapi.json).
+  Failed outbox targets retain their watch intent and use the shared persisted
+  retry cooldown rather than retrying on every index or configuration update.
+  HTTP 429 honors both numeric and HTTP-date `Retry-After` values.
+
+### Watch indicators
+
+The shared mapper retains `user_state.played` and maps detail/season
+`user_data.unplayed_count` into episode-count badges. That count already includes
+in-progress episodes. Container progress uses watched / (watched + unplayed);
+missing counts stay unknown rather than becoming zero. Leaf progress uses the
+supplied position and duration, including a saved rewatch position. Existing
+Continue Watching and Home responses update position and percentage together.
+No extra requests, per-card detail hydration, or catalog scans are added.
+
+At upstream revision `dd3f7a604ade38bb537d9c6cc63d149ff3f484b5`, native catalog
+and Home cards expose completion through `user_state`, but do not expose the
+detail/season `user_data` rollup. Browse `sort_metrics.progress_ratio` is
+sort-dependent; Home Continue Watching cards can carry position/duration.
+The native browse query has no watch-rollup expansion option. Consequently,
+cards without those values cannot show an accurate remaining-episode count.
+Supporting `user_data` on Silo's existing card responses would let this mapper
+consume the same rollup without additional client requests.
+
+## Plozz channels
+
+Native Silo movie and episode libraries can supply automatic and custom Plozz
+channels. Discovery checks native playback availability first. Catalog pages use
+bounded `seek` windows and exact totals; up to four detail reads at a time obtain
+the concrete file ID, size and duration in seconds. Catalog metadata runtimes
+are not file durations. Multipart and combined-episode files are excluded rather
+than scheduling an incomplete or duplicated episode. Account, selected Silo
+profile and library membership remain authoritative. Detail reads carry
+`library_id`; Silo applies its profile access and presentation-library membership
+checks. Silo's own version-visibility setting still determines which accessible
+versions it returns for a title with copies in multiple libraries.
+
+Playback revalidates the selected file, duration, size, edition and series
+relationship before requesting a protocol-3 session with
+`progress_persistence: "client"` and explicit zero start. This native contract
+keeps transport heartbeats while suppressing ordinary resume/history and server
+scrobbles, including stop and reconstruction on another replica. It is not merely
+Plozz's `suppressOrdinaryWatchReporting` flag. Only seekable, source-aligned
+`original_http` plans are accepted; server conversion plans are released.
+Plozz's scheduled controller owns the session, sends bounded transport heartbeats,
+and drains/releases it on replacement, cancellation, failure and exit. A lost
+start response is retried once with the identical attempt ID; stop retries reuse
+their idempotency key and carry no final position. Unconfirmed starts and rejected
+plans retain their cleanup ownership and must be retired before another channel
+session starts. An unreachable server can
+prevent confirmed cleanup; its native idle expiry remains the final safeguard.
+Signed media and subtitle grants stay in the existing account/revision-bound
+in-memory store, never in a schedule. No download records are created.
+
+Ordinary watched/resume state is unchanged by channel playback. Only the existing
+explicit history opt-in and actual unique-coverage threshold can invoke the
+separate watched-completion write. Silo's live/admin playback diagnostics remain
+visible; history isolation does not hide sessions from administrators.
+
+Contracts verified at upstream
+[`baf9d4267043a2fa5f41f4fdebc4a175e564e793`](https://github.com/Silo-Server/silo-server/tree/baf9d4267043a2fa5f41f4fdebc4a175e564e793):
+[progress ownership](https://github.com/Silo-Server/silo-server/blob/baf9d4267043a2fa5f41f4fdebc4a175e564e793/docs/architecture/playback-protocol-v3.md#22-post-playbackstart),
+[native requests and receipts](https://github.com/Silo-Server/silo-server/blob/baf9d4267043a2fa5f41f4fdebc4a175e564e793/internal/apiv2/playback.go),
+[progress and reconstructed sessions](https://github.com/Silo-Server/silo-server/blob/baf9d4267043a2fa5f41f4fdebc4a175e564e793/internal/api/handlers/playback_service.go),
+and [stop/history suppression](https://github.com/Silo-Server/silo-server/blob/baf9d4267043a2fa5f41f4fdebc4a175e564e793/internal/api/handlers/playback.go).
+The native request already includes this progress-ownership field at the
+provider's original `cbc13de10f4af28762be6777cab2f75403eade58` contract baseline.
+`ProviderSiloTests/SiloLibraryChannelTests.swift` covers catalog identity, wire
+isolation, ordinary-session separation and rejected-plan cleanup; shared
+playback-session tests cover cancellation, boundaries and profile revocation.
+
+## Search
+
+TV and mobile use the shared federated search through `MediaProvider.search`.
+Silo searches the native `/catalog` endpoint with `q`, scoped to each enabled
+video library and the authenticated server profile. Results preserve the server's
+order within each library, original content IDs, account/library attribution and
+episode relationships; duplicate content IDs appear once. Disabled Plozz
+libraries are not queried. Authentication and server failures remain errors,
+not empty successful searches.
+
+Catalog cursor sequences keep their initial page size (at most 200), including
+after a short nonterminal page. Silo binds `limit` into the cursor scope, so a
+smaller final request is invalid; the client trims the final results locally.
+Missing or repeated continuation cursors fail rather than looping.
+This contract was checked against the
+[native catalog handler](https://github.com/Silo-Server/silo-server/blob/9b77105e5870b0cdea8148b26194f026d275167d/internal/apiv2/catalog_items.go)
+and is covered by `SiloSearchTests.swift` in `ProviderSiloTests`.
+
+Opted-in manual search diagnostics distinguish library-listing, catalog and token
+refresh HTTP/decode failures. The bounded source record includes available,
+excluded and attempted library counts, page sizes, returned row counts,
+continuation presence and missing/repeated/empty-page failures. Library references
+are request-local ordinals, never server IDs; cursor values and queries are
+excluded. HTTP status, transport errors and allowlisted decoding fields survive
+in the report even if another provider makes the overall search appear successful.
+See [search diagnostic retention and consent](../FeatureSearch/README.md#diagnostic-submissions).
 
 ## Collections
 

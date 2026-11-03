@@ -27,6 +27,8 @@ public protocol WatchMutationApplying: Sendable {
     func removeFromContinueWatching(on target: WatchMutationTarget, capturedAt: Date) async throws
     /// Mirrors a finished watch to Trakt.
     func scrobbleTrakt(_ intent: TraktScrobbleIntent) async throws
+    /// The original server item remains available after its watched write succeeds.
+    func scrobbleTrakt(_ intent: TraktScrobbleIntent, source: WatchMutationTarget?) async throws
     /// Mirrors a finished watch to Simkl.
     func scrobbleSimkl(_ intent: TraktScrobbleIntent) async throws
     var wetrakrAccountIdentity: String? { get }
@@ -55,6 +57,9 @@ public extension WatchMutationApplying {
         try await setPlayed(played, on: target)
     }
     func expandTargets(for mutation: WatchMutation) async -> WatchTargetExpansion { .none }
+    func scrobbleTrakt(_ intent: TraktScrobbleIntent, source: WatchMutationTarget?) async throws {
+        try await scrobbleTrakt(intent)
+    }
     func scrobbleSimkl(_ intent: TraktScrobbleIntent) async throws {}
     var wetrakrAccountIdentity: String? { nil }
     func scrobbleWetrakr(
@@ -502,6 +507,9 @@ public actor WatchStateReconciler {
         merged.targets = (incoming.targets + existing.targets).filter {
             !merged.rejectedSourceIDs.contains($0.id) && seen.insert($0.id).inserted
         }
+        merged.targetRetries = existing.targetRetries.merging(incoming.targetRetries) {
+            $0.notBefore >= $1.notBefore ? $0 : $1
+        }.filter { seen.contains($0.key) }
         seen.removeAll(keepingCapacity: true)
         merged.optimisticTargets = (incoming.optimisticTargets + existing.optimisticTargets)
             .filter { !merged.rejectedSourceIDs.contains($0.id) && seen.insert($0.id).inserted }
@@ -510,6 +518,7 @@ public actor WatchStateReconciler {
             // media servers are being set unwatched, so carrying the older tracker
             // intent would permanently diverge Trakt/Simkl/AniList/MAL.
             merged.trakt = nil
+            merged.traktProgress = nil
             merged.traktPending = false
             merged.simklPending = false
             merged.wetrakrPending = false
@@ -761,6 +770,10 @@ public actor WatchStateReconciler {
                 FanoutDiagnostics.emit(FanoutDiagnostics.drainTargetLine(target, outcome: "deferred(live session)"))
                 continue
             }
+            if let retry = mutation.targetRetries[target.id], now() < retry.notBefore {
+                remaining.append(target)
+                continue
+            }
             // Build a per-op outcome string so a silent write failure is visible:
             // which of setPlayed / setResume succeeded, and the exact error if one
             // threw (a thrown target stays queued for the next drain). NOTE: a Plex
@@ -837,12 +850,25 @@ public actor WatchStateReconciler {
             } catch {
                 try await WatchMutationDeliveryAuthorization.check()
                 remaining.append(target)
+                if !(error is CancellationError), error as? AppError != .cancelled {
+                    let failures = min(max(mutation.targetRetries[target.id]?.failures ?? 0, 0), 5) + 1
+                    var delay = min(15 * 60, 30 * pow(2, Double(failures - 1)))
+                    if case .rateLimited(let retryAfter) = error as? AppError,
+                       let retryAfter, retryAfter.isFinite, retryAfter > delay {
+                        delay = retryAfter
+                    }
+                    mutation.targetRetries[target.id] = .init(
+                        failures: failures, notBefore: now().addingTimeInterval(delay)
+                    )
+                }
                 FanoutDiagnostics.emit(FanoutDiagnostics.drainTargetLine(
                     target,
                     outcome: outcome + "THROW(\(error)) -> requeued"))
             }
         }
         mutation.targets = remaining
+        let remainingIDs = Set(remaining.map(\.id))
+        mutation.targetRetries = mutation.targetRetries.filter { remainingIDs.contains($0.key) }
 
         try await WatchMutationDeliveryAuthorization.check()
         // The optimistic stop notification precedes these writes. Tell Home
@@ -865,7 +891,7 @@ public actor WatchStateReconciler {
                 FanoutDiagnostics.emit("drain.trakt canonical=\(mutation.canonicalMediaID) -> skip(already applied this day)")
             } else {
                 do {
-                    try await applier.scrobbleTrakt(intent)
+                    try await applier.scrobbleTrakt(intent, source: mutation.optimisticTargets.first)
                     state.appliedTrakt[key] = now()
                     mutation.traktPending = false
                     FanoutDiagnostics.emit("drain.trakt canonical=\(mutation.canonicalMediaID) -> applied")
@@ -874,6 +900,18 @@ public actor WatchStateReconciler {
                     // keep pending; retry next drain
                     FanoutDiagnostics.emit("drain.trakt canonical=\(mutation.canonicalMediaID) -> THROW(\(error)) -> still pending")
                 }
+            }
+        }
+
+        try await WatchMutationDeliveryAuthorization.check()
+        if let progress = mutation.traktProgress {
+            do {
+                try await applier.scrobbleTrakt(progress, source: mutation.optimisticTargets.first)
+                mutation.traktProgress = nil
+                FanoutDiagnostics.emit("drain.traktProgress -> applied")
+            } catch {
+                try await WatchMutationDeliveryAuthorization.check()
+                FanoutDiagnostics.emit("drain.traktProgress -> failed; still pending")
             }
         }
 

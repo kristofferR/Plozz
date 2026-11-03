@@ -8,7 +8,7 @@ final class LibraryChannelScheduleTests: XCTestCase {
 
     func testIdentifierFastPathPreservesCharacterRulesAndUTF8Limits() {
         let native = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
-        let account = native.union(CharacterSet(charactersIn: "|"))
+        let account = native.union(CharacterSet(charactersIn: "|:"))
         let scalarCases = (0...0x2FF).compactMap(Unicode.Scalar.init).map { "id-\(String($0))" }
         let values = scalarCases + [
             "", "account|library", "https://server/item", "identifier?token=value",
@@ -29,6 +29,19 @@ final class LibraryChannelScheduleTests: XCTestCase {
                 value.debugDescription
             )
         }
+
+    }
+
+    func testNativeSiloProfileIdentityDoesNotAuthorizeURLsInSourceIdentifiers() throws {
+        let library = LibraryChannelLibrary(accountID: "silo|server|account:profile", libraryID: "1")
+        XCTAssertNoThrow(try LibraryChannelItem.validateSource(
+            library: library, serverID: "server", userID: "account:profile"))
+        for user in ["https://server/profile", "account:profile?token=secret", "account:profile\n"] {
+            XCTAssertThrowsError(try LibraryChannelItem.validateSource(
+                library: library, serverID: "server", userID: user))
+        }
+        XCTAssertFalse(LibraryChannelItem.isNativeIdentifier("https://server/item"))
+        XCTAssertFalse(LibraryChannelLibrary.isSafeAccountIdentifier("silo|server|account:profile?token=secret"))
     }
 
     func testLibraryNavigationUsesTheOriginalMovieOrParentShowAndAccount() throws {
@@ -52,6 +65,27 @@ final class LibraryChannelScheduleTests: XCTestCase {
             XCTAssertEqual(movie.navigationSubject.kind, .movie)
             XCTAssertEqual(movie.navigationSubject.sourceAccountID, account)
         }
+    }
+
+    func testSourcePreflightUsesTheSameIdentityRulesAsScheduledItems() throws {
+        let media = MediaItem(id: "movie", title: "Movie", kind: .movie, runtime: 60)
+        for (accountID, libraryID, serverID, userID) in [
+            ("bad/account", "library", "server", "user"),
+            ("account", "bad/library", "server", "user"),
+            ("account", "library", "bad/server", "user"),
+            ("account", "library", "server", "")
+        ] {
+            let library = LibraryChannelLibrary(accountID: accountID, libraryID: libraryID)
+            XCTAssertThrowsError(try LibraryChannelItem.validateSource(
+                library: library, serverID: serverID, userID: userID
+            )) { XCTAssertEqual($0 as? LibraryChannelError, .invalidSnapshot) }
+            XCTAssertThrowsError(try LibraryChannelItem(
+                item: media, library: library, serverID: serverID, userID: userID
+            )) { XCTAssertEqual($0 as? LibraryChannelError, .invalidSnapshot) }
+        }
+        XCTAssertNoThrow(try LibraryChannelItem.validateSource(
+            library: .init(accountID: "server|user", libraryID: "library"), serverID: "server", userID: "user"
+        ))
     }
 
     func testEpisodeWithoutAParentNeverGuessesAShowByTitle() throws {

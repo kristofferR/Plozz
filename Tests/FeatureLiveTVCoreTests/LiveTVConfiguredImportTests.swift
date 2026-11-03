@@ -133,7 +133,7 @@ final class LiveTVConfiguredImportTests: XCTestCase {
         XCTAssertEqual(calls.guides, preferred + [declared[0]])
     }
 
-    func testDisabledDiscoveryAcceptsManyDeclaredGuidesWithoutRequestingThem() async throws {
+    func testLegacyDiscoveryOptOutNoLongerPreventsAutomaticGuides() async throws {
         var playlist = source()
         playlist.discoversPlaylistGuides = false
         let guides = (0..<101).map { URL(string: "https://example.test/guide/\($0).xml")! }
@@ -142,10 +142,10 @@ final class LiveTVConfiguredImportTests: XCTestCase {
         let model = LiveTVPrototypeModel(channels: [])
         await imports.reload(into: model)
         XCTAssertEqual(model.channels.count, 1)
-        XCTAssertTrue(imports.guideSources.isEmpty)
-        XCTAssertNil(imports.guideDiscoveryFailures[playlist.id])
+        XCTAssertEqual(imports.guideSources.map(\.source.url), Array(guides.prefix(32)))
+        XCTAssertEqual(imports.guideDiscoveryFailures[playlist.id], .guideSourceLimitReached)
         let calls = await loader.calls
-        XCTAssertTrue(calls.guides.isEmpty)
+        XCTAssertEqual(calls.guides, Array(guides.prefix(32)))
     }
 
     func testDeclaredGuidesLoadAcrossOriginsWithoutExplicitConfiguration() async throws {

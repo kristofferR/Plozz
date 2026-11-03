@@ -46,6 +46,11 @@ struct RelatedRowView: View {
                     },
                     onSelect: onSelect
                 )
+                #if os(tvOS)
+                // Bridge the empty gutter of a short rail before focus reaches Cast.
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .focusSection()
+                #endif
             } else if !hasResolved {
                 placeholder
             }

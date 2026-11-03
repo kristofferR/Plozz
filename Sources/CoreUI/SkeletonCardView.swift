@@ -28,9 +28,16 @@ public struct SkeletonCardView: View {
     /// An explicit resolved preference takes precedence over inherited presentation defaults.
     private let captionOverride: Bool?
     @Environment(\.plozzCardCaptionsHidden) private var captionsHidden
-    @Environment(\.plozzCardCaptionsHiddenWithArtworkTitle) private var artworkTitleCaptionsHidden
+    @Environment(\.plozzContinueWatchingCaptionsHidden) private var continueWatchingCaptionsHidden
+    @Environment(\.plozzContinueWatchingCaptionsHiddenWithArtworkTitle) private var continueWatchingArtworkCaptionsHidden
+    @Environment(\.plozzArtworkPolicy) private var artworkPolicy
+    @Environment(\.plozzContinueWatchingPlaybackDetails) private var playbackDetails
     private var showsCaption: Bool {
-        captionOverride ?? !(showsSeriesArtwork ? artworkTitleCaptionsHidden : captionsHidden)
+        if let captionOverride { return captionOverride }
+        if showsSeriesArtwork || artworkPolicy.area == .continueWatching {
+            return !(showsSeriesArtwork ? continueWatchingArtworkCaptionsHidden : continueWatchingCaptionsHidden)
+        }
+        return !captionsHidden
     }
     /// Mirrors `PosterCardView`'s series-artwork shape: taller than 16:9 (it
     /// reserves a band for its chrome) and narrower to compensate. Kept explicit
@@ -125,7 +132,7 @@ public struct SkeletonCardView: View {
     private var posterCard: some View {
         VStack(alignment: .leading, spacing: metrics.posterCaptionTopSpacing) {
             Color.clear
-                .aspectRatio(2.0 / 3.0, contentMode: .fit)
+                .aspectRatio(borderlessAspectRatio, contentMode: .fit)
                 .frame(maxWidth: .infinity)
                 .overlay {
                     RoundedRectangle(cornerRadius: metrics.posterArtworkCornerRadius, style: .continuous)
@@ -311,7 +318,7 @@ public struct SkeletonCardView: View {
     /// Aspect ratio for the borderless full-bleed image (matches `PosterCardView`).
     private var borderlessAspectRatio: CGFloat {
         switch style {
-        case .poster: return 2.0 / 3.0
+        case .poster: return showsSeriesArtwork ? playbackDetails.cardAspectRatio : 2.0 / 3.0
         case .landscape: return showsSeriesArtwork
             ? ContinueWatchingCardShape.aspectRatio
             : 16.0 / 9.0

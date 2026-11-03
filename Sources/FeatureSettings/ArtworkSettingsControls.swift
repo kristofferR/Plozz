@@ -7,10 +7,15 @@ public struct ArtworkSettingsControls: View {
     @Bindable private var cards: CardStyleSettingsModel
     @Environment(\.themePalette) private var palette
     private let continueWatchingShowsSeriesArtwork: Bool
+    private let continueWatchingLayout: ContinueWatchingCardLayout
 
-    public init(cards: CardStyleSettingsModel, continueWatchingShowsSeriesArtwork: Bool = true) {
+    public init(
+        cards: CardStyleSettingsModel, continueWatchingShowsSeriesArtwork: Bool = true,
+        continueWatchingLayout: ContinueWatchingCardLayout = .landscape
+    ) {
         self.cards = cards
         self.continueWatchingShowsSeriesArtwork = continueWatchingShowsSeriesArtwork
+        self.continueWatchingLayout = continueWatchingLayout
     }
 
     public var body: some View {
@@ -41,7 +46,8 @@ public struct ArtworkSettingsControls: View {
     private var customizationLink: some View {
         ViewCustomizationLink(isCustomized: cards.artwork.selectedPreset == nil) {
             ArtworkCustomizationView(
-                cards: cards, continueWatchingShowsSeriesArtwork: continueWatchingShowsSeriesArtwork
+                cards: cards, continueWatchingShowsSeriesArtwork: continueWatchingShowsSeriesArtwork,
+                continueWatchingLayout: continueWatchingLayout
             )
         }
         .accessibilityIdentifier("artwork-customization")
@@ -62,15 +68,29 @@ private struct ArtworkPresetPicker: View {
                     settings.applyPreset(preference)
                 }
                 .accessibilityIdentifier("artwork-preset-\(preference.rawValue)")
+                .settingsSearchAnchor(
+                    "artwork-preset-\(preference.rawValue)",
+                    fallbackFor: preference == (settings.selectedPreset ?? .recommended) ? ["artwork-preset"] : []
+                )
             }
         }
     }
 }
 
-struct ArtworkCustomizationView: View {
+public struct ArtworkCustomizationView: View {
     @Bindable var cards: CardStyleSettingsModel
     var continueWatchingShowsSeriesArtwork = true
+    var continueWatchingLayout: ContinueWatchingCardLayout = .landscape
     @Environment(HeroSettingsModel.self) private var hero: HeroSettingsModel?
+
+    public init(
+        cards: CardStyleSettingsModel, continueWatchingShowsSeriesArtwork: Bool = true,
+        continueWatchingLayout: ContinueWatchingCardLayout = .landscape
+    ) {
+        self.cards = cards
+        self.continueWatchingShowsSeriesArtwork = continueWatchingShowsSeriesArtwork
+        self.continueWatchingLayout = continueWatchingLayout
+    }
 
     private var areas: [ArtworkArea] {
         #if os(tvOS)
@@ -80,7 +100,7 @@ struct ArtworkCustomizationView: View {
         #endif
     }
 
-    var body: some View {
+    public var body: some View {
         ViewCustomizationList(
             title: "Artwork by view", initialRowID: "artwork-view-home",
             focusedHelp: { id in
@@ -93,7 +113,8 @@ struct ArtworkCustomizationView: View {
                                 ? "No hero is currently shown with your Home layout." : $0
                             return ViewCustomizationHelp(
                                 detail: detail, illustration: .artwork(area),
-                                continueWatchingShowsSeriesArtwork: continueWatchingShowsSeriesArtwork
+                                continueWatchingShowsSeriesArtwork: continueWatchingShowsSeriesArtwork,
+                                continueWatchingLayout: continueWatchingLayout
                             )
                         }
                     }
@@ -108,17 +129,25 @@ struct ArtworkCustomizationView: View {
         }
     }
 
+    @ViewBuilder
     private func section(_ title: LocalizedStringResource, areas sectionAreas: [ArtworkArea]) -> some View {
+        let visibleAreas = sectionAreas.filter { areas.contains($0) }
+        let controls = ForEach(visibleAreas) { area in
+            ArtworkAreaChoices(area: area, settings: $cards.artwork)
+        }
+        #if os(tvOS)
         Section {
-            ForEach(sectionAreas.filter { areas.contains($0) }) { area in
-                ArtworkAreaChoices(area: area, settings: $cards.artwork)
-            }
+            controls
         } header: {
             Text(title)
-                #if os(tvOS)
                 .settingsSectionHeader()
-                #endif
         }
+        #else
+        SettingsSectionGroup(title) {
+            controls
+        }
+        .settingsSearchGroup(visibleAreas.map { "artwork-view-\($0.rawValue)" })
+        #endif
     }
 }
 
@@ -142,6 +171,7 @@ struct ArtworkAreaChoices: View {
                 Text(choice.displayName).tag(choice)
             }
         }
+        .settingsSearchAnchor("artwork-view-\(area.rawValue)")
         #else
         ViewCustomizationRow(
             id: "artwork-view-\(area.rawValue)",
@@ -151,6 +181,7 @@ struct ArtworkAreaChoices: View {
         ) {
             settings.toggleCustomization(in: area)
         }
+        .settingsSearchAnchor("artwork-view-\(area.rawValue)")
         #endif
     }
 }

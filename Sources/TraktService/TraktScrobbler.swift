@@ -13,9 +13,8 @@ public protocol TraktScrobbling: Sendable {
 
     /// Durable variant for the watch-state outbox: performs the same scrobble but
     /// **surfaces a failure** (so the reconciler can retry it) while treating
-    /// "already scrobbled" (Trakt 409) and "nothing to scrobble" (not connected /
-    /// unidentifiable item) as success — i.e. it only throws on a genuinely
-    /// retryable error (token refresh / network).
+    /// "already scrobbled" (Trakt 409) and disconnected/unsupported targets as
+    /// no-ops. Missing identity throws so metadata can be refreshed before retry.
     func scrobbleResult(item: MediaItem, progress: Double, event: PlaybackEvent) async throws
 }
 
@@ -31,6 +30,10 @@ public extension TraktScrobbling {
 public struct DisabledTraktScrobbler: TraktScrobbling {
     public init() {}
     public func scrobble(item: MediaItem, progress: Double, event: PlaybackEvent) async {}
+}
+
+public enum TraktScrobbleError: Error, Equatable, Sendable {
+    case unidentifiableItem
 }
 
 /// Live scrobbler. An `actor` so token refresh is serialized and the type is
@@ -80,22 +83,24 @@ public actor TraktScrobbler: TraktScrobbling {
         }
     }
 
-    /// Durable variant: same scrobble, but rethrows a retryable failure (network /
-    /// token refresh) so the outbox can retry, while a 409 is already swallowed as
-    /// success inside ``TraktClient/scrobble`` and an unidentifiable / not-connected
-    /// item is a no-op success.
+    /// Missing metadata remains pending just like a transport failure; the outbox
+    /// can reload the original server item instead of recording a false success.
     public func scrobbleResult(item: MediaItem, progress: Double, event: PlaybackEvent) async throws {
         guard let action = Self.action(for: event) else {
             FanoutDiagnostics.emit(FanoutDiagnostics.scrobbleLine(tracker: "trakt", item: item, outcome: "skip(event=\(event) not scrobbled)"))
             return
         }
-        guard let body = Self.scrobbleBody(for: item, progress: progress) else {
-            FanoutDiagnostics.emit(FanoutDiagnostics.scrobbleLine(tracker: "trakt", item: item, outcome: "skip(no usable ids)"))
+        guard item.kind == .movie || item.kind == .video || item.kind == .episode else {
+            FanoutDiagnostics.emit(FanoutDiagnostics.scrobbleLine(tracker: "trakt", item: item, outcome: "skip(unsupported kind)"))
             return
         }
         guard let token = try await validAccessToken() else {
             FanoutDiagnostics.emit(FanoutDiagnostics.scrobbleLine(tracker: "trakt", item: item, outcome: "skip(not connected)"))
             return
+        }
+        guard let body = Self.scrobbleBody(for: item, progress: progress) else {
+            PlozzLog.playback.error("Trakt watch delivery deferred: missing media identity.")
+            throw TraktScrobbleError.unidentifiableItem
         }
         do {
             try await client.scrobble(action: action, body: body, accessToken: token)
@@ -119,6 +124,10 @@ public actor TraktScrobbler: TraktScrobbling {
     }
 
     // MARK: - Mapping
+
+    public static func canIdentify(_ item: MediaItem) -> Bool {
+        scrobbleBody(for: item, progress: 0) != nil
+    }
 
     /// Maps an in-app playback event to a Trakt scrobble action. `.progress`
     /// maps to `nil` (skipped).

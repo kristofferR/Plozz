@@ -15,7 +15,7 @@ import XCTest
 
 @MainActor
 final class MobileHomeAndMultiviewPresentationTests: XCTestCase {
-    func testInPlayerGuideAlignsItsHeaderAndUsesAnOpaqueInsetSurface() async throws {
+    func testInPlayerGuideAlignsItsHeaderWithoutPaintingOverThePlayerSurface() async throws {
         let model = LiveTVPrototypeModel(now: Date(), channels: Array(LiveTVPrototypeModel().channels.prefix(4)))
         let imports = LiveTVPrototypeImportModel()
         try await withWindow { window, host in
@@ -25,7 +25,7 @@ final class MobileHomeAndMultiviewPresentationTests: XCTestCase {
                 (1194, 380, .large), (844, 320, .xxxLarge)
             ] {
                 window.frame.size = CGSize(width: width, height: height)
-                var standaloneHeaderY: CGFloat?
+                var standaloneHeaderY: [Bool: CGFloat] = [:]
                 for embedded in [false, true] {
                     for reducedTransparency in [false, true] {
                         host.rootView = AnyView(
@@ -33,6 +33,7 @@ final class MobileHomeAndMultiviewPresentationTests: XCTestCase {
                                 .environment(\.themePalette, reducedTransparency ? .light : .dark)
                                 .environment(\.colorScheme, .dark)
                                 .environment(\.plozzReduceTransparency, reducedTransparency)
+                                .environment(\.gradientBackgroundsEnabled, false)
                                 .environment(\.dynamicTypeSize, typeSize)
                         )
                         try await settle(window)
@@ -43,36 +44,53 @@ final class MobileHomeAndMultiviewPresentationTests: XCTestCase {
                         let header = try textFrame(
                             typeSize == .xxxLarge ? "Chan" : "Channels", observations: text(image), size: image.size
                         )
+                        let pixels = try rgbaPixels(image)
+                        let imageWidth = try XCTUnwrap(image.cgImage).width
+                        let sampleX = Int((header.minX - 4) * image.scale)
+                        let columns = Int(header.minX * image.scale)..<Int(header.maxX * image.scale)
+                        // OCR locates the label; pixel ink, not Vision's approximate box, measures its inset.
+                        let inkRows = (Int((header.minY - 4) * image.scale)..<Int((header.maxY + 4) * image.scale))
+                            .filter { row in
+                                let reference = (row * imageWidth + sampleX) * 4
+                                return columns.contains { column in
+                                    let offset = (row * imageWidth + column) * 4
+                                    return (0..<3).contains {
+                                        abs(Int(pixels[offset + $0]) - Int(pixels[reference + $0])) > 40
+                                    }
+                                }
+                            }
+                        let headerTop = CGFloat(try XCTUnwrap(inkRows.first)) / image.scale
+                        XCTAssertLessThan(header.minX, width * 0.15, "The guide must start at the card's leading edge.")
                         if embedded {
                             XCTAssertEqual(
-                                try XCTUnwrap(standaloneHeaderY) - header.minY, PrototypeLayout.guideInset,
-                                accuracy: 2, "Only the redundant standalone top inset should be removed."
+                                try XCTUnwrap(standaloneHeaderY[reducedTransparency]) - headerTop, PrototypeLayout.guideInset,
+                                accuracy: 1 / image.scale, "Only the redundant standalone top inset should be removed."
                             )
                             XCTAssertLessThan(
-                                header.minY - LiveGuideLayoutFixture.inset,
+                                headerTop - LiveGuideLayoutFixture.inset,
                                 UIFontMetrics(forTextStyle: .caption1).scaledValue(
                                     for: PrototypeLayout.rulerHeight,
                                     compatibleWith: UITraitCollection(
                                         preferredContentSizeCategory: typeSize == .xxxLarge ? .extraExtraExtraLarge : .large
                                     )
                                 ) / 2,
-                                "The ruler must start alongside the current-program surface, not a second inset below it."
+                                "The embedded ruler must not retain the standalone guide's top inset."
                             )
                         } else {
-                            standaloneHeaderY = header.minY
+                            standaloneHeaderY[reducedTransparency] = headerTop
                         }
-                        let pixels = try rgbaPixels(image)
-                        let x = Int((LiveGuideLayoutFixture.inset + width * 0.18) * image.scale)
-                        let y = Int((height - LiveGuideLayoutFixture.inset - 12) * image.scale)
-                        let imageWidth = try XCTUnwrap(image.cgImage).width
-                        let offset = (y * imageWidth + x) * 4
-                        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
-                        XCTAssertTrue(UIColor(ThemePalette.dark.raised.fill).getRed(&red, green: &green, blue: &blue, alpha: &alpha))
-                        for (component, expected) in [red, green, blue].enumerated() {
-                            XCTAssertEqual(
-                                Double(pixels[offset + component]), Double(expected * 255), accuracy: 3,
-                                "The inset is a shared opaque content surface, not glass sampling the colored backdrop."
-                            )
+                        let referenceOffset = (Int(height / 2 * image.scale) * imageWidth + Int(4 * image.scale)) * 4
+                        let backdrop = Array(pixels[referenceOffset..<(referenceOffset + 3)])
+                        XCTAssertGreaterThan(backdrop[0], 200)
+                        XCTAssertLessThan(backdrop[1], 100)
+                        if embedded {
+                            let gridX = Int((width - LiveGuideLayoutFixture.inset - 2) * image.scale)
+                            let gridY = Int(height / 2 * image.scale)
+                            let gridOffset = (gridY * imageWidth + gridX) * 4
+                            for (component, expected) in backdrop.enumerated() {
+                                XCTAssertEqual(Double(pixels[gridOffset + component]), Double(expected), accuracy: 3,
+                                               "The embedded grid must not add the standalone guide's background.")
+                            }
                         }
                     }
                 }
@@ -300,7 +318,8 @@ final class MobileHomeAndMultiviewPresentationTests: XCTestCase {
 
     func testRejectedArtworkAndSpoilerPlaceholdersKeepSafeNames() async throws {
         let rejected = try await posterArtwork(size: CGSize(width: 450, height: 100))
-        let folder = MediaItem(id: "rejected-folder", title: "Family", kind: .folder, posterURL: rejected)
+        // Wide container artwork is valid; only media posters reject this aspect ratio.
+        let folder = MediaItem(id: "missing-folder", title: "Family", kind: .folder)
         let movie = MediaItem(id: "rejected-movie", title: "Films", kind: .movie, posterURL: rejected)
         let episode = MediaItem(id: "hidden-episode", title: "Secret Ending", kind: .episode, episodeNumber: 5)
         try await withWindow { window, host in
@@ -654,6 +673,65 @@ final class MobileHomeAndMultiviewPresentationTests: XCTestCase {
         }
     }
 
+    func testLibraryCardsRespectHomeOverridesWithoutChangingDirectoryLabels() async throws {
+        let artwork = try await posterArtwork()
+        let library = AggregatedLibrary(
+            accountID: "caption-fixture", accountName: "Viewer", serverName: "Media Server",
+            providerKind: .plex,
+            library: MediaLibrary(id: "movies", title: "Movies", kind: .movie, imageURL: artwork)
+        )
+        try await withWindow { window, host in
+            window.frame.size = CGSize(width: 390, height: 700)
+            for homeCard in [true, false] {
+                for style in CardStyle.allCases {
+                    var captionBottoms: [CardCaptionPreference: CGFloat] = [:]
+                    for preset in [CardCaptionPreference.show, .hide, .recommended] {
+                        let captions = CardCaptionSettings(
+                            preference: preset,
+                            overrides: [.home: preset == .hide, .browse: preset == .hide, .homeLibraries: preset != .hide]
+                        )
+                        host.rootView = AnyView(
+                            VStack(alignment: .leading, spacing: 8) {
+                                Group {
+                                    if homeCard {
+                                        PlozziOSHomeLibraryCard(
+                                            library: library, artworkSource: nil, width: 260
+                                        )
+                                    } else {
+                                        PlozziOSLibraryCard(library: library.library)
+                                    }
+                                }
+                                .frame(width: 260)
+                                Text("After card")
+                            }
+                            .padding(22)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            .background(Color.black)
+                            .environment(\.themePalette, .dark)
+                            .environment(\.colorScheme, .dark)
+                            .environment(\.plozzCardStyle, style)
+                            .environment(\.plozzCardCaptionSettings, captions)
+                            .environment(\.plozzMetrics, .touch(density: .standard))
+                        )
+                        try await settle(window)
+                        let image = snapshot(window, name: "library-labels-\(homeCard)-\(style)-\(preset)")
+                        let observations = try text(image)
+                        let copy = observations.map(\.candidate.string).joined(separator: " ")
+                        XCTAssertEqual(copy.contains("Movies"), preset != .hide, copy)
+                        XCTAssertEqual(copy.contains("Media Server"), homeCard && preset != .hide, copy)
+                        captionBottoms[preset] = try textFrame(
+                            "After card", observations: observations, size: image.size
+                        ).minY
+                    }
+                    XCTAssertLessThan(try XCTUnwrap(captionBottoms[.hide]),
+                                      try XCTUnwrap(captionBottoms[.show]) - 20)
+                    XCTAssertEqual(try XCTUnwrap(captionBottoms[.show]),
+                                   try XCTUnwrap(captionBottoms[.recommended]), accuracy: 1)
+                }
+            }
+        }
+    }
+
     func testLibraryNameAndServerShareOneCaptionColumn() async throws {
         let artwork = try await posterArtwork()
         let library = AggregatedLibrary(
@@ -832,25 +910,29 @@ final class MobileHomeAndMultiviewPresentationTests: XCTestCase {
                     )
                     let cg = try XCTUnwrap(image.cgImage)
                     let pixels = try rgbaPixels(image)
-                    var blueMinX = cg.width
-                    var blueMaxX = -1
-                    // Isolate the first card's top-right blue check badge.
+                    var badgeMinX = cg.width
+                    var badgeMaxX = -1
+                    // Isolate the white check badge below the heading, inside the first poster.
+                    let inset: CGFloat = width < 600 ? 22 : 36
                     let metrics = PlozziOSHomeRailLayout<EmptyView>.posterMetrics(
-                        in: width, inset: width < 600 ? 22 : 36,
+                        in: width, inset: inset,
                         metrics: .touch(density: .standard), cardStyle: .borderless
                     )
-                    let endX = Int(((width < 600 ? 22 : 36) + metrics.posterWidth) * image.scale)
-                    for y in 0..<min(cg.height, Int(130 * image.scale)) {
-                        for x in 0..<min(endX, cg.width) {
+                    let poster = try XCTUnwrap(posterRuns(image, axis: .vertical, at: inset + 40).first)
+                    let startX = Int(inset * image.scale)
+                    let endX = Int((inset + metrics.posterWidth) * image.scale)
+                    let startY = Int(CGFloat(poster.lowerBound) * image.scale)
+                    let endY = Int(CGFloat(poster.lowerBound + 50) * image.scale)
+                    for y in startY..<min(cg.height, endY) {
+                        for x in startX..<min(endX, cg.width) {
                             let index = (y * cg.width + x) * 4
-                            if pixels[index + 2] > 160 && pixels[index + 1] > 60
-                                && Int(pixels[index + 2]) > Int(pixels[index]) + 80 {
-                                blueMinX = min(blueMinX, x)
-                                blueMaxX = max(blueMaxX, x)
+                            if pixels[index] > 220 && pixels[index + 1] > 220 && pixels[index + 2] > 220 {
+                                badgeMinX = min(badgeMinX, x)
+                                badgeMaxX = max(badgeMaxX, x)
                             }
                         }
                     }
-                    XCTAssertEqual(CGFloat(blueMaxX - blueMinX + 1) / image.scale, 21, accuracy: 2)
+                    XCTAssertEqual(CGFloat(badgeMaxX - badgeMinX + 1) / image.scale, 21, accuracy: 2)
                 }
             }
         }
@@ -1072,9 +1154,9 @@ final class MobileHomeAndMultiviewPresentationTests: XCTestCase {
                         let rows: [(String, AnyView)] = [
                             ("Popular", AnyView(PlozziOSLibraryRecommendationRow(
                                 section: LibrarySection(id: "shared", title: "Popular", items: items),
-                                spoilerSettings: .default, showsSeriesArtwork: false, onSelect: { _ in }
+                                spoilerSettings: .default, showsSeriesArtwork: false, onSelect: { _, _ in }
                             ))),
-                            ("Related", AnyView(PlozziOSRelatedSection(entries: related, inset: inset, onSelect: { _ in }))),
+                            ("Related", AnyView(PlozziOSRelatedSection(entries: related, inset: inset, onSelect: { _, _ in }))),
                             ("Extras", AnyView(PlozziOSExtrasSection(
                                 state: .loaded(items.map { MediaExtra(item: $0, kind: .trailer) }),
                                 inset: inset, onSelect: { _ in }, onRetry: {}
@@ -1092,6 +1174,7 @@ final class MobileHomeAndMultiviewPresentationTests: XCTestCase {
                                 .environment(\.dynamicTypeSize, dynamicSize)
                                 .environment(\.plozzCardStyle, cardStyle)
                                 .environment(\.plozzCardCaptionSettings, app.settings.cardStyle.captions)
+                                .environment(\.plozzWatchStatusIndicator, .watched)
                                 .environment(\.plozzMetrics, metrics)
                                 .environment(\.themePalette, .dark)
                             )
@@ -1140,7 +1223,7 @@ final class MobileHomeAndMultiviewPresentationTests: XCTestCase {
         let app = PlozziOSAppModel()
         let original = app.settings.cardStyle.captions
         defer { app.settings.cardStyle.captions = original }
-        app.settings.cardStyle.captions = .default
+        app.settings.cardStyle.captions = CardCaptionSettings(showsLabels: false)
         let artwork = try await posterArtwork()
         let items = (0..<8).map { MediaItem(id: "rhythm-\($0)", title: "Title", kind: .movie, posterURL: artwork) }
         let sizes: [(DynamicTypeSize, UIContentSizeCategory)] = [(.large, .large), (.accessibility2, .accessibilityLarge)]
@@ -1161,6 +1244,8 @@ final class MobileHomeAndMultiviewPresentationTests: XCTestCase {
                             .environment(\.horizontalSizeClass, sizeClass)
                             .environment(\.dynamicTypeSize, dynamicSize)
                             .environment(\.plozzCardStyle, cardStyle)
+                            .environment(\.plozzCardCaptionSettings, app.settings.cardStyle.captions)
+                            .environment(\.plozzWatchStatusIndicator, .watched)
                             .environment(\.plozzMetrics, metrics)
                             .environment(\.themePalette, .dark)
                         )
@@ -1359,10 +1444,10 @@ final class MobileHomeAndMultiviewPresentationTests: XCTestCase {
     }
 
     private func text(_ image: UIImage, maximumCandidates: Int = 5) throws -> [RecognizedLabel] {
-        // Wide iPad snapshots downsample small dock captions during full-image OCR.
-        // Also recognize the native-resolution dock crop, retaining screen coordinates.
+        // Vision downsamples wide snapshots. Preserve native pixels for card and dock captions.
         let regions = [
             CGRect(origin: .zero, size: image.size),
+            CGRect(x: 0, y: 0, width: min(640, image.size.width), height: min(420, image.size.height)),
             CGRect(x: max(0, (image.size.width - 640) / 2), y: max(0, image.size.height - 260),
                    width: min(640, image.size.width), height: min(260, image.size.height))
         ]
@@ -1473,33 +1558,26 @@ private struct LiveGuideLayoutFixture: View {
     let embedded: Bool
 
     var body: some View {
-        GeometryReader { geometry in
-            HStack(alignment: .top, spacing: 12) {
-                LiveChannelGuideInfoColumn(title: "Current channel", logoURL: nil, plozzChannelID: nil, program: nil)
-                    .frame(width: geometry.size.width * 0.36)
-                if embedded {
-                    LiveTVPlayerGuideOverlay(
-                        model: model, imports: imports, playingChannelID: model.channels.first?.id ?? "",
-                        libraryCatalog: nil, loadLibraryGuide: nil,
-                        embedding: .init(back: {}, didTune: {}, focusesPlayingChannel: false), tune: { _ in }
-                    )
-                } else {
-                    PrototypeBrowser(
-                        model: model, imports: imports,
-                        selectedID: .constant(nil), selectedRowID: .constant(nil),
-                        railActive: .constant(false), focusedProgram: .constant(nil), hasFocus: .constant(false),
-                        topRequest: 0, nowRequest: 0, guideOffset: .constant(0), timeAnchor: .constant(Date()),
-                        timelineOffset: .constant(0), restoreFocusRequest: 0, isPresented: true,
-                        isRestoringFocus: false, restoresPlaybackFocus: false, watchOrigin: nil,
-                        focusRestored: { _ in }, tune: { _ in }, details: { _ in },
-                        openControls: {}, openSources: {}, openGuideTime: {}, openToolbar: nil,
-                        isLoading: false, loadFailed: false, reload: {}
-                    )
-                }
+        Group {
+            if embedded {
+                LiveTVPlayerGuideOverlay(
+                    model: model, imports: imports, playingChannelID: model.channels.first?.id ?? "",
+                    libraryCatalog: nil, loadLibraryGuide: nil,
+                    embedding: .init(back: {}, didTune: {}, focusesPlayingChannel: false), tune: { _ in }
+                )
+            } else {
+                PrototypeBrowser(
+                    model: model, imports: imports,
+                    selectedID: .constant(nil), selectedRowID: .constant(nil),
+                    railActive: .constant(false), focusedProgram: .constant(nil), hasFocus: .constant(false),
+                    topRequest: 0, nowRequest: 0, guideOffset: .constant(0), timeAnchor: .constant(Date()),
+                    timelineOffset: .constant(0), restoreFocusRequest: 0, isPresented: true,
+                    isRestoringFocus: false, restoresPlaybackFocus: false, watchOrigin: nil,
+                    focusRestored: { _ in }, tune: { _ in }, details: { _ in },
+                    openControls: {}, openSources: {}, openGuideTime: {}, openToolbar: nil,
+                    isLoading: false, loadFailed: false, reload: {}
+                )
             }
-            .environment(\.playerCardMetrics, PlayerCardMetrics.liveTouch(
-                forWidth: geometry.size.width, height: geometry.size.height
-            ))
         }
         .padding(Self.inset)
         .background(Color.red)

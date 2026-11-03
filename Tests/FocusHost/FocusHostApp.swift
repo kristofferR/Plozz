@@ -3,12 +3,23 @@ import UIKit
 import CoreUI
 import CoreModels
 import FeaturePlayback
+@testable import FeatureSettings
 
 @main
 struct FocusHostApp: App {
     var body: some Scene {
         WindowGroup {
-            if ProcessInfo.processInfo.arguments.contains("--playback-failure-fixture") {
+            if ProcessInfo.processInfo.arguments.contains("--profile-pin-transition-fixture") {
+                ProfilePINTransitionFixture()
+            } else if ProcessInfo.processInfo.arguments.contains("--large-native-navigation-fixture") {
+                LargeNativeNavigationFixture()
+            } else if ProcessInfo.processInfo.arguments.contains("--reorder-input-fixture") {
+                ReorderInputFixture()
+            } else if ProcessInfo.processInfo.arguments.contains("--home-section-warning-fixture") {
+                HomeSectionWarningFixture()
+            } else if ProcessInfo.processInfo.arguments.contains("--home-section-editor-fixture") {
+                HomeSectionsEditorFixture()
+            } else if ProcessInfo.processInfo.arguments.contains("--playback-failure-fixture") {
                 PlaybackFailureFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--setup-picker-fixture") {
                 SetupPickerFixture()
@@ -20,12 +31,20 @@ struct FocusHostApp: App {
                 ServerAddressNavigationFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--read-ahead-settings-fixture") {
                 PlaybackReadAheadFixture()
+            } else if ProcessInfo.processInfo.arguments.contains("--skip-settings-fixture") {
+                SkipSettingsFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--iptv-organization-fixture") {
                 IPTVOrganizationFixture()
+            } else if ProcessInfo.processInfo.arguments.contains("--category-search-fixture") {
+                LiveTVCategorySearchFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--sync-erasure-fixture") {
                 SyncErasureRemoteFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--preview-introduction-fixture") {
                 LiveTVPreviewIntroductionFixture()
+            } else if ProcessInfo.processInfo.arguments.contains("--sources-navigation-fixture") {
+                LiveTVSourcesNavigationFixture()
+            } else if ProcessInfo.processInfo.arguments.contains("--channel-settings-fixture") {
+                LibraryChannelSettingsFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--view-customization-fixture") {
                 ViewCustomizationFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--iptv-setup-fixture") {
@@ -42,8 +61,8 @@ struct FocusHostApp: App {
                 EpisodeRowRemoteFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--subtitle-style-input-fixture") {
                 SubtitleStyleInputFixture()
-            } else if ProcessInfo.processInfo.arguments.contains("--home-layout-onboarding-fixture") {
-                HomeLayoutOnboardingFixture()
+            } else if ProcessInfo.processInfo.arguments.contains("--plex-home-onboarding-fixture") {
+                PlexHomeOnboardingFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--library-showcase-fixture") {
                 LibraryShowcaseFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--library-held-scroll-fixture") {
@@ -62,6 +81,8 @@ struct FocusHostApp: App {
                 CastFocusFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--guide-navigation-fixture") {
                 GuideNavigationFixture()
+            } else if ProcessInfo.processInfo.arguments.contains("--channel-identity-fixture") {
+                PlozzChannelIdentityFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--library-channel-actions") {
                 LibraryChannelActionsFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--navigation-fixture") {
@@ -82,6 +103,124 @@ struct FocusHostApp: App {
                 Color.black
             }
         }
+    }
+}
+
+private struct SkipSettingsFixture: View {
+    @State private var playback: PlaybackSettingsModel
+    @State private var navigation = SettingsPageNavigation<String>()
+
+    init() {
+        let store = PlaybackSettingsStore(namespace: "skip-settings-remote-fixture")
+        store.save(.init(
+            skipIntros: .autoInstant,
+            skipMarkerRules: [.anime: [.intro: .init(mode: .on, automaticDelaySeconds: 5)]]
+        ))
+        _playback = State(initialValue: PlaybackSettingsModel(store: store))
+    }
+
+    var body: some View {
+        SettingsPageStack(navigation: navigation, pageWidth: 960, onRootBack: {}) {
+            SkipMarkerSettingsView(model: playback)
+        } destination: { _ in EmptyView() }
+        .environment(\.settingsInWorkspace, true)
+        .environment(\.themePalette, .dark)
+        .environment(\.colorScheme, .dark)
+        .toggleStyle(SettingsSwitchToggleStyle())
+        .background { SettingsPageBackground() }
+    }
+}
+
+private struct HomeSectionWarningFixture: View {
+    @State private var retries = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 30) {
+            HomeSectionStatusView(issue: .init(
+                choice: .init(
+                    id: .server(accountID: "fixture", section: "picks"),
+                    title: "Top picks", isProviderDefault: true
+                ),
+                reason: .failed(.serverUnreachable),
+                serverName: "Living room server", providerKind: .jellyfin
+            )) { retries += 1 }
+            Text(verbatim: "Retries: \(retries)")
+                .accessibilityIdentifier("section-warning-retries")
+        }
+        .padding(80)
+    }
+}
+
+private struct HomeSectionsEditorFixture: View {
+    @State private var visibility: HomeLibraryVisibilityModel
+
+    init() {
+        let visibility = HomeLibraryVisibilityModel(
+            store: HomeLibraryVisibilityStore(namespace: "home-section-remote-fixture")
+        )
+        visibility.useRowDefaults(.combined)
+        if ProcessInfo.processInfo.arguments.contains("--single-home-row") {
+            let choices = HomeRowChoice.shared
+            visibility.applyRows(
+                .init(
+                    enabled: [.global(.continueWatching)],
+                    disabled: choices.map(\.id).filter { $0 != .global(.continueWatching) }
+                ),
+                choices: choices
+            )
+        }
+        _visibility = State(initialValue: visibility)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if ProcessInfo.processInfo.arguments.contains("--row-style-page") {
+                    HomeRowStyleSettingsView(libraries: [], accounts: [])
+                } else if ProcessInfo.processInfo.arguments.contains("--spotlight-page") {
+                    HomeHeroSettingsView(libraries: [], accounts: [], visibility: visibility)
+                } else {
+                    HomeRowsSettingsView(libraries: [], accounts: [], visibility: visibility)
+                }
+            }
+            .frame(width: SettingsFormMetrics.pageWidth)
+        }
+        .environment(HeroSettingsModel(store: InMemoryHeroSettingsStore()))
+        .environment(HeroBackgroundSettingsModel(store: InMemoryHeroBackgroundSettingsStore()))
+        .environment(CardStyleSettingsModel())
+    }
+}
+
+private struct ReorderInputFixture: View {
+    @State private var sections = OrderedVisibilityList.Sections(enabled: Array(0..<24), disabled: [24, 25])
+    @State private var isLifting = false
+    @State private var positions: [Int] = []
+    private var allowsHiding: Bool { ProcessInfo.processInfo.arguments.contains("--with-hidden-rows") }
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Button("Done") {}.disabled(isLifting)
+            ScrollView {
+                LiftableReorderList(
+                    sections: .init(enabled: sections.enabled, disabled: allowsHiding ? sections.disabled : []),
+                    disabledSectionTitle: "Hidden", disabledPlaceholder: "No hidden rows",
+                    isLifting: $isLifting, allowsHiding: allowsHiding,
+                    row: { .init(title: Text(verbatim: "Row \($0)")) },
+                    onChange: {
+                        sections = $0
+                        if let index = $0.combined.firstIndex(of: 0) { positions.append(index) }
+                    }
+                )
+                .padding(36)
+            }
+            Text(verbatim: "Position \(sections.combined.firstIndex(of: 0) ?? -1); hidden \(sections.disabled.contains(0))")
+                .accessibilityIdentifier("reorder-fixture-position")
+                .accessibilityValue(Text(verbatim: positions.map(String.init).joined(separator: ",")))
+        }
+        .frame(width: 960)
+        .padding(.vertical, 60)
+        .environment(\.themePalette, .dark)
+        .environment(\.colorScheme, .dark)
     }
 }
 

@@ -67,8 +67,6 @@ final class SessionStateMachineTests: XCTestCase {
         m.apply(.themeSelected, allowsStandalonePlayback: true)
         XCTAssertEqual(m.state, .onboarding(.selectNavigation, canReturnToApp: true))
         m.apply(.navigationSelected, allowsStandalonePlayback: true)
-        XCTAssertEqual(m.state, .onboarding(.selectHomeLayout, canReturnToApp: true))
-        m.apply(.homeLayoutSelected, allowsStandalonePlayback: true)
         XCTAssertEqual(m.state, .ready)
     }
 
@@ -148,8 +146,6 @@ final class SessionStateMachineTests: XCTestCase {
         m.apply(.themeSelected)
         XCTAssertEqual(m.state, .onboarding(.selectNavigation, canReturnToApp: true))
         m.apply(.navigationSelected)
-        XCTAssertEqual(m.state, .onboarding(.selectHomeLayout, canReturnToApp: true))
-        m.apply(.homeLayoutSelected)
         XCTAssertEqual(m.state, .ready)
     }
 
@@ -163,16 +159,14 @@ final class SessionStateMachineTests: XCTestCase {
         XCTAssertEqual(m.state, .onboarding(.confirmProfile, canReturnToApp: true))
     }
 
-    func testHomeLayoutCannotSkipEarlierAppearanceChoices() {
-        let steps: [OnboardingStep] = [.selectTheme, .selectNavigation]
+    func testNavigationCannotSkipEarlierAppearanceChoices() {
+        let steps: [OnboardingStep] = [.confirmProfile, .selectSeerr, .selectTheme]
         for step in steps {
             let state = SessionState.onboarding(step, canReturnToApp: true)
-            XCTAssertEqual(SessionStateMachine.reduce(state: state, event: .homeLayoutSelected), state)
+            XCTAssertEqual(SessionStateMachine.reduce(state: state, event: .navigationSelected), state)
         }
-        var machine = SessionStateMachine(state: .onboarding(.selectHomeLayout, canReturnToApp: true))
+        var machine = SessionStateMachine(state: .onboarding(.selectNavigation, canReturnToApp: true))
         machine.apply(.navigationSelected)
-        XCTAssertEqual(machine.state, .onboarding(.selectHomeLayout, canReturnToApp: true))
-        machine.apply(.homeLayoutSelected)
         XCTAssertEqual(machine.state, .ready)
     }
 
@@ -648,6 +642,182 @@ final class AccountStoreTests: XCTestCase {
         let updated = try XCTUnwrap(store.loadAccounts().first)
         XCTAssertEqual(updated.credentialRevision, originalRevision)
         XCTAssertEqual(updated.userName, "Renamed")
+    }
+
+    func testAuthenticatedSessionReusesLegacyIdentityAndPreservesAccountChoices() throws {
+        for provider in [ProviderKind.plex, .jellyfin, .emby] {
+            let store = AccountStore(secureStore: InMemorySecureStore())
+            var server = MediaServer(
+                id: "server", name: "Old name", baseURL: URL(string: "https://old.example")!,
+                provider: provider, alternateConnectionURLs: [URL(string: "https://approved.example")!]
+            )
+            let original = Account(
+                id: "legacy-id", server: server, userID: "owner", userName: "Owner",
+                deviceID: "device", addedAt: Date(timeIntervalSince1970: 100)
+            )
+            try store.add(original, token: "OLD")
+            store.setActiveAccountIDs([])
+            server.name = "Renamed server"
+            server.baseURL = URL(string: "https://current.example")!
+            server.alternateConnectionURLs = nil
+            let session = UserSession(
+                server: server, userID: "owner", userName: "Renamed user",
+                deviceID: "device", accessToken: "NEW"
+            )
+
+            let result = try store.registerAuthenticatedSession(session)
+
+            XCTAssertEqual(result.previousAccount, original)
+            XCTAssertEqual(result.account.id, original.id)
+            XCTAssertEqual(result.account.addedAt, original.addedAt)
+            XCTAssertEqual(result.account.server.baseURL, session.server.baseURL)
+            XCTAssertEqual(result.account.server.alternateConnectionURLs, original.server.alternateConnectionURLs)
+            XCTAssertEqual(result.account.userName, "Renamed user")
+            XCTAssertNotEqual(result.account.credentialRevision, original.credentialRevision)
+            XCTAssertEqual(store.loadAccounts(), [result.account])
+            XCTAssertEqual(store.activeAccountIDs(), [])
+            XCTAssertEqual(store.token(for: original.id), "NEW")
+            XCTAssertNil(store.token(for: Account.stableID(for: session)))
+        }
+    }
+
+    func testRepeatedAuthenticationKeepsRevisionAndAllowsOtherUsersOnTheSameServer() throws {
+        let store = AccountStore(secureStore: InMemorySecureStore())
+        let server = MediaServer(
+            id: "same-server", name: "Library", baseURL: URL(string: "https://server.example")!, provider: .plex
+        )
+        let owner = UserSession(
+            server: server, userID: "owner", userName: "Same display name",
+            deviceID: "device", accessToken: "OWNER"
+        )
+        let first = try store.registerAuthenticatedSession(owner)
+        let repeated = try store.registerAuthenticatedSession(owner)
+        XCTAssertNil(first.previousAccount)
+        XCTAssertEqual(first.account.id, Account.stableID(for: owner))
+        XCTAssertEqual(repeated.account, first.account)
+        XCTAssertEqual(repeated.previousAccount, first.account)
+
+        var other = owner
+        other.userID = "other-user"
+        other.accessToken = "OTHER"
+        let otherUser = try store.registerAuthenticatedSession(other)
+        other.server.id = "other-server"
+        let otherServer = try store.registerAuthenticatedSession(other)
+        other.server.provider = .jellyfin
+        let otherProvider = try store.registerAuthenticatedSession(other)
+        XCTAssertEqual(store.loadAccounts().count, 4)
+        XCTAssertEqual(Set(store.activeAccountIDs()), [
+            first.account.id, otherUser.account.id, otherServer.account.id, otherProvider.account.id
+        ])
+        XCTAssertEqual(store.token(for: first.account.id), "OWNER")
+        XCTAssertEqual(store.token(for: otherUser.account.id), "OTHER")
+    }
+
+    func testAuthenticationDoesNotDeletePreviouslySavedDuplicateBindings() throws {
+        let store = AccountStore(secureStore: InMemorySecureStore())
+        let server = MediaServer(
+            id: "server", name: "Library", baseURL: URL(string: "https://server.example")!, provider: .plex
+        )
+        let session = UserSession(
+            server: server, userID: "owner", userName: "Owner", deviceID: "device", accessToken: "NEW"
+        )
+        let legacy = Account(id: "legacy", from: session)
+        let stable = Account(id: Account.stableID(for: session), from: session)
+        try store.add(legacy, token: "LEGACY")
+        try store.add(stable, token: "STABLE")
+
+        let result = try store.registerAuthenticatedSession(session)
+
+        XCTAssertEqual(result.account.id, stable.id)
+        XCTAssertEqual(Set(store.loadAccounts().map(\.id)), [legacy.id, stable.id])
+        XCTAssertEqual(store.token(for: legacy.id), "LEGACY")
+        XCTAssertEqual(store.token(for: stable.id), "NEW")
+    }
+
+    func testAuthenticationFailsClosedWhenExistingIdentityOrCredentialCannotBeRead() throws {
+        let secure = CountingSecureStore()
+        let store = AccountStore(secureStore: secure)
+        let original = account("legacy")
+        try store.add(original, token: "OLD")
+        let session = original.session(token: "NEW")
+
+        secure.setMetadataReadFailure(true)
+        XCTAssertThrowsError(try store.registerAuthenticatedSession(session))
+        secure.setMetadataReadFailure(false)
+        secure.setTokenReadFailure(true)
+        XCTAssertThrowsError(try store.registerAuthenticatedSession(session))
+        secure.setTokenReadFailure(false)
+
+        XCTAssertEqual(store.loadAccounts(), [original])
+        XCTAssertEqual(store.token(for: original.id), "OLD")
+        XCTAssertNil(store.token(for: Account.stableID(for: session)))
+    }
+
+    func testConcurrentAuthenticationReusesOneLegacyConnection() throws {
+        let secure = InMemorySecureStore()
+        let first = AccountStore(secureStore: secure)
+        let second = AccountStore(secureStore: secure)
+        let original = account("legacy")
+        try first.add(original, token: "TOKEN")
+        let session = original.session(token: "TOKEN")
+        let errors = ErrorBox()
+        DispatchQueue.concurrentPerform(iterations: 8) { index in
+            do {
+                _ = try (index.isMultiple(of: 2) ? first : second).registerAuthenticatedSession(session)
+            } catch {
+                errors.append(error)
+            }
+        }
+        XCTAssertTrue(errors.errors.isEmpty)
+        XCTAssertEqual(first.loadAccounts(), [original])
+    }
+
+    func testPlexRecoveryReplacesExactLegacyAccountWithoutChangingSelections() throws {
+        let store = AccountStore(secureStore: InMemorySecureStore())
+        var original = account("legacy")
+        original.server.provider = .plex
+        original.server.alternateConnectionURLs = [URL(string: "https://approved.example")!]
+        let session = original.session(token: "NEW")
+        let duplicate = Account(id: Account.stableID(for: session), from: session)
+        try store.add(original, token: "OLD")
+        try store.add(duplicate, token: "DUPLICATE")
+        store.setActiveAccountIDs([duplicate.id])
+
+        try store.replaceAuthenticatedSession(session, expected: original)
+
+        let recovered = try XCTUnwrap(store.loadAccounts().first { $0.id == original.id })
+        XCTAssertEqual(recovered.addedAt, original.addedAt)
+        XCTAssertEqual(recovered.server.alternateConnectionURLs, original.server.alternateConnectionURLs)
+        XCTAssertNotEqual(recovered.credentialRevision, original.credentialRevision)
+        XCTAssertEqual(store.activeAccountIDs(), [duplicate.id])
+        XCTAssertEqual(store.loadAccounts().count, 2)
+        XCTAssertEqual(store.token(for: original.id), "NEW")
+        XCTAssertEqual(store.token(for: duplicate.id), "DUPLICATE")
+    }
+
+    func testPlexRecoveryRejectsDifferentIdentityRemovedAndReplacedAccounts() throws {
+        let store = AccountStore(secureStore: InMemorySecureStore())
+        var original = account("legacy")
+        original.server.provider = .plex
+        try store.add(original, token: "OLD")
+        let session = original.session(token: "NEW")
+        var wrongUser = session
+        wrongUser.userID = "another-owner"
+        var wrongServer = session
+        wrongServer.server.id = "another-server"
+        var wrongProvider = session
+        wrongProvider.server.provider = .jellyfin
+        for invalid in [wrongUser, wrongServer, wrongProvider] {
+            XCTAssertThrowsError(try store.replaceAuthenticatedSession(invalid, expected: original))
+            XCTAssertEqual(store.token(for: original.id), "OLD")
+        }
+        try store.add(original, token: "CONCURRENT-REPLACEMENT")
+        XCTAssertThrowsError(try store.replaceAuthenticatedSession(session, expected: original))
+        XCTAssertEqual(store.token(for: original.id), "CONCURRENT-REPLACEMENT")
+        try store.remove(id: original.id)
+        XCTAssertThrowsError(try store.replaceAuthenticatedSession(session, expected: original))
+        XCTAssertTrue(store.loadAccounts().isEmpty)
+        XCTAssertNil(store.token(for: original.id))
     }
 
     func testMultipleAccountsPersistInAddedOrder() throws {

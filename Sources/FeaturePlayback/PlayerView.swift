@@ -89,16 +89,14 @@ public struct PlayerView: View {
         }
         .modifier(DisplaySettleObserver { hdrTransition.displayDidSettle() })
         .onChange(of: scenePhase) { _, phase in
-            // The TV Home button / sleep / app suspension never fires the view's
-            // onDisappear, so stop() (and its final convergence write) would never
-            // run on that path — and the engine would keep decoding audio behind the
-            // Home screen until the OS suspends us. Pause on inactive, record the
-            // real background transition, then rebuild the engine when active again.
+            // System overlays make tvOS inactive without backgrounding playback.
+            // Home/sleep still needs an explicit pause and checkpoint because
+            // that transition does not necessarily fire onDisappear.
             switch phase {
             case .active:
                 Task { await viewModel.resumeAfterBackground() }
             case .inactive:
-                viewModel.suspendForBackground()
+                viewModel.didBecomeInactive()
             case .background:
                 viewModel.didEnterBackground()
             @unknown default:
@@ -191,7 +189,6 @@ public struct PlayerView: View {
                     diagnostics: diagnosticsSampler.latest, presentation: .mobile,
                     streamingError: viewModel.streamingQualityError
                 )
-                    .environment(\.themePalette, themePalette)
                     .navigationTitle("Playback Diagnostics")
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
@@ -307,6 +304,7 @@ public struct PlayerView: View {
                     ?? viewModel.streamingQualityError?.userMessage
                     ?? StreamingPlaybackFailure(kind: .unknown).userMessage,
                 report: viewModel.playbackFailureReport,
+                showsForcedTranscodingHint: viewModel.showsForcedTranscodingFailureHint,
                 onRetry: { viewModel.retryPlayback() },
                 onDismiss: { dismissPlayer() }
             )
@@ -519,7 +517,7 @@ public struct PlayerView: View {
 /// Observes the tvOS display manager and reports when an HDMI display-mode switch
 /// finishes, so the HDR veil can fade back in exactly when the panel has settled.
 /// A no-op on platforms without `AVDisplayManager` (e.g. macOS test builds).
-private struct DisplaySettleObserver: ViewModifier {
+struct DisplaySettleObserver: ViewModifier {
     let onSettle: () -> Void
 
     func body(content: Content) -> some View {

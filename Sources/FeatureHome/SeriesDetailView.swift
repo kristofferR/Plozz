@@ -21,6 +21,8 @@ import MetadataKit
 ///      the hero; clicking it plays it (the parent applies resume-vs-start-over).
 struct SeriesDetailView: View {
     let series: MediaItem
+    let preparationIsActive: Bool
+    @State private var playbackPreparation = DetailPlaybackPreparationCoordinator()
     let seasons: [MediaItem]
     /// Episodes attached directly to the series (used when a backend returns a
     /// flat episode list with no season containers).
@@ -48,8 +50,8 @@ struct SeriesDetailView: View {
     /// When the page was opened targeting a specific season, that season's id.
     let initialSeasonID: String?
     /// When the page was opened by tapping a specific episode, that episode. The
-    /// page selects its season and opens focus on the matching active-server card.
-    /// Hero Play remains the true resume/next-up target.
+    /// page selects its season and prepares the matching active-server card, but
+    /// opens on Hero Play just like a whole-show entry.
     let initialEpisode: MediaItem?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -96,18 +98,7 @@ struct SeriesDetailView: View {
     /// once. It is declarative and re-evaluates on every appearance — including a
     /// pop — where it would override the returning user's focus.
     @State private var hasOpenedOnce = false
-    /// Latched once the opening claim on Play has been settled.
-    ///
-    /// `defaultFocus` fires when the page appears, but the hero's Play button only
-    /// EXISTS once `playTarget` resolves — and on a season page that's an async
-    /// load. Open before it lands and the action row's first focusable is whatever
-    /// else is there (the watched button), so tvOS gives entry focus to "Mark as
-    /// Watched" and the already-spent `defaultFocus` never reclaims it. Re-asserting
-    /// Play the moment it appears is what makes the page open on Play reliably.
-    @State private var hasSettledOpeningFocus = false
-    /// Set as soon as the user genuinely drives focus somewhere themselves (into
-    /// the rail or the season bar). It fences the re-assert above so a fast user
-    /// who has already moved on is never yanked back up to Play.
+    /// Preserves explicit episode/season browsing while late data resolves.
     @State private var hasUserDirectedFocus = false
     /// True from the moment a pushed page pops until the rail has reclaimed
     /// focus. `hasChildOnTop` alone is too short a window: it clears the instant
@@ -120,8 +111,7 @@ struct SeriesDetailView: View {
     /// returns from the browser to the real hero controls.
     @State private var suppressesDuplicateHeroFocus = false
 
-    /// Drives initial focus onto Hero Play for whole-show/season opens. Individual
-    /// episode opens assign initial focus through the episode rail instead.
+    /// Every fresh show, season, or episode-context open starts on Hero Play.
     @FocusState private var playFocused: Bool
     /// The user's in-session quality choice for the current play-target episode,
     /// chosen from the hero "…" menu's Version section. Cleared implicitly when it
@@ -185,6 +175,7 @@ struct SeriesDetailView: View {
     init(
         series: MediaItem,
         hasChildOnTop: Bool = false,
+        preparationIsActive: Bool = true,
         seasons: [MediaItem],
         looseEpisodes: [MediaItem],
         viewModel: ItemDetailViewModel,
@@ -203,6 +194,7 @@ struct SeriesDetailView: View {
         versionPreferences: VersionPreferenceStoring = VersionPreferenceStore()
     ) {
         self.series = series
+        self.preparationIsActive = preparationIsActive
         self.hasChildOnTop = hasChildOnTop
         self.seasons = seasons
         self.looseEpisodes = looseEpisodes
@@ -262,6 +254,11 @@ struct SeriesDetailView: View {
         let _ = plozzPrintChanges { Self._printChanges() }
         let _ = PlozzBodyRate.tick("SeriesDetail")
         scrollContent
+            .detailPlaybackPreparation(
+                for: preparationItem,
+                isActive: preparationIsActive && !hasChildOnTop,
+                coordinator: playbackPreparation
+            )
             // Never clip a focused card's lift, shadow or border.
             .scrollClipDisabled()
             // Let the hero bleed into the top overscan inset instead of the
@@ -302,12 +299,8 @@ struct SeriesDetailView: View {
             // the same flags on `heroItem` in place so the visible hero button
             // reflects the new state immediately.
             //
-            // Marking the fronted episode watched then makes the hero *stale*: it
-            // now describes something finished while Play still points at it. The
-            // resting hero is derived from watch state, so re-derive it — the page
-            // moves on to the next episode the way it would on a fresh open. A
-            // The tapped episode is browser context only, so every entry route
-            // advances the resting hero when its Play target becomes watched.
+            // Re-resolve against current episode state. Explicit episode entries
+            // keep their target so the same button can mark it unwatched again.
             .onReceive(NotificationCenter.default.publisher(for: .mediaItemDidMutate)) { note in
                 guard let mutation = MediaItemMutation.from(note) else { return }
                 let seasonWasEdited = mutation.cascadesToSeasonEpisodes
@@ -323,8 +316,7 @@ struct SeriesDetailView: View {
                 guard seasonWasEdited || (heroItem.kind == .episode && heroItem.isPlayed) else {
                     return
                 }
-                // The hero advances to the next unwatched episode, but the rail
-                // must stay exactly where the user left it: marking an episode
+                // The rail must stay exactly where the user left it: marking an episode
                 // watched from its own card should update that card in place, not
                 // scroll the row to a different episode and take focus with it.
                 // Marking from the hero has no rail focus to protect, so there the
@@ -341,7 +333,7 @@ struct SeriesDetailView: View {
                     }
                     await resolveRestingHero(
                         in: selectedSeasonID,
-                        repointsRail: !seasonWasEdited && !browserHoldsFocus
+                        repointsRail: !seasonWasEdited && browserEntry == .hero
                     )
                 }
             }
@@ -349,34 +341,16 @@ struct SeriesDetailView: View {
 
     @ViewBuilder
     private var scrollContent: some View {
-        // Whole-show/season entry lands on Hero Play. Individual episode entry
-        // lands on its rail card through MediaRowView's initial focus.
-        //
         // Only a genuine open claims Play. Reappearing after a child page must
         // preserve the episode browser's own focus restoration.
         scroll
             .defaultFocus(
                 $playFocused,
                 SeriesDetailEntryPolicy.claimsHeroPlay(
-                    hasOpenedOnce: hasOpenedOnce,
-                    hasInitialEpisode: initialEpisode != nil
+                    hasOpenedOnce: hasOpenedOnce
                 )
             )
             .onAppear { hasOpenedOnce = true }
-            // The Play button appears only once the play target resolves; until
-            // then there is nothing for `defaultFocus` to land on. Claim it the
-            // moment it exists — but only during the opening window, and never
-            // once the user has driven focus themselves.
-            .onChange(of: playTarget?.id) { _, resolved in
-                guard resolved != nil,
-                      initialEpisode == nil,
-                      !hasSettledOpeningFocus,
-                      !hasUserDirectedFocus,
-                      !hasChildOnTop
-                else { return }
-                hasSettledOpeningFocus = true
-                playFocused = true
-            }
             .onChange(of: hasChildOnTop) { _, covered in
                 // Returning from a pushed page. tvOS hands focus to the hero
                 // rather than back to the rail (verified on device: the rail
@@ -404,22 +378,6 @@ struct SeriesDetailView: View {
                 reclaimTimeout?.cancel()
                 reclaimTimeout = nil
             }
-
-
-    }
-
-    /// Whether this open lands focus inside the browser rather than on Hero Play
-    /// (i.e. the user tapped a specific episode). Such an open must start receded
-    /// so the targeted rail card is already on screen.
-    ///
-    /// Deliberately NOT `!SeriesDetailEntryPolicy.claimsHeroPlay(…)`: that also
-    /// consults `hasOpenedOnce`, a latch `.onAppear` sets *before* the opening
-    /// `.task` runs. Reading it here therefore always saw `true` and receded
-    /// every open, hero and all. `hasOpenedOnce` exists only to stop
-    /// `defaultFocus` re-claiming Play on a re-appear; the entry arrangement
-    /// depends purely on whether a specific episode was tapped.
-    private var entersBrowserOnOpen: Bool {
-        initialEpisode != nil
     }
 
     /// Whether focus changes arriving now are the system's rather than the
@@ -448,7 +406,15 @@ struct SeriesDetailView: View {
                         scheduleLine: upcomingHeroLine,
                         spoilerSettings: spoilerSettings,
                         playTitle: playTarget.map { viewModel.playButtonTitle(for: $0) },
-                        onPlay: playTarget.map { target in { onPlay(target.selectingVersion(effectivePlayVersionID)) } },
+                        onPlay: playTarget.map { target in {
+                            let item = DetailPlaybackSelection.playItem(
+                                for: target, sources: target.sources, activeAccountID: target.sourceAccountID,
+                                versionID: effectivePlayVersionID,
+                                explicit: versionOverride != nil || target.explicitSourceSelection
+                            )
+                            playbackPreparation.handoff(item)
+                            onPlay(item)
+                        } },
                         showsPlayPlaceholder: DetailPlaybackSelection.showsPlayPlaceholder(
                             for: series,
                             hasPlayTarget: playTarget != nil,
@@ -456,13 +422,25 @@ struct SeriesDetailView: View {
                             seasonLoadState: (selectedSeasonID ?? seasons.first?.id)
                                 .map { viewModel.seasonLoadState(for: $0) }
                         ),
+                        onRetryPlaybackInventory: playTarget.flatMap { target in
+                            viewModel.hasNoPlaybackStreams(for: target) ? {
+                                Task { await viewModel.retryPlaybackInventory(for: target) }
+                            } : nil
+                        },
+                        isRetryingPlaybackInventory: playTarget.map {
+                            viewModel.isRetryingPlaybackInventory(for: $0)
+                        } ?? false,
+                        allowsDeferredActivation: !hasChildOnTop && !browserHoldsFocus && !seasonBarEngaged,
+                        deferredActionOwner: ObjectIdentifier(viewModel),
                         playProgress: playTarget?.resumeProgressFraction,
                         playRemainingText: playTarget?.resumeRemainingText,
                         playSeasonEpisodeText: playTarget.flatMap { HeroForegroundModelBuilder.seasonEpisodeButtonText(for: $0) },
                         onPlayTrailer: trailerButtonAction,
+                        trailerItem: heroItem.id == series.id ? viewModel.trailers.first : nil,
                         versions: playVersions,
                         selectedVersionID: effectivePlayVersionID,
-                        onSelectVersion: playVersions.count > 1 ? { selectVersion($0) } : nil,
+                        onSelectVersion: { selectVersion($0) },
+                        loadVersions: playTarget.flatMap { viewModel.playbackVersionsLoader(for: $0) },
                         sources: distinctServerChoices,
                         offlineSourceAccountIDs: viewModel.unreachableSourceAccountIDs,
                         selectedSourceAccountID: series.sourceAccountID,
@@ -544,6 +522,9 @@ struct SeriesDetailView: View {
                         }
                     )
                     .detailEntranceStage(.episodes)
+                    #if os(tvOS)
+                    .background(SeriesBrowserRevealScrollGuard(isActive: browserRevealInFlight))
+                    #endif
 
                     if showsLowerDetailContent {
                     DetailExtrasView(
@@ -568,10 +549,7 @@ struct SeriesDetailView: View {
                         revealsSeriesCastWithoutBrowser: revealsCastWithoutBrowser,
                         suppressesFocus: hasChildOnTop || holdsHeroFocusDuringEntrance,
                         onCastFocusEntered: {
-                            seasonBarEngaged = false
-                            // Cast/Related sit BELOW the browser, so the page
-                            // must stay receded while they hold focus.
-                            browserHoldsFocus = true
+                            enterLowerDetails()
                         },
                         relatedEntries: viewModel.relatedTitlesLoader?.entries ?? [],
                         relatedHasResolved: viewModel.relatedTitlesLoader?.hasResolved ?? true,
@@ -583,6 +561,13 @@ struct SeriesDetailView: View {
                         },
                         spoilerSettings: spoilerSettings
                     )
+                        #if os(tvOS)
+                        .background {
+                            NativeFocusRegionObserver(isEnabled: !hasChildOnTop && !isReclaimingFocus) {
+                                enterLowerDetails()
+                            }
+                        }
+                        #endif
                         // A real layout gap, not a transform: it has to be
                         // truthful for the focus engine at both ends. Resting it
                         // parks the extras below the fold (a show with no cast
@@ -622,9 +607,6 @@ struct SeriesDetailView: View {
                 // column past the viewport, which is what let tvOS pan the page
                 // sideways and shove focus off the left edge.
                 .frame(maxWidth: .infinity, alignment: .leading)
-                #if os(tvOS)
-                .background(SeriesBrowserRevealScrollGuard(isActive: browserRevealInFlight))
-                #endif
             }
             // The scroll view can focus a synthetic filler even while its real
             // controls are gated. Do not let early Down scroll through that gap.
@@ -680,13 +662,6 @@ struct SeriesDetailView: View {
             // driven by focus entering the browser instead — which is safe here
             // precisely *because* no scroll happens: the two quantities that used
             // to disagree can no longer both change.
-            .onChange(of: entersBrowserOnOpen) { _, entersBrowser in
-                // Opening straight onto an episode focuses a rail card before the
-                // user does anything. Recede immediately so that card is already
-                // on screen and the engine has nothing to reveal.
-                guard entersBrowser else { return }
-                recedeModel.isReceded = true
-            }
             // Freeze the PAGE while focus lives inside the browser.
             //
             // This is the rule that makes the transition deterministic: moving
@@ -706,9 +681,6 @@ struct SeriesDetailView: View {
             .task {
                 try? await Task.sleep(nanoseconds: 50_000_000)
                 proxy.scrollTo(Self.topAnchorID, anchor: .top)
-                if entersBrowserOnOpen {
-                    recedeModel.isReceded = true
-                }
             }
         }
     }
@@ -815,7 +787,7 @@ struct SeriesDetailView: View {
         return ScrollViewReader { proxy in
             if seasons.isEmpty, showsSeasonEntry {
                 LoadingSeasonTab(isFocused: focusedSeasonID == Self.loadingSeasonID)
-                    .focusable(browserHoldsFocus)
+                    .focusable(browserHoldsFocus || recedeModel.isReceded)
                     .focusEffectDisabled()
                     .focused($focusedSeasonID, equals: Self.loadingSeasonID)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -877,7 +849,6 @@ struct SeriesDetailView: View {
         browserEntry = loading ? .loadingSeasons : .browser
         browserHoldsFocus = true
         if !loading { hasUserDirectedFocus = true }
-        hasSettledOpeningFocus = true
         if entering { episodeRailResetToken += 1 }
         if shouldReveal { onFocusEntered() }
     }
@@ -1008,7 +979,7 @@ struct SeriesDetailView: View {
             hasOwnedSeasons: !seasons.isEmpty,
             seasonBarEngaged: seasonBarEngaged,
             hasRequestHandler: onRequestSeasons != nil
-        ) || !browserHoldsFocus)
+        ) || !(browserHoldsFocus || recedeModel.isReceded))
         .onChange(of: requestSeasonsFocused) { _, focused in
             if focused {
                 enterSeasonBrowser(onFocusEntered: onFocusEntered)
@@ -1057,7 +1028,7 @@ struct SeriesDetailView: View {
     }
 
     /// A single season tab. It reads as text-only until focused or active, then
-    /// lifts into a Liquid-glass pill (matching the Twozz player controls). The
+    /// lifts into a Liquid-glass pill (matching the Strozz player controls). The
     /// style is applied unconditionally so selection never changes the tab's
     /// identity — that is what keeps left/right focus moving between tabs.
     private func seasonChip(_ season: MediaItem, activeID: String?) -> some View {
@@ -1065,7 +1036,8 @@ struct SeriesDetailView: View {
         // The chip focus can land on while *entering* the bar: the active season,
         // falling back to the first one before a selection settles, so the bar is
         // never momentarily unfocusable during initial load.
-        let isFocusable = browserHoldsFocus && (seasonBarEngaged || season.id == activeID)
+        let isFocusable = (browserHoldsFocus || recedeModel.isReceded)
+            && (seasonBarEngaged || season.id == activeID)
         return SeasonWatchStateMenu(for: season) {
             select(season)
         } label: {
@@ -1151,13 +1123,14 @@ struct SeriesDetailView: View {
             episodes: episodes,
             spoilerSettings: spoilerSettings,
             targetID: target,
-            initialFocusID: initialEpisode == nil ? nil : (target ?? initialEpisode?.id),
             focusResetToken: episodeRailResetToken,
             isCovered: hasChildOnTop,
             precedingContainerIDs: precedingSeasonIDs,
             episodeEntry: MediaRowEpisodeEntry(
                 phase: episodeEntryPhase,
-                isActive: browserEntry == .hero || seasonBarEngaged,
+                // Returning through a different Related column must not replace
+                // the browsed episode with the geometrically nearest card.
+                isActive: browserEntry == .hero || seasonBarEngaged || !browserHoldsFocus,
                 isEnabled: !holdsHeroFocusDuringEntrance,
                 onPlaceholderFocus: {
                     // Entering a loading slot is not an explicit choice of a
@@ -1187,6 +1160,7 @@ struct SeriesDetailView: View {
                 // so selecting it is deliberately inert — it stays focusable purely
                 // so the rest of the run can be browsed and read.
                 guard !item.isUpcomingUnaired else { return }
+                playbackPreparation.handoff(item)
                 onPlay(item)
             }
         )
@@ -1216,7 +1190,7 @@ struct SeriesDetailView: View {
 
     private var holdsHeroFocusDuringEntrance: Bool {
         #if os(tvOS)
-        initialEpisode == nil && detailEntrance?.blocksNavigation == true
+        detailEntrance?.blocksNavigation == true
             && detailEntrance?.isClosing != true
         #else
         false
@@ -1224,7 +1198,13 @@ struct SeriesDetailView: View {
     }
 
     private var showsLowerDetailContent: Bool {
-        hasPresentedEpisodeBrowser || entersBrowserOnOpen
+        hasPresentedEpisodeBrowser
+    }
+
+    private func enterLowerDetails() {
+        guard !ignoresSystemFocusMoves else { return }
+        seasonBarEngaged = false
+        browserHoldsFocus = false
     }
 
     private func enterEpisodeBrowser(isPlaceholder: Bool, onFocusEntered: () -> Void) {
@@ -1234,7 +1214,6 @@ struct SeriesDetailView: View {
         browserEntry = .browser
         browserHoldsFocus = true
         if !isPlaceholder { hasUserDirectedFocus = true }
-        hasSettledOpeningFocus = true
         if browserPresentationSettled && recedeModel.isReceded {
             hasPresentedEpisodeBrowser = true
         }
@@ -1436,6 +1415,7 @@ struct SeriesDetailView: View {
             guard accountID != series.sourceAccountID,
                   let source = viewModel.sources.first(where: { $0.accountID == accountID })
             else { return }
+            playbackPreparation.invalidate()
             // Capture the fronted episode by NUMBER (the displayed hero, whose S/E
             // is guaranteed) so the new server fronts the same one after reload.
             let fronted = displayHeroItem
@@ -1454,7 +1434,10 @@ struct SeriesDetailView: View {
     /// only appears when an episode genuinely has more than one file — matching the
     /// movie behaviour.
     private var playVersions: [MediaVersion] {
-        playTarget?.versions ?? []
+        guard let target = playTarget else { return [] }
+        return DetailPlaybackSelection.versions(
+            for: target, sources: target.sources, activeAccountID: target.sourceAccountID
+        )
     }
 
     /// Applies to the WHOLE SHOW, not just this episode.
@@ -1463,7 +1446,9 @@ struct SeriesDetailView: View {
     /// series' key: picking the 4K cut on episode 3 is how a viewer says "play
     /// this show in 4K", and every later episode matches the same shape.
     private func selectVersion(_ id: String) {
+        playbackPreparation.invalidate()
         versionOverride = id
+        guard versionPreferences.remembersSeriesVersions else { return }
         guard let target = playTarget,
               let version = playVersions.first(where: { $0.id == id }) else {
             if let target = playTarget {
@@ -1535,6 +1520,18 @@ struct SeriesDetailView: View {
         return target.map { viewModel.episodeWithEnrichedBadges($0) }
     }
 
+    private var preparationItem: MediaItem? {
+        guard let target = playTarget, !target.isUpcomingUnaired,
+              target.sourceAccountID == series.sourceAccountID,
+              target.seriesID == series.id,
+              !viewModel.hasNoPlaybackStreams(for: target) else { return nil }
+        return DetailPlaybackSelection.playItem(
+            for: target, sources: target.sources, activeAccountID: target.sourceAccountID,
+            versionID: effectivePlayVersionID,
+            explicit: versionOverride != nil || target.explicitSourceSelection
+        )
+    }
+
     /// The hero item with its season/episode numbers guaranteed when an episode is
     /// fronted, so the hero ALWAYS shows "S{n} · E{m}" for a TV show. Some list/
     /// search/seed episodes arrive without numbers (they know only their own id);
@@ -1574,7 +1571,7 @@ struct SeriesDetailView: View {
             await frontSwitchTarget(target)
             return
         }
-        if !hasUserDirectedFocus,
+        if !hasUserDirectedFocus, initialEpisode == nil,
            let seed = SeriesEpisodeEntry.openingSeed(
                for: series, initialEpisode: initialEpisode,
                initialSeasonID: initialSeasonID, resumeEpisode: viewModel.serverResumeEpisode
@@ -1713,14 +1710,13 @@ struct SeriesDetailView: View {
         }
 
         if !hasEditedSeasonWatchState,
-                  let resume = initialEpisode ?? (initialSeasonID == nil ? viewModel.serverResumeEpisode : nil),
-                  let loaded = SeriesEpisodeEntry.episode(
-                      matching: resume,
-                      in: pool
-                  ) {
-            // The server named the episode to resume; prefer the loaded copy so
-            // the hero carries full metadata and badges.
-            heroItem = DetailPlaybackSelection.applyingResumeItem(resume, to: loaded)
+           let loaded = SeriesEpisodeEntry.resolvedOpeningEpisode(
+               initialEpisode: initialEpisode,
+               initialSeasonID: initialSeasonID,
+               resumeEpisode: viewModel.serverResumeEpisode,
+               in: pool
+           ) {
+            heroItem = loaded
         } else {
             guard !pool.isEmpty else { return }
             heroItem = SeriesResume.restingHero(
@@ -1756,7 +1752,6 @@ private struct SeriesEpisodeRailContent: View {
     let episodes: [MediaItem]
     let spoilerSettings: SpoilerSettings
     let targetID: String?
-    let initialFocusID: String?
     let focusResetToken: Int
     let isCovered: Bool
     let precedingContainerIDs: [String]
@@ -1771,7 +1766,6 @@ private struct SeriesEpisodeRailContent: View {
             items: episodes,
             presentation: .episodeColumn,
             spoilerSettings: spoilerSettings,
-            initialFocusID: initialFocusID,
             initialScrollID: targetID,
             defaultFocusID: targetID,
             focusResetToken: focusResetToken,
@@ -1865,11 +1859,8 @@ enum SeriesDetailBrowserPolicy {
 }
 
 enum SeriesDetailEntryPolicy {
-    static func claimsHeroPlay(
-        hasOpenedOnce: Bool,
-        hasInitialEpisode: Bool
-    ) -> Bool {
-        !hasOpenedOnce && !hasInitialEpisode
+    static func claimsHeroPlay(hasOpenedOnce: Bool) -> Bool {
+        !hasOpenedOnce
     }
 }
 

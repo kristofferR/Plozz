@@ -8,6 +8,7 @@ public struct PlaybackFailureView<Actions: View>: View {
     private let message: LocalizedStringResource
     private let systemImage: String
     private let report: PlaybackDiagnosticReport?
+    private let recoveryHint: LocalizedStringResource?
     private let actions: Actions
     @State private var showsDetails = false
 
@@ -16,40 +17,25 @@ public struct PlaybackFailureView<Actions: View>: View {
         message: LocalizedStringResource,
         systemImage: String = "exclamationmark.triangle",
         report: PlaybackDiagnosticReport?,
+        recoveryHint: LocalizedStringResource? = nil,
         @ViewBuilder actions: () -> Actions
     ) {
         self.title = title
         self.message = message
         self.systemImage = systemImage
         self.report = report
+        self.recoveryHint = recoveryHint
         self.actions = actions()
     }
 
     public var body: some View {
-        GeometryReader { geometry in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 28) {
-                    PlaybackFailureHeading(title: title, message: message, systemImage: systemImage)
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 16) {
-                            PlaybackFailureDetailsButton(isAvailable: report != nil, showsDetails: $showsDetails)
-                            actions
-                        }
-                        VStack(alignment: .leading, spacing: 16) {
-                            PlaybackFailureDetailsButton(isAvailable: report != nil, showsDetails: $showsDetails)
-                            actions
-                        }
-                    }
-                    .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(Self.cardPadding)
-                .frame(maxWidth: Self.cardWidth, alignment: .leading)
-                .plozzSurface(.raised, cornerRadius: 28)
-                .padding(Self.outerPadding)
-                .frame(maxWidth: .infinity)
-                .frame(minHeight: geometry.size.height)
-            }
-            .scrollBounceBehavior(.basedOnSize)
+        RecoveryScreen {
+            PlaybackFailureHeading(
+                title: title, message: message, systemImage: systemImage, recoveryHint: recoveryHint
+            )
+        } actions: { _ in
+            PlaybackFailureDetailsButton(isAvailable: report != nil, showsDetails: $showsDetails)
+            actions
         }
         .accessibilityIdentifier("playback-failure")
         .plozzSheet(isPresented: $showsDetails) {
@@ -58,22 +44,13 @@ public struct PlaybackFailureView<Actions: View>: View {
         .environment(\.themePalette, .dark)
         .environment(\.colorScheme, .dark)
     }
-
-    #if os(tvOS)
-    private static var cardWidth: CGFloat { 960 }
-    private static var cardPadding: CGFloat { 48 }
-    private static var outerPadding: CGFloat { 60 }
-    #else
-    private static var cardWidth: CGFloat { 560 }
-    private static var cardPadding: CGFloat { 24 }
-    private static var outerPadding: CGFloat { 20 }
-    #endif
 }
 
 private struct PlaybackFailureHeading: View {
     let title: LocalizedStringResource
     let message: LocalizedStringResource
     let systemImage: String
+    let recoveryHint: LocalizedStringResource?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -94,6 +71,13 @@ private struct PlaybackFailureHeading: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("playback-failure-message")
+            if let recoveryHint {
+                Text(recoveryHint)
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("playback-failure-hint")
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

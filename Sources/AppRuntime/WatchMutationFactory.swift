@@ -252,7 +252,9 @@ public enum WatchMutationFactory {
         )
     }
 
-    public static func playbackStop(item: MediaItem, position: TimeInterval, watchedPercent: Double, primaryAccountID: String?, additionalSources: [MediaSourceRef] = [], crossServerSync: Bool = true, capturedAt: Date = Date()) -> WatchMutation? {
+    /// External players cannot send Plozz's realtime scrobbles. Their return
+    /// opts into a durable Trakt pause without changing completed-watch mirrors.
+    public static func playbackStop(item: MediaItem, position: TimeInterval, watchedPercent: Double, primaryAccountID: String?, additionalSources: [MediaSourceRef] = [], crossServerSync: Bool = true, reportTraktProgress: Bool = false, capturedAt: Date = Date()) -> WatchMutation? {
         let targets = targets(for: item, primaryAccountID: primaryAccountID, additionalSources: additionalSources, crossServerSync: crossServerSync)
         guard !targets.isEmpty else { return nil }
         // OFF: origin-only convergence with no expansion seeds (see `playedToggle`).
@@ -288,6 +290,8 @@ public enum WatchMutationFactory {
             episodeNumber: item.episodeNumber,
             resumePosition: position,
             targets: targets,
+            traktProgress: reportTraktProgress && watchedPercent.isFinite && watchedPercent > 0
+                ? traktIntent(for: item, progress: watchedPercent) : nil,
             episodeOrigin: episode.origin,
             expansionPending: episode.pending || identity.pending,
             identities: identity.identities,

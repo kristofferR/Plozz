@@ -23,10 +23,9 @@ import RatingsService
 /// ``makeSeriesContextViewModel(seriesID:seed:sourceAccountID:originAccountID:)``.
 @MainActor
 public struct DetailOpenEnvironment {
-    /// Resolves an account id to its provider, falling back to a sensible primary
-    /// when the id is unknown/nil (never optional — a detail page always needs a
-    /// provider to load through).
-    public let resolveProvider: (_ accountID: String?) -> any MediaProvider
+    /// Resolves an active provider, using the primary only for an untagged item.
+    /// Missing sources must throw rather than substituting another server.
+    public let resolveProvider: (_ accountID: String?) throws -> any MediaProvider
     /// Resolves an account id to its provider, or nil when that account isn't
     /// active (used to fetch alternate-server copies).
     public let resolveOptionalProvider: @Sendable (_ accountID: String) -> (any MediaProvider)?
@@ -42,9 +41,10 @@ public struct DetailOpenEnvironment {
     /// External ratings (IMDb/RT/Metacritic) provider for live enrichment.
     public let ratingsProvider: any ExternalRatingsProviding
     public let detailMetadataResolver: @Sendable (MediaItem) async -> MetadataEnrichment
+    public let onlineTrailerResolver: OnlineTrailerResolving
     /// Refreshes a discovery (Seerr) title's request/availability. `nil` when Seerr
     /// isn't wired.
-    public let discoveryStatusRefresh: (@Sendable (MediaItem) async -> (MediaAvailabilityStatus, Double?)?)?
+    public let discoveryStatusRefresh: (@Sendable (MediaItem) async -> MediaRequestAvailability?)?
     /// Loads a series season's complete canonical episode metadata roster.
     /// `nil` leaves roster-backed season coverage unavailable.
     public let loadSeasonEpisodeRoster:
@@ -58,14 +58,15 @@ public struct DetailOpenEnvironment {
     public let snapshotCache: DetailSnapshotCache
 
     public init(
-        resolveProvider: @escaping (_ accountID: String?) -> any MediaProvider,
+        resolveProvider: @escaping (_ accountID: String?) throws -> any MediaProvider,
         resolveOptionalProvider: @escaping @Sendable (_ accountID: String) -> (any MediaProvider)?,
         identitySources: @escaping @Sendable (MediaItem) -> [MediaSourceRef],
         crossServerSourceResolver: (@Sendable (MediaItem) async -> CrossServerSourceResolution)?,
         continueWatchingSnapshot: @escaping @MainActor () -> [MediaItem] = { [] },
         ratingsProvider: any ExternalRatingsProviding = DisabledRatingsProvider(),
         detailMetadataResolver: @escaping @Sendable (MediaItem) async -> MetadataEnrichment = { _ in MetadataEnrichment() },
-        discoveryStatusRefresh: (@Sendable (MediaItem) async -> (MediaAvailabilityStatus, Double?)?)? = nil,
+        onlineTrailerResolver: @escaping OnlineTrailerResolving = ItemDetailViewModel.defaultOnlineTrailerResolver,
+        discoveryStatusRefresh: (@Sendable (MediaItem) async -> MediaRequestAvailability?)? = nil,
         loadSeasonEpisodeRoster:
             (@Sendable (MediaItem, Int) async -> SeasonEpisodeRosterResult)? = nil,
         makeRelatedTitlesLoader:
@@ -79,6 +80,7 @@ public struct DetailOpenEnvironment {
         self.crossServerSourceResolver = crossServerSourceResolver
         self.ratingsProvider = ratingsProvider
         self.detailMetadataResolver = detailMetadataResolver
+        self.onlineTrailerResolver = onlineTrailerResolver
         self.discoveryStatusRefresh = discoveryStatusRefresh
         self.loadSeasonEpisodeRoster = loadSeasonEpisodeRoster
         self.makeRelatedTitlesLoader = makeRelatedTitlesLoader
@@ -194,13 +196,14 @@ public struct DetailOpenEnvironment {
         isDiscovery: Bool,
         libraryOrigin: String?,
         identitySources: (MediaItem) -> [MediaSourceRef],
-        sourceLocality: (String) -> SourceLocality?
+        sourceLocality: (String) -> SourceLocality?,
+        sourceIsAvailable: (String) -> Bool = { _ in true }
     ) -> (sources: [MediaSourceRef], selected: MediaSourceRef?) {
         let sources = initialSources(
             for: item,
             isDiscovery: isDiscovery,
             identitySources: identitySources
-        ).map { source in
+        ).filter { sourceIsAvailable($0.accountID) }.map { source in
             guard let locality = sourceLocality(source.accountID) else { return source }
             var liveSource = source
             liveSource.locality = locality
@@ -252,24 +255,41 @@ public struct DetailOpenEnvironment {
         TitleClassifier.isDiscoveryRouting(item, identitySources: identitySources(item))
     }
 
-    public func makeViewModel(for item: MediaItem, libraryOrigin: String?) -> ItemDetailViewModel {
-        let isDiscovery = isDiscovery(item)
+    public func makeViewModel(for item: MediaItem, libraryOrigin: String?) throws -> ItemDetailViewModel {
+        if let opening = Self.openingSource(for: item) {
+            _ = try resolveProvider(opening.accountID)
+        }
+        let identitySources = self.identitySources
+        let resolveOptionalProvider = self.resolveOptionalProvider
+        let liveIdentitySources: @Sendable (MediaItem) -> [MediaSourceRef] = { item in
+            identitySources(item).filter { resolveOptionalProvider($0.accountID) != nil }
+        }
+        let indexedSources = liveIdentitySources(item)
+        var routingItem = item
+        routingItem.sources.removeAll { resolveOptionalProvider($0.accountID) == nil }
+        let isDiscovery = Self.isDiscovery(routingItem, identitySources: { _ in indexedSources })
         let selection = Self.initialSourceSelection(
-            for: item,
+            for: routingItem,
             isDiscovery: isDiscovery,
             libraryOrigin: libraryOrigin,
-            identitySources: identitySources,
+            identitySources: { _ in indexedSources },
             sourceLocality: {
                 resolveOptionalProvider($0)?.connectionLocality
+            },
+            sourceIsAvailable: {
+                resolveOptionalProvider($0) != nil
             }
         )
         let sources = selection.sources
         let selectedSource = selection.selected
         Self.logDetailOpen(item: item, isDiscovery: isDiscovery, resolvedSources: sources)
-        let selectedItem = Self.initialItem(for: item, selectedSource: selectedSource)
+        var selectedItem = Self.initialItem(for: routingItem, selectedSource: selectedSource)
+        selectedItem.sources = sources
         let resume = DetailPlaybackSelection.resumeItem(for: selectedItem, in: continueWatchingSnapshot())
         return ItemDetailViewModel(
-            provider: resolveProvider(selectedSource?.accountID ?? item.sourceAccountID),
+            provider: isDiscovery ? nil : try resolveProvider(
+                selectedSource?.accountID ?? item.sourceAccountID ?? libraryOrigin
+            ),
             itemID: selectedSource?.itemID ?? item.id,
             initialItem: DetailPlaybackSelection.applyingResumeItem(resume, to: selectedItem),
             initialResumeEpisode: selectedItem.kind == .series ? resume : nil,
@@ -278,12 +298,13 @@ public struct DetailOpenEnvironment {
             loadSeasonEpisodeRoster: loadSeasonEpisodeRoster,
             ratingsProvider: ratingsProvider,
             detailMetadataResolver: detailMetadataResolver,
-            sourceAccountID: selectedSource?.accountID ?? item.sourceAccountID,
+            sourceAccountID: isDiscovery ? nil : selectedSource?.accountID ?? item.sourceAccountID ?? libraryOrigin,
             originSourceAccountID: libraryOrigin,
+            onlineTrailerResolver: onlineTrailerResolver,
             initialSources: sources,
             alternateProviderResolver: resolveOptionalProvider,
             crossServerSourceResolver: crossServerSourceResolver,
-            identitySources: identitySources,
+            identitySources: liveIdentitySources,
             relatedTitlesLoader: makeRelatedTitlesLoader?(
                 Self.relatedTitlesDisplayMode(isDiscoveryItem: isDiscovery)
             ),
@@ -334,7 +355,7 @@ public struct DetailOpenEnvironment {
         seed: MediaItem,
         sourceAccountID: String?,
         originAccountID: String?
-    ) -> ItemDetailViewModel {
+    ) throws -> ItemDetailViewModel {
         let series = MediaItem(
             id: seriesID,
             title: seed.parentTitle ?? seed.title,
@@ -342,7 +363,7 @@ public struct DetailOpenEnvironment {
             sourceAccountID: sourceAccountID ?? originAccountID
         )
         return ItemDetailViewModel(
-            provider: resolveProvider(sourceAccountID),
+            provider: try resolveProvider(sourceAccountID ?? originAccountID),
             itemID: seriesID,
             initialItem: seed,
             initialResumeEpisode: DetailPlaybackSelection.resumeItem(
@@ -351,8 +372,9 @@ public struct DetailOpenEnvironment {
             loadSeasonEpisodeRoster: loadSeasonEpisodeRoster,
             ratingsProvider: ratingsProvider,
             detailMetadataResolver: detailMetadataResolver,
-            sourceAccountID: sourceAccountID,
+            sourceAccountID: sourceAccountID ?? originAccountID,
             originSourceAccountID: originAccountID,
+            onlineTrailerResolver: onlineTrailerResolver,
             alternateProviderResolver: resolveOptionalProvider,
             crossServerSourceResolver: crossServerSourceResolver,
             identitySources: identitySources,

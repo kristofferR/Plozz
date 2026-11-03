@@ -95,8 +95,11 @@ struct SettingsContext {
 /// this to drill from a server summary row into `ServerDetailView`, and a
 /// future per-account flow can do the same without re-plumbing closures.
 public enum SettingsRoute: Hashable {
+    case search
+    case searchResult(String)
     case language
     case screensNavigation
+    case allScreens
     case about
     case artwork
     case navigationLayout
@@ -118,10 +121,12 @@ public enum SettingsRoute: Hashable {
     case parentalPINSetup
     /// The household's Parental PIN settings (Everyone › Parental PIN).
     case parentalPIN
+    case topShelf
     case servers
     case myLibraries
     case appearance
     case customizeHome
+    case customizeLibraries
     case detailPage
     case nightShift
     case playback
@@ -150,15 +155,32 @@ enum SettingsRouteAccess: Equatable {
 }
 
 extension SettingsRoute {
-    var usesFullScreenDetail: Bool {
-        if case .subtitleStyle = self { return true }
+    var isSearchResult: Bool {
+        if case .searchResult = self { return true }
         return false
+    }
+
+    var usesFullScreenDetail: Bool {
+        switch self {
+        case .searchResult(let id):
+            return SettingsSearchCatalog.entry(id: id).map {
+                $0.page == .subtitleStyle || $0.page == .liveSubtitleStyle || $0.page == .profileAppearance
+            } == true
+        case .subtitleStyle, .profileAppearance, .profileLockSetup, .parentalPINSetup:
+            return true
+        default:
+            return false
+        }
     }
 
     func access(activeProfileID: String, isKids: Bool, isParentalSealed: Bool) -> SettingsRouteAccess {
         guard isKids else { return .allowed }
         switch self {
-        case .profile, .servers, .server, .parentalPIN,
+        case .searchResult(let id):
+            guard let entry = SettingsSearchCatalog.entry(id: id) else { return .allowed }
+            if entry.requiresAdultProfile { return .adultProfile }
+            return entry.page.requiresParentalAuthorization && isParentalSealed ? .parentalPIN : .allowed
+        case .profile, .servers, .server, .parentalPIN, .topShelf,
              .metadata, .metadataDiagnostics, .seerr, .seerUserPicker,
              .syncSetup, .syncTroubleshooting:
             return .adultProfile
@@ -177,15 +199,28 @@ extension SettingsRoute {
 
 /// Settings navigation state that survives a top-bar/sidebar/rail shell swap.
 ///
-/// MainTabView owns this model's identity but never reads `path`. SettingsView is
-/// the only observer, so a push/pop invalidates the Settings stack alone instead
-/// of re-running the app's large root tab body. This mirrors NavigationChromeModel:
-/// shared identity, narrow observation.
+/// MainTabView owns this model's identity but never reads its path. The Settings
+/// workspace observes depth without invalidating the app's large root tab body.
 @MainActor
 @Observable
 public final class SettingsNavigationModel {
     #if os(tvOS)
     let pages = SettingsPageNavigation<SettingsRoute>()
+    var searchQuery = ""
+    private(set) var isSearching = false
+
+    func beginSearch() {
+        select(.search)
+        isSearching = true
+    }
+
+    func endSearch() {
+        searchQuery = ""
+        isSearching = false
+        select(.search)
+        returnToSidebar()
+    }
+
     var path: [SettingsRoute] {
         get { pages.routes }
         set { pages.routes = newValue }
@@ -272,6 +307,10 @@ public final class SettingsNavigationModel {
 
     func resetForProfile() {
         resetPages()
+        #if os(tvOS)
+        searchQuery = ""
+        isSearching = false
+        #endif
         section = .playback
         appearanceRowID = nil
         returnToSidebar()
@@ -303,12 +342,13 @@ private struct SettingsWorkspaceEntryFocus: ViewModifier {
     let route: SettingsRoute?
     @Environment(SettingsNavigationModel.self) private var navigation: SettingsNavigationModel?
     @FocusState private var focused: Bool
+    @Environment(SettingsSearchRequest.self) private var searchRequest: SettingsSearchRequest?
 
     func body(content: Content) -> some View {
         content
             .focused($focused)
             .task(id: navigation?.detailFocusRequest) {
-                guard isEntry, let navigation, navigation.enteringDetail,
+                guard searchRequest == nil, isEntry, let navigation, navigation.enteringDetail,
                       navigation.path.last == route else { return }
                 focused = false
                 await Task.yield()

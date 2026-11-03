@@ -66,6 +66,27 @@ final class IPTVRemovalInteractionTests: XCTestCase {
         )
     }
 
+    func testSourceSwitchUsesAnActionLabelInBothStates() {
+        app.launchArguments = [
+            "--source-retry-fixture", "--allow-source-changes",
+            "-AppleLanguages", "(en)", "-AppleLocale", "en_US"
+        ]
+        app.launch()
+        let details = app.buttons["live-tv-source-details-source"]
+        XCTAssertTrue(details.waitForExistence(timeout: 10), app.debugDescription)
+        details.tap()
+        let sourceSwitch = app.switches["live-tv-source-enabled-source"]
+        XCTAssertTrue(sourceSwitch.waitForExistence(timeout: 5))
+        XCTAssertEqual(sourceSwitch.label, "Use this source")
+        XCTAssertEqual(sourceSwitch.value as? String, "1")
+        sourceSwitch.tap()
+        XCTAssertEqual(sourceSwitch.value as? String, "0")
+        XCTAssertEqual(sourceSwitch.label, "Use this source")
+        sourceSwitch.tap()
+        XCTAssertEqual(sourceSwitch.value as? String, "1")
+        XCTAssertEqual(sourceSwitch.label, "Use this source")
+    }
+
     func testRemovingPlaylistHeadersKeepsTheOtherRowsAndAllowsAddingAgain() {
         verifyRemoval(
             arguments: ["--playlist-headers"], field: "Header name", remove: "Remove header", add: "Add header",
@@ -112,7 +133,7 @@ final class IPTVRemovalInteractionTests: XCTestCase {
         buttons.firstMatch.tap()
         waitForCount(fields, 0)
         XCTAssertEqual(app.state, .runningForeground)
-        XCTAssertTrue(app.textFields["Guide URL (optional)"].exists)
+        XCTAssertTrue(app.textFields["EPG URL (optional)"].exists)
     }
 
     private func waitForCount(_ query: XCUIElementQuery, _ count: Int) {

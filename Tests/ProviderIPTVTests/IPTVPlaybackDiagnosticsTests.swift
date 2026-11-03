@@ -110,6 +110,55 @@ final class IPTVPlaybackDiagnosticsTests: XCTestCase {
         }
     }
 
+    func testExpiredRateLimitCanRecoverOnTheSameProxyWithoutRetainingItsFailure() async throws {
+        IPTVFixture.state.handler = { _ in
+            if IPTVFixture.state.requests.count == 1 {
+                return (429, ["Retry-After": "0"], Data())
+            }
+            return (200, ["Content-Type": "video/mp2t"], Data(repeating: 0x47, count: 188))
+        }
+        let proxy = try IPTVPlaybackProxy(
+            origin: XCTUnwrap(URL(string: "https://provider.test/channel.ts")),
+            headers: [:], configuration: IPTVFixture.configuration()
+        )
+        addTeardownBlock { await proxy.stop() }
+        let url = try await proxy.start()
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let (_, refused) = try await session.data(from: url)
+        XCTAssertEqual((refused as? HTTPURLResponse)?.statusCode, 429)
+        XCTAssertEqual(PlaybackDeliveryFailure.state(for: url)?.error, .rateLimited(retryAfter: 0))
+        let (body, recovered) = try await session.data(from: url)
+        XCTAssertEqual((recovered as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(body.count, 188)
+        XCTAssertEqual(IPTVFixture.state.requests.count, 2)
+        XCTAssertNil(PlaybackDeliveryFailure.state(for: url)?.error)
+        XCTAssertNil(PlaybackDeliveryFailure.state(for: url)?.diagnostic)
+    }
+
+    func testConnectionLimitUsesOriginalResponseWithoutOpeningADiagnosticStream() async throws {
+        IPTVFixture.state.handler = { _ in
+            (503, ["Content-Type": "application/json"], Data("""
+            {"error":"All active M3U profiles have reached maximum connection limits","private":"fixture-secret"}
+            """.utf8))
+        }
+        let proxy = try IPTVPlaybackProxy(
+            origin: XCTUnwrap(URL(string: "https://provider.test/channel.ts")),
+            headers: [:], configuration: IPTVFixture.configuration()
+        )
+        addTeardownBlock { await proxy.stop() }
+        let url = try await proxy.start()
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let (body, response) = try await session.data(from: url)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 503)
+        XCTAssertTrue(body.isEmpty)
+        XCTAssertEqual(PlaybackDeliveryFailure.state(for: url)?.error, .conflict)
+        XCTAssertEqual(IPTVFixture.state.requests.count, 1)
+        let evidence = try XCTUnwrap(PlaybackDeliveryFailure.state(for: url)?.evidence)
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(evidence), as: UTF8.self).contains("fixture-secret"))
+    }
+
     func testProxyNetworkFailurePreservesCodeWithoutInventingHTTPResponse() async throws {
         IPTVFixture.state.handler = { _ in throw URLError(.timedOut) }
         let diagnostics = PlaybackFailureDiagnostics()
@@ -131,6 +180,152 @@ final class IPTVPlaybackDiagnosticsTests: XCTestCase {
         XCTAssertNil(failure.httpStatus)
         XCTAssertEqual(failure.evidence?.delivery?.firstFailure?.networkCode, -1001)
         XCTAssertNil(failure.evidence?.delivery?.firstFailure?.status)
+    }
+
+    func testSuccessfulNonVideoRootResponsesRetainTheirCauseWithoutAnotherRequest() async throws {
+        for (text, format) in [
+            ("<!DOCTYPE html><html>fixture-secret</html>", "html"),
+            (" \u{FEFF}<HtMl><body>fixture-secret</body></HtMl>", "html"),
+            (#"{"error":"fixture-secret"}"#, "json"),
+            ("<?xml version=\"1.0\"?><error>fixture-secret</error>", "xml"),
+            ("", "empty")
+        ] {
+            IPTVFixture.state.reset()
+            IPTVFixture.state.handler = { _ in
+                (200, ["Content-Type": "video/mp2t"], Data(text.utf8))
+            }
+            let diagnostics = PlaybackFailureDiagnostics()
+            let buffer = ProxyDiagnosticBuffer()
+            diagnostics.start { buffer.append($0) }
+            let proxy = try IPTVPlaybackProxy(
+                origin: XCTUnwrap(URL(string: "https://provider.test/private/channel.ts")),
+                headers: [:], configuration: IPTVFixture.configuration(), diagnostics: diagnostics
+            )
+            addTeardownBlock { await proxy.stop() }
+            let url = try await proxy.start()
+            let state = try XCTUnwrap(PlaybackDeliveryFailure.state(for: url))
+            let session = URLSession(configuration: .ephemeral)
+            defer { session.invalidateAndCancel() }
+            for _ in 0..<2 {
+                let (body, response) = try await session.data(from: url)
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 502, format)
+                XCTAssertTrue(body.isEmpty, format)
+            }
+            XCTAssertEqual(IPTVFixture.state.requests.count, 1, format)
+            XCTAssertEqual(state.error, .invalidResponse, format)
+            XCTAssertEqual(state.diagnostic?.httpStatus, 200, "Keep the actual upstream status.")
+            XCTAssertEqual(state.diagnostic?.format.rawValue, format)
+            XCTAssertEqual(state.evidence.firstFailure?.format.rawValue, format)
+            XCTAssertEqual(state.evidence.firstFailure?.outcome, .upstreamFailure)
+            XCTAssertLessThanOrEqual(state.evidence.firstFailure?.receivedBytes ?? Int.max, 16)
+            XCTAssertEqual(buffer.values.count, 1)
+            let encoded = String(decoding: try JSONEncoder().encode(state.evidence), as: UTF8.self)
+            XCTAssertFalse(encoded.contains("fixture-secret"))
+            XCTAssertFalse(encoded.contains("private"))
+            await proxy.stop()
+        }
+    }
+
+    func testBodyRecognitionLeavesUnknownAndMediaPrefixesAlone() {
+        for text in ["#EXTM3U\n", "<htmlish>", "<?xmlish>", "{broken}", "[not-json]", "fixture"] {
+            XCTAssertNil(IPTVPlaybackProxy.nonVideoBodyFormat(Data(text.utf8)), text)
+        }
+        for bytes in [
+            Data([0, 0, 0, 24]) + Data("ftypisom".utf8),
+            Data([0x1a, 0x45, 0xdf, 0xa3, 0x01, 0xff]),
+            Data([0x47, 0x40, 0x00, 0x10]) + Data(repeating: 0xff, count: 12)
+        ] {
+            XCTAssertNil(IPTVPlaybackProxy.nonVideoBodyFormat(bytes))
+        }
+        XCTAssertEqual(IPTVPlaybackProxy.nonVideoBodyFormat(Data("[]".utf8)), .json)
+        XCTAssertEqual(IPTVPlaybackProxy.nonVideoBodyFormat(Data("<MediaContainer>".utf8)), .xml)
+    }
+
+    func testNonVideoResponseAfterThrottleRetainsTheNewCauseAndOldRequestHistory() async throws {
+        IPTVFixture.state.handler = { _ in
+            IPTVFixture.state.requests.count == 1
+                ? (429, ["Retry-After": "0"], Data())
+                : (200, [:], Data(#"{"error":"private"}"#.utf8))
+        }
+        let proxy = try IPTVPlaybackProxy(
+            origin: XCTUnwrap(URL(string: "https://provider.test/live.ts")),
+            headers: [:], configuration: IPTVFixture.configuration()
+        )
+        addTeardownBlock { await proxy.stop() }
+        let url = try await proxy.start()
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        for _ in 0..<3 { _ = try await session.data(from: url) }
+        let state = try XCTUnwrap(PlaybackDeliveryFailure.state(for: url))
+        XCTAssertEqual(state.error, .invalidResponse)
+        XCTAssertEqual(state.diagnostic?.httpStatus, 200)
+        XCTAssertEqual(state.diagnostic?.format, .json)
+        XCTAssertEqual(state.evidence.firstFailure?.status, 429)
+        XCTAssertEqual(state.evidence.recent.last?.format, .json)
+        XCTAssertEqual(IPTVFixture.state.requests.count, 2)
+    }
+
+    func testEncryptedChildrenRangesHeadsAndOnDemandBodiesStayOpaque() async throws {
+        let opaque = Data("<!DOCTYPE html>!".utf8)
+        let manifest = """
+        #EXTM3U
+        #EXT-X-KEY:METHOD=AES-128,URI="key"
+        #EXTINF:6,
+        segment.ts
+        """
+        IPTVFixture.state.handler = { request in
+            if request.httpMethod == "HEAD" { return (200, ["Content-Length": "16"], Data()) }
+            if request.value(forHTTPHeaderField: "Range") != nil || request.url?.path == "/partial" {
+                return (206, ["Content-Range": "bytes 64-79/128"], opaque)
+            }
+            if request.url?.path == "/live.m3u8" {
+                return (200, ["Content-Type": "text/html"], Data(manifest.utf8))
+            }
+            return (200, ["Content-Type": "application/octet-stream"], opaque)
+        }
+        let proxy = try IPTVPlaybackProxy(
+            origin: XCTUnwrap(URL(string: "https://provider.test/live.m3u8")),
+            headers: [:], configuration: IPTVFixture.configuration()
+        )
+        addTeardownBlock { await proxy.stop() }
+        let url = try await proxy.start()
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let (body, response) = try await session.data(from: url)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let text = String(decoding: body, as: UTF8.self)
+        let key = try XCTUnwrap(text.components(separatedBy: "\"").first(where: { $0.hasPrefix("http://") }))
+        let segment = try XCTUnwrap(text.split(separator: "\n").first(where: { $0.hasPrefix("http://") }))
+        for child in [key, String(segment)] {
+            let (received, response) = try await session.data(from: XCTUnwrap(URL(string: child)))
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+            XCTAssertEqual(received, opaque)
+        }
+        var range = URLRequest(url: url)
+        range.setValue("bytes=64-79", forHTTPHeaderField: "Range")
+        let (ranged, rangeResponse) = try await session.data(for: range)
+        XCTAssertEqual((rangeResponse as? HTTPURLResponse)?.statusCode, 206)
+        XCTAssertEqual(ranged, opaque)
+        var head = URLRequest(url: url)
+        head.httpMethod = "HEAD"
+        let (_, headResponse) = try await session.data(for: head)
+        XCTAssertEqual((headResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertNil(PlaybackDeliveryFailure.state(for: url)?.error)
+
+        for (path, content, status) in [
+            ("movie", PlaybackFailureDiagnostic.Content.onDemand, 200), ("partial", .live, 206)
+        ] {
+            let relay = try IPTVPlaybackProxy(
+                origin: XCTUnwrap(URL(string: "https://provider.test/" + path)),
+                headers: [:], configuration: IPTVFixture.configuration(), content: content
+            )
+            addTeardownBlock { await relay.stop() }
+            let address = try await relay.start()
+            let (received, response) = try await session.data(from: address)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, status)
+            XCTAssertEqual(received, opaque)
+            XCTAssertNil(PlaybackDeliveryFailure.state(for: address)?.error)
+        }
     }
 
     func testSuccessfulManifestAndFailedChildBothReachTheRetainedPlaybackEvidence() async throws {

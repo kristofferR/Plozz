@@ -29,6 +29,11 @@ public struct HTTPRequestNotSentError: Error, Sendable {
     }
 }
 
+/// Opt-in discovery signal: a rejected TLS identity must not trigger HTTP fallback.
+public struct HTTPServerTrustFailure: Error, Sendable {
+    public init() {}
+}
+
 final class HTTPRequestDeliveryEvidence: @unchecked Sendable {
     private let lock = NSLock()
     private var hasTransactions = false
@@ -97,6 +102,15 @@ public extension HTTPClient {
         baseURL: URL,
         decoder: JSONDecoder = .plozz
     ) async throws -> T {
+        try await decodeResponse(type, from: endpoint, baseURL: baseURL, decoder: decoder).value
+    }
+
+    func decodeResponse<T: Decodable>(
+        _ type: T.Type,
+        from endpoint: Endpoint,
+        baseURL: URL,
+        decoder: JSONDecoder = .plozz
+    ) async throws -> (value: T, response: HTTPURLResponse) {
         let (data, response) = try await send(endpoint, baseURL: baseURL)
         let diagnostic = PerformanceDiagnostics.shared.begin(
             .serverDecode, provider: PerformanceDiagnostics.provider, metrics: .init(bytes: data.count)
@@ -104,9 +118,10 @@ public extension HTTPClient {
         do {
             let value = try decoder.decode(T.self, from: data)
             diagnostic?.finish(.succeeded)
-            return value
+            return (value, response)
         } catch {
             diagnostic?.finish(.failed)
+            HTTPResponseDiagnostics.recordDecodeFailure(error, data: data, response: response)
             let contentType = response.value(forHTTPHeaderField: "Content-Type") ?? "<none>"
             PlozzLog.networking.error(
                 "Decode failed method=\(endpoint.method.rawValue) path=\(endpoint.path) "
@@ -169,6 +184,7 @@ public struct URLSessionHTTPClient: HTTPClient {
 
     public func send(_ endpoint: Endpoint, baseURL: URL) async throws -> (Data, HTTPURLResponse) {
         let (data, http) = try await sendRaw(endpoint, baseURL: baseURL)
+        HTTPResponseDiagnostics.recordHTTPFailure(status: http.statusCode)
         switch http.statusCode {
         case 200...299:
             return (data, http)
@@ -193,6 +209,23 @@ public struct URLSessionHTTPClient: HTTPClient {
     /// throw), so callers that need the error body/status can inspect them.
     public func sendRaw(_ endpoint: Endpoint, baseURL: URL) async throws -> (Data, HTTPURLResponse) {
         var request = try Self.makeRequest(endpoint, baseURL: baseURL)
+        let started = HTTPResponseDiagnostics.isCapturing ? ProcessInfo.processInfo.systemUptime : nil
+        var capturedStatus: Int?
+        var capturedNetworkCode: Int?
+        var capturedBytes = 0
+        var capturedFormat = PlaybackFailureDiagnostic.Format.unknown
+        defer {
+            if let started {
+                HTTPResponseDiagnostics.recordRequest(ResponseRequestDiagnostic(
+                    route: HTTPResponseDiagnostics.effectiveRoute, method: endpoint.method.rawValue,
+                    elapsedMilliseconds: Int((ProcessInfo.processInfo.systemUptime - started) * 1_000),
+                    httpStatus: capturedStatus, urlErrorCode: capturedNetworkCode,
+                    bytes: capturedBytes, format: capturedFormat,
+                    requestTimeoutMilliseconds: Int(session.configuration.timeoutIntervalForRequest * 1_000),
+                    resourceTimeoutMilliseconds: Int(session.configuration.timeoutIntervalForResource * 1_000)
+                ))
+            }
+        }
         if endpoint.reportsUndeliveredRequests { request.cachePolicy = .reloadIgnoringLocalCacheData }
         let delivery = endpoint.reportsUndeliveredRequests ? HTTPRequestDeliveryEvidence() : nil
 
@@ -218,12 +251,24 @@ public struct URLSessionHTTPClient: HTTPClient {
                 (data, response) = try await session.data(for: request, delegate: delegate)
             }
         } catch let urlError as URLError {
+            capturedNetworkCode = urlError.errorCode
+            HTTPResponseDiagnostics.recordTransportFailure(urlError)
             diagnostic?.finish(
                 urlError.code == .cancelled ? .cancelled : .failed,
                 networkCode: urlError.errorCode
             )
             if delivery?.confirmedNotSent == true {
                 throw HTTPRequestNotSentError(underlying: Self.map(urlError))
+            }
+            if endpoint.reportsServerTrustFailures {
+                switch urlError.code {
+                case .serverCertificateHasBadDate, .serverCertificateUntrusted,
+                     .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid,
+                     .clientCertificateRejected, .clientCertificateRequired:
+                    throw HTTPServerTrustFailure()
+                default:
+                    break
+                }
             }
             throw Self.map(urlError)
         } catch is CancellationError {
@@ -238,6 +283,9 @@ public struct URLSessionHTTPClient: HTTPClient {
             diagnostic?.finish(.failed)
             throw AppError.invalidResponse
         }
+        capturedStatus = http.statusCode
+        capturedBytes = data.count
+        capturedFormat = data.isEmpty ? .empty : .init(mimeType: http.mimeType)
         diagnostic?.finish(
             (200...299).contains(http.statusCode) ? .succeeded : .failed,
             metrics: .init(bytes: data.count), httpStatus: http.statusCode

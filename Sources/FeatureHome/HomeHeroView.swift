@@ -25,17 +25,8 @@ import MetadataKit
 /// change here (`index` + `lastPageForward`); the backdrop reacts to the fronted
 /// slide's id/URLs and entering direction on its own.
 struct HomeHeroView: View {
-    /// Reports the hero action-button row's measured width up the view tree so the
-    /// overview/description can cap itself to the same width. Takes the max of any
-    /// reported values in a pass (there is only one pills row, so this is just a
-    /// straightforward carry-up).
-    private struct HeroButtonsWidthKey: PreferenceKey {
-        static var defaultValue: CGFloat { 0 }
-        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-            value = max(value, nextValue())
-        }
-    }
-
+    @Environment(\.plozzAppTextScale) private var appTextScale
+    private var textScale: CGFloat { PlozzTypography.scale(local: settings.textSize.scale, app: appTextScale) }
     let items: [MediaItem]
     let settings: HeroSettings
     let backgroundSettings: HeroBackgroundSettings
@@ -94,6 +85,8 @@ struct HomeHeroView: View {
     /// animation state out of `HomeView`'s observation surface, so moving between
     /// the hero and Continue Watching no longer invalidates every Home row.
     let recedeModel: HomeHeroRecedeModel
+    var showcaseSuspended = false
+    private var pausedForRows: Bool { receded || showcaseSuspended }
     /// Whether the hero is *receded*: the user has moved focus down onto the
     /// Continue Watching row. When true the content column (logo / metadata /
     /// action buttons / paging dots) lifts up via a transform and the full-bleed,
@@ -125,6 +118,7 @@ struct HomeHeroView: View {
     /// only when the item's provider supports it and its mutation fans out
     /// exactly like everywhere else.
     @Environment(\.mediaItemActionHandler) private var actionHandler
+    @Environment(\.plozzShowsContentRatings) private var showsContentRatings
     /// How far the navigation chrome has inset this page's content, so the hero's
     /// full-bleed artwork can cancel it. `0` under the native tab styles.
     @Environment(\.plozzNavigationContentInset) private var navigationContentInset
@@ -239,19 +233,12 @@ struct HomeHeroView: View {
     /// faded back in once the backdrop wipe has landed — so the old show's text
     /// never lingers over the new artwork.
     @State private var metadataVisible = true
-    /// Measured width of the action-button row (the visible pills), used to cap the
-    /// overview/description to the same width so the text block never runs wider
-    /// than the buttons beneath it. `0` until first measured (overview falls back to
-    /// its default cap). Varies per slide as the button set changes.
-    @State private var actionButtonsWidth: CGFloat = 0
-
     /// The nominal box handed to `HeroLogoArtwork`.
     ///
     /// A fixed shared box rather than the measured button-row width: the pill set
-    /// changes from slide to slide, so sizing the wordmark against it made the
-    /// same logo a different size on different slides, and made it a different
-    /// size again on the detail page. See ``HeroLogoLayout``.
-    private var heroLogoBox: CGSize { HeroLogoLayout.box }
+    /// changes from slide to slide; the logo uses its own stable baseline and
+    /// the profile's Home size preference instead.
+    private var heroLogoBox: CGSize { HeroLogoLayout.box(size: settings.logoSize) }
     /// Bumped on every page so a late metadata fade-in from a *previous* page
     /// can't fire after a newer page has already started.
     @State private var slideToken = 0
@@ -390,7 +377,9 @@ struct HomeHeroView: View {
             availability: requestOverrides[item.id] ?? item.availability,
             downloadProgress: item.downloadProgress,
             hasValidatedPlayableSource: item.hasPlayableLibraryTarget(),
-            seerConnected: seerConnected && canRequestDiscoveryItem(item)
+            seerConnected: seerConnected && canRequestDiscoveryItem(item),
+            releaseDate: item.releaseDate,
+            hasDownloadActivity: item.hasRequestDownloadActivity == true
         )
     }
 
@@ -404,7 +393,7 @@ struct HomeHeroView: View {
         switch heroCTA(for: item) {
         case .play: return .play
         case .request: return .request
-        case .downloading, .requested: return .downloadStatus
+        case .downloading, .requested, .awaitingRelease: return .downloadStatus
         case .unavailable: return nil
         }
     }
@@ -505,6 +494,7 @@ struct HomeHeroView: View {
                 Color.clear
             }
         }
+        .modifier(HeroShowcaseForeground(surface: .featured))
         .frame(maxWidth: .infinity, minHeight: frameHeight, alignment: .bottomLeading)
         .background(alignment: .top) {
             // Laid out at the FULL hero height and anchored to the frame's TOP, so
@@ -545,7 +535,7 @@ struct HomeHeroView: View {
         .opacity(heroVisible ? 1 : 0)
         .trackHeroExposure(
             item: current,
-            isVisible: isFrontmost && !receded && heroVisible && metadataVisible
+            isVisible: isFrontmost && !pausedForRows && heroVisible && metadataVisible
                 && seasonPickerItem == nil && !showingSeasonLookupFailure,
             scopeID: exposureScopeID,
             onExposure: onItemExposed
@@ -642,7 +632,7 @@ struct HomeHeroView: View {
             // silently resume the carousel and page behind them — defeating the
             // recede pause. Kept coupled to `pausedAt` (not a bare `!receded` task
             // guard) so `resumeFromRecede()` still resumes cleanly on focus return.
-            if receded { pauseWhileReceded() }
+            if pausedForRows { pauseWhileReceded() }
         }
         // Keep Home told which slide is on screen, so a curation landing in the
         // background folds new media into a free slot rather than over this one.
@@ -723,7 +713,7 @@ struct HomeHeroView: View {
         // Fast/local trailers only: resolution and the three-second still-image
         // lead-in overlap. The same single player persists into detail navigation.
         .task(id: trailerTaskKey) {
-            guard isFrontmost, backgroundSettings.homeTrailerEnabled,
+            guard isFrontmost, !showcaseSuspended, !trailerController.isFeaturedReserved, backgroundSettings.homeTrailerEnabled,
                   let item = current else {
                 // When detail is pushed over Home, relinquish control without
                 // stopping the shared player — the detail hero owns it now.
@@ -826,6 +816,10 @@ struct HomeHeroView: View {
         // `noteInteraction`), so it never pages out from under an interacting user.
         .task(id: autoAdvanceKey) {
             guard settings.autoAdvance, items.count > 1 else { return }
+            if pausedForRows {
+                pauseWhileReceded()
+                return
+            }
             // Paused (user is interacting): schedule no fire at all. The gauge is
             // frozen at `pausedAt`; resuming bumps `runEpoch` to reschedule here.
             guard pausedAt == nil, !trailerController.isPaused else { return }
@@ -879,9 +873,13 @@ struct HomeHeroView: View {
                 alignsArtworkToLeadingEdge: navigationStyle == .rail,
                 scrimOpacity: isFrontmost ? 1 : 0
             )
+            .environment(\.heroScrimHeightScale, PlozzTypography.heroScrimScale(
+                textScale: textScale, logoSize: settings.logoSize,
+                lines: settings.textSize.descriptionLineLimit(base: 3)
+            ))
             .heroArtworkSource(
                 id: item.id,
-                isActive: isFrontmost
+                isActive: isFrontmost && !showcaseSuspended
             )
         } else {
             Color.clear.frame(width: w, height: height)
@@ -919,11 +917,11 @@ struct HomeHeroView: View {
     }
 
     private var trailerReturnItemID: String? {
-        backgroundSettings.homeTrailerEnabled && !receded && heroVisible ? current?.id : nil
+        backgroundSettings.homeTrailerEnabled && !pausedForRows && heroVisible ? current?.id : nil
     }
 
     private var trailerTaskKey: String {
-        "\(current?.id ?? "-")|\(backgroundSettings.homeTrailerEnabled)|\(isFrontmost)"
+        "\(current?.id ?? "-")|\(backgroundSettings.homeTrailerEnabled)|\(isFrontmost)|\(trailerController.isFeaturedReserved)|\(showcaseSuspended)"
     }
 
     // MARK: - Content column
@@ -969,14 +967,6 @@ struct HomeHeroView: View {
                     heroButtonVisual(button, for: item, selected: focus != nil && selectedButton == offset)
                 }
             }
-            // Report the pills' natural width up so the overview above can cap itself
-            // to the button row (see `actionButtonsWidth`). Measured on the pills
-            // themselves — NOT the enclosing action row, which is `maxWidth: .infinity`.
-            .background {
-                GeometryReader { geo in
-                    Color.clear.preference(key: HeroButtonsWidthKey.self, value: geo.size.width)
-                }
-            }
             .opacity(metadataVisible ? 1 : 0)
             // Snap the pills' hide instantly (matches the metadata above); the
             // delayed fade-IN still animates.
@@ -999,6 +989,7 @@ struct HomeHeroView: View {
     @ViewBuilder
     private func swiftUIContent(for item: MediaItem) -> some View {
         let hideText = spoilerSettings.shouldHideText(for: item)
+        let textWidth = HeroLogoSizing.homeTextWidth(for: .television, logoSize: settings.logoSize)
         VStack(alignment: .leading, spacing: 12) {
             // Absorbs the vertical slack at the TOP of the (fixed-height) column so
             // the bottom block — logo/metadata/overview + buttons + dots — is pinned
@@ -1040,14 +1031,11 @@ struct HomeHeroView: View {
                     presentationPolicy: .onArrival(maximumWait: 0.2)
                 ) {
                     heroTitleText(for: item, hideText: hideText)
-                        .font(.system(size: 64, weight: .bold))
+                        .font(.system(size: PlozzTypography.heroFallbackTitle.scaled(by: textScale).pointSize, weight: .bold))
                         .lineLimit(2)
                         .minimumScaleFactor(0.5)
                         .multilineTextAlignment(.leading)
-                        // Cap the text title to the action-button row width (measured
-                        // below) so it wraps to fit within the buttons, like the
-                        // overview. Falls back to the old cap until first measured.
-                        .frame(maxWidth: actionButtonsWidth > 0 ? actionButtonsWidth : 1200, alignment: .leading)
+                        .frame(maxWidth: textWidth, alignment: .leading)
                         .contentTransition(.opacity)
                 }
                 .id("logo-\(item.id)")
@@ -1055,22 +1043,22 @@ struct HomeHeroView: View {
                 .padding(.bottom, 14)
 
                 metadataLine(for: item)
+                    .frame(maxWidth: textWidth, alignment: .leading)
                     .modifier(HeroTextLegibilityShadow(colorScheme: colorScheme))
 
-                if !hideText, let heroText = item.tagline ?? item.overview {
+                if let heroText = HeroContentPolicy.homeDescription(
+                    for: HeroPresentation(item: item, artworkStyle: .landscape, surface: .home)
+                ) {
                     // tvOS can't tap links, so flatten inline markdown to plain
                     // label text ("[Sei](url)" → "Sei") — never leak raw brackets
                     // or a URL into the hero. (iPadOS renders tappable links; this
                     // hero is tvOS-only.)
                     Text(heroText.overviewPlainText)
-                        .font(.system(size: 22))
+                        .font(.system(size: PlozzTypography.heroDescription.scaled(by: textScale).pointSize))
                         .foregroundStyle(.primary)
-                        .lineSpacing(2)
-                        .lineLimit(3, reservesSpace: true)
-                        // Cap the tagline to the action-button row width (measured
-                        // below) so it never runs wider than the buttons beneath it.
-                        // Falls back to the previous fixed cap until first measured.
-                        .frame(maxWidth: actionButtonsWidth > 0 ? actionButtonsWidth : 960, alignment: .topLeading)
+                        .lineSpacing(PlozzTypography.heroDescription.scaled(by: textScale).lineSpacing)
+                        .lineLimit(settings.textSize.descriptionLineLimit(base: 3), reservesSpace: true)
+                        .frame(maxWidth: textWidth, alignment: .topLeading)
                         // Subtle legibility shadow so the description reads clearly
                         // over the (now more dissolved) lower hero — see modifier.
                         .modifier(HeroTextLegibilityShadow(colorScheme: colorScheme))
@@ -1087,10 +1075,11 @@ struct HomeHeroView: View {
                             from: presentation.familyGuidanceAge, hidesRatings: false
                         )
                     )
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(maxWidth: textWidth, alignment: .leading)
                         .contentTransition(.opacity)
                 }
             }
+            .environment(\.metadataTextScale, textScale)
             .opacity(metadataVisible ? 1 : 0)
             // Snap the metadata *hide* instantly (so the outgoing text vanishes as
             // the wipe starts instead of fading out over the incoming art) while
@@ -1141,10 +1130,6 @@ struct HomeHeroView: View {
         // stack re-run full layout every animation frame, which is what made the
         // slow recede stutter; a transform is free at any duration.
         .modifier(HomeVerticalMotion(y: receded ? -Self.recedeContentLift : 0))
-        // Cap the overview to the button-row width: adopt the pills' measured width.
-        .onPreferenceChange(HeroButtonsWidthKey.self) { width in
-            if width > 0 { actionButtonsWidth = width }
-        }
     }
 
     /// Env-gated (``HeroForegroundConfig``) imperative **UIKit** visual foreground.
@@ -1183,6 +1168,8 @@ struct HomeHeroView: View {
                 logoReferences: foregroundLogoReferences(for: item),
                 backgroundSample: displayedArtwork?.sample(for: item.id),
                 metadataVisible: metadataVisible,
+                logoSize: settings.logoSize,
+                textSize: settings.textSize,
                 width: HomeHeroLayout.screenWidth,
                 height: HomeHeroLayout.screenHeight - Self.contentBottomInset
             )
@@ -1273,8 +1260,9 @@ struct HomeHeroView: View {
         let slideIndex = items.firstIndex(where: { $0.id == item.id }) ?? index
         return HeroForegroundModelBuilder.model(
             item: item,
-            overviewVisible: !hideText,
+            overviewVisible: true,
             ratingsVisible: settings.shouldShowRatings(for: item, spoilerSettings: spoilerSettings),
+            showsContentRatings: showsContentRatings,
             ratingPreferences: settings.ratingPreferences,
             maskedTitle: masked,
             pillInputs: foregroundPillInputs(for: item),
@@ -1323,7 +1311,9 @@ struct HomeHeroView: View {
                 }
                 return .init(
                     kind: .downloadStatus,
-                    prominent: isProminentPrimary(.downloadStatus, for: item)
+                    prominent: isProminentPrimary(.downloadStatus, for: item),
+                    requestTitle: heroCTA(for: item).requestStatusTitle,
+                    requestSystemImage: heroCTA(for: item).requestStatusSystemImage
                 )
             case .moreInfo:
                 return .init(
@@ -1372,9 +1362,10 @@ struct HomeHeroView: View {
             for i in [previous, next] where items.indices.contains(i) { targets.append(items[i]) }
         }
         var result: [String: @Sendable () async -> URL?] = [:]
+        let language = artworkPolicy.logoLanguage
         for target in targets where result[target.id] == nil {
             let source = target
-            result[source.id] = { await ArtworkRouter.shared.artworkURL(.logo, for: source) }
+            result[source.id] = { await ArtworkRouter.shared.artworkURL(.logo, for: source, language: language) }
         }
         return result
     }
@@ -1587,6 +1578,7 @@ struct HomeHeroView: View {
                 // the `receded` state (see `.onChange(of: receded)` below), which is
                 // the reliable "focus moved DOWN to Continue Watching" signal.
                 if old == nil {
+                    HeroFocusDiagnostics.entry("hero-focusstate")
                     HeroFocusDiagnostics.emit("focus ENTER hero (row, from outside) | \(hfState())")
                     if let item = current {
                         selectedButton = min(selectedButton, max(0, buttons(for: item).count - 1))
@@ -1608,7 +1600,7 @@ struct HomeHeroView: View {
         // focus returns to the hero. Moving focus UP to the tab bar (or LEFT to the
         // sidebar) does NOT scroll the page down, so `receded` stays false there and
         // the carousel keeps playing — exactly the requested behavior.
-        .onChange(of: receded) { _, isReceded in
+        .onChange(of: pausedForRows) { _, isReceded in
             if isReceded { pauseWhileReceded() } else { resumeFromRecede() }
         }
         .onDisappear {
@@ -1773,7 +1765,7 @@ struct HomeHeroView: View {
         guard itemButtons.indices.contains(idx) else { return }
         switch itemButtons[idx] {
         case .play:
-            trailerController.stop()
+            trailerController.stopHero()
             onPlay(item)
         case .request: performRequest(for: item)
         case .downloadStatus: break // informational status pill — no action
@@ -1866,8 +1858,11 @@ struct HomeHeroView: View {
         guard let onRequest else { return }
         noteInteraction()
         requestOverrides[item.id] = .pending
+        let context = seasonRequestContext
         Task {
-            if let status = await onRequest(item) {
+            let status = await onRequest(item)
+            guard seasonRequestContext == context else { return }
+            if let status {
                 requestOverrides[item.id] = status
             } else {
                 requestOverrides[item.id] = nil
@@ -1923,6 +1918,7 @@ struct HomeHeroView: View {
         let context = "\(seasonRequestContextID)|\(seerConnected)"
         if seasonRequestContext != context {
             seasonRequestContext = context
+            requestOverrides = [:]
             seasonRequestStates = [:]
             seasonRequestingItems = []
             seasonLookupFailures = []
@@ -1991,7 +1987,7 @@ struct HomeHeroView: View {
     private func downloadStatusText(for item: MediaItem) -> LocalizedStringResource {
         switch heroCTA(for: item) {
         case let .downloading(progress): return "Downloading \(Int((progress * 100).rounded()))%"
-        default: return "Requested"
+        default: return heroCTA(for: item).requestStatusTitle
         }
     }
 
@@ -2011,7 +2007,10 @@ struct HomeHeroView: View {
             }
             .font(.system(size: 28, weight: .semibold))
         default:
-            Label("Requested", systemImage: "clock")
+            Label(
+                heroCTA(for: item).requestStatusTitle,
+                systemImage: heroCTA(for: item).requestStatusSystemImage
+            )
                 .font(.system(size: 28, weight: .semibold))
         }
     }
@@ -2066,9 +2065,10 @@ struct HomeHeroView: View {
                     title: item.resumeProgressFraction != nil ? "Resume" : item.playActionTitle,
                     progress: item.resumeProgressFraction,
                     remainingText: item.resumeRemainingText,
-                    seasonEpisodeText: HeroForegroundModelBuilder.seasonEpisodeButtonText(for: item),
+                    seasonEpisodeText: item.opensExternalSource ? nil : HeroForegroundModelBuilder.seasonEpisodeButtonText(for: item),
                     onLight: selected || colorScheme == .light,
-                    separatesEpisodeText: item.startsWatching
+                    separatesEpisodeText: item.startsWatching,
+                    systemImage: item.opensExternalSource ? "arrow.up.forward.app" : "play.fill"
                 )
                 .font(.system(size: 28, weight: .semibold))
             }
@@ -2253,7 +2253,7 @@ struct HomeHeroView: View {
         trailerPausedAt = nil
         trailerController.clearEndHandler(ownerID: "home-hero")
         if stopPlayer {
-            trailerController.stop()
+            trailerController.stopHero()
         }
     }
 
@@ -2328,7 +2328,7 @@ struct HomeHeroView: View {
         // paging while the hero is receded — focus is down on Continue Watching and
         // must not have the carousel page behind it. The `receded` onChange resumes
         // once focus returns to the hero.
-        guard !receded else { return }
+        guard !pausedForRows else { return }
         if pendingTrailerAdvance {
             pendingTrailerAdvance = false
             self.pausedAt = nil
@@ -2534,20 +2534,20 @@ struct HomeHeroView: View {
 /// hero that follows focus.
 struct HeroMetadataLine: View {
     let item: MediaItem
+    @Environment(\.metadataTextScale) private var textScale
+    @Environment(\.plozzShowsContentRatings) private var showsContentRatings
 
     var body: some View {
         let metadata = GenreDisplayFormatter.displayNames(for: item.genres)
-        let badge = HeroForegroundModelBuilder.ratingBadgeText(for: item).map {
-            MediaBadge($0, style: .rating)
-        }
+        let badge = showsContentRatings ? item.ratingBadge : nil
         if badge != nil || !metadata.isEmpty {
-            HStack(alignment: .center, spacing: 16) {
+            HStack(alignment: .center, spacing: 16 * textScale) {
                 if let badge {
                     MediaBadgeChip(badge: badge)
                 }
                 if !metadata.isEmpty {
                     Text(metadata.joined(separator: "  ·  "))
-                        .font(.system(size: 23, weight: .medium))
+                        .font(.system(size: PlozzTypography.heroMetadata.scaled(by: textScale).pointSize, weight: .medium))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                         .contentTransition(.opacity)
@@ -2560,14 +2560,15 @@ struct HeroMetadataLine: View {
 /// The air-schedule badge above a hero's logo ("New episode every Wednesday").
 struct HeroScheduleBadge: View {
     let text: LocalizedStringResource
+    @Environment(\.metadataTextScale) private var textScale
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 14 * textScale, style: .continuous)
         Text(text)
-            .font(.system(size: 24, weight: .semibold))
+            .font(.system(size: PlozzTypography.heroSchedule.scaled(by: textScale).pointSize, weight: .semibold))
             .foregroundStyle(Color.primary)
-            .padding(.horizontal, 18)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 18 * textScale)
+            .padding(.vertical, 10 * textScale)
             .background {
                 if #available(tvOS 26.0, *) {
                     shape.fill(.regularMaterial)
@@ -2575,7 +2576,7 @@ struct HeroScheduleBadge: View {
                     shape.fill(.ultraThinMaterial)
                 }
             }
-            .overlay { shape.stroke(Color.primary.opacity(0.16), lineWidth: 1) }
+            .overlay { shape.stroke(Color.primary.opacity(0.16), lineWidth: textScale) }
             .contentTransition(.opacity)
             .accessibilityLabel(text)
     }

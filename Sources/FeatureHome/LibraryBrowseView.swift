@@ -10,12 +10,42 @@ import UIKit
 
 @MainActor
 @Observable
-private final class ShowcaseNavigationVisibility {
+final class ShowcaseNavigationVisibility {
+    static let transitionDuration: TimeInterval = 0.18
     var focusedRowID: String?
 
     func showsNavigation(in rowIDs: [String]) -> Bool {
         guard let focusedRowID, rowIDs.contains(focusedRowID) else { return true }
         return focusedRowID == rowIDs.first
+    }
+}
+
+struct ShowcaseDetailsTopModifier: ViewModifier {
+    let visibility: ShowcaseNavigationVisibility
+    let rowIDs: [String]
+    let visibleTop: CGFloat
+    let hiddenTop: CGFloat
+    @State private var clearanceReleased = false
+
+    func body(content: Content) -> some View {
+        let isVisible = visibility.showsNavigation(in: rowIDs)
+        content.environment(
+            \.focusHeroMinimumDetailsTop,
+            isVisible ? visibleTop : hiddenTop
+        )
+        .environment(
+            \.focusHeroVisibleDetailsTop,
+            isVisible || !clearanceReleased ? visibleTop : hiddenTop
+        )
+        .task(id: isVisible) {
+            if isVisible {
+                clearanceReleased = false
+            } else {
+                try? await Task.sleep(for: .seconds(ShowcaseNavigationVisibility.transitionDuration))
+                guard !Task.isCancelled else { return }
+                clearanceReleased = true
+            }
+        }
     }
 }
 
@@ -30,7 +60,7 @@ private struct ShowcaseNavigationVisibilityModifier: ViewModifier {
             .opacity(isVisible ? 1 : 0)
             .disabled(!isVisible)
             .accessibilityHidden(!isVisible)
-            .animation(.easeOut(duration: 0.18), value: isVisible)
+            .animation(.easeOut(duration: ShowcaseNavigationVisibility.transitionDuration), value: isVisible)
     }
 }
 #endif
@@ -48,6 +78,7 @@ public struct LibraryBrowseView: View {
     @State private var viewModel: LibraryBrowseViewModel
     #if os(tvOS)
     @State private var showcaseNavigation = ShowcaseNavigationVisibility()
+    @State private var showcaseHeaderBottom: CGFloat = 0
     @State private var isFrontmost = false
     #endif
     /// Owns a bounded lookahead without invalidating the view on every scroll update.
@@ -69,8 +100,10 @@ public struct LibraryBrowseView: View {
     /// Pre-built so a synthesized library name ("Movies" on a file share) is
     /// our translated copy while a server's own name stays verbatim.
     private let title: Text
+    private let isNavigationRoot: Bool
     private let spoilerSettings: SpoilerSettings
     private let continueWatchingShowsSeriesArtwork: Bool
+    private let continueWatchingLayout: ContinueWatchingCardLayout
     private let onSelect: (MediaItem) -> Void
     private let onSelectAtIndex: ((MediaItem, VideoPlaylistPlaybackOrigin?) -> Void)?
 
@@ -79,21 +112,24 @@ public struct LibraryBrowseView: View {
     /// Custom pinned-sidebar clearance. Native top/sidebar styles publish zero.
     @Environment(\.plozzNavigationContentInset) private var navigationContentInset
     @Environment(\.plozzNavigationStyle) private var navigationStyle
-    /// Per-profile card presentation. Decides how far a grid card insets its
-    /// artwork, which is what the banner's edges have to match.
+    @Environment(\.plozzTopNavigationScroll) private var topNavigationScroll
+    /// Align the visible card surface, not its invisible layout margins.
     @Environment(\.plozzCardStyle) private var cardStyle
     @Environment(\.plozzCardFocusStyle) private var focusStyle
     /// App-wide media-share scan/enrich status (optional so previews/tests that
     /// don't inject it don't crash). Feeds the banner under this library's title.
     @Environment(ShareScanStatusModel.self) private var shareScanStatus: ShareScanStatusModel?
 
-    /// Library roots need a little more separation than Home rails: large focused
-    /// posters bloom toward the pinned icons, so the base sidebar inset alone
-    /// leaves them visually touching.
     private var contentLeadingPadding: CGFloat {
-        HomeLayout.horizontalPadding
-            + navigationContentInset
-            + (navigationContentInset > 0 ? 16 : 0)
+        HomeLayout.horizontalPadding + navigationContentInset
+    }
+
+    private var gridLeadingPadding: CGFloat {
+        metrics.cardRowLeadingPadding(contentLeadingPadding, cardStyle: cardStyle)
+    }
+
+    private var gridTrailingPadding: CGFloat {
+        metrics.cardRowLeadingPadding(HomeLayout.horizontalPadding, cardStyle: cardStyle)
     }
 
     private var isEntryContentPending: Bool {
@@ -108,15 +144,19 @@ public struct LibraryBrowseView: View {
     public init(
         viewModel: LibraryBrowseViewModel,
         title: Text,
+        isNavigationRoot: Bool = false,
         spoilerSettings: SpoilerSettings = .default,
         continueWatchingShowsSeriesArtwork: Bool = true,
+        continueWatchingLayout: ContinueWatchingCardLayout = .landscape,
         onSelect: @escaping (MediaItem) -> Void,
         onSelectAtIndex: ((MediaItem, VideoPlaylistPlaybackOrigin?) -> Void)? = nil
     ) {
         _viewModel = State(initialValue: viewModel)
         self.title = title
+        self.isNavigationRoot = isNavigationRoot
         self.spoilerSettings = spoilerSettings
         self.continueWatchingShowsSeriesArtwork = continueWatchingShowsSeriesArtwork
+        self.continueWatchingLayout = continueWatchingLayout
         self.onSelect = onSelect
         self.onSelectAtIndex = onSelectAtIndex
     }
@@ -124,8 +164,9 @@ public struct LibraryBrowseView: View {
     public var body: some View {
         #if os(tvOS)
         NativeLibraryFocusHost(scrollTarget: nativeScrollTarget, content: libraryContent)
+            .environment(\.plozzTopNavigationScroll, isNavigationRoot ? topNavigationScroll : nil)
             .ignoresSafeArea(.container, edges: [.vertical, .trailing])
-            .toolbar(.hidden, for: .tabBar)
+            .toolbar(isNavigationRoot ? .automatic : .hidden, for: .tabBar)
         #else
         libraryContent
         #endif
@@ -135,7 +176,9 @@ public struct LibraryBrowseView: View {
         // Shared dense "Browse" wall — flexible columns from the live density
         // metrics so each glass tile stretches to fill its column and the wall
         // scales with the UI-density setting, with six columns at default density.
-        let columns = metrics.libraryPosterColumns
+        let columns = viewModel.gridStyle == .landscape
+            ? Array(metrics.libraryPosterColumns.prefix(max(1, metrics.libraryPosterColumns.count / 2)))
+            : metrics.libraryPosterColumns
         let generation = viewModel.contentGeneration
         return ZStack {
             if viewModel.contentMode == .recommended {
@@ -146,9 +189,14 @@ public struct LibraryBrowseView: View {
                     emptyMessage: viewModel.emptyMessage,
                     errorMessage: viewModel.queryMessage,
                     errorServers: viewModel.errorServers,
+                    errorReport: viewModel.browseDiagnostic.map(PlaybackDiagnosticReport.library),
                     onRetry: { Task { await viewModel.loadFirstPage() } },
                     loadingContent: {
-                        if let progress = viewModel.queryProgress {
+                        if let progress = viewModel.collectionProgress {
+                            LibraryCollectionLoadingView(progress: progress) {
+                                Task { await viewModel.loadFirstPage() }
+                            }
+                        } else if let progress = viewModel.queryProgress {
                             LibraryQueryPreparationView(progress: progress) { Task { await viewModel.cancelIndex() } }
                         } else if viewModel.isMediaShare || viewModel.browseScope == .collectionMembers {
                             LibraryBrowseLoadingView()
@@ -172,11 +220,10 @@ public struct LibraryBrowseView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationEntryFocus(isEntryContentPending ? .pending : nil)
-        // Browse is a full-screen sub-page: hide the top tab bar so it reads as a
-        // dedicated destination with no navigation chrome pinned at the top.
         .environment(\.plozzCardCaptionView, viewModel.browseScope.cardCaptionView(for: viewModel.contentMode))
         .environment(\.plozzArtworkArea, nil)
-        .toolbar(.hidden, for: .tabBar)
+        // Root libraries must not remove the focused tab during native navigation.
+        .toolbar(isNavigationRoot ? .automatic : .hidden, for: .tabBar)
         .safeAreaInset(edge: .top, spacing: 0) {
             #if os(tvOS)
             NativeLibraryScrollingHeader(
@@ -185,11 +232,16 @@ public struct LibraryBrowseView: View {
                     .padding(.vertical, PlozzTheme.Spacing.large)
             )
             .padding(.top, headerTopClearance)
+            .onGeometryChange(for: CGFloat.self) { geometry in
+                geometry.frame(in: .global).maxY
+            } action: { headerBottom in
+                showcaseHeaderBottom = headerBottom
+            }
             .modifier(
                 ShowcaseNavigationVisibilityModifier(
                     visibility: showcaseNavigation,
                     isRecommended: viewModel.contentMode == .recommended,
-                    rowIDs: viewModel.recommendationState.value?.map(\.id) ?? []
+                    rowIDs: viewModel.visibleRecommendedRows(viewModel.recommendationState.value ?? []).map(\.id)
                 )
             )
             #else
@@ -198,28 +250,39 @@ public struct LibraryBrowseView: View {
             #endif
         }
         .safeAreaInset(edge: .bottom) {
+            if viewModel.collectionScanIncomplete, viewModel.state.value != nil, viewModel.pageError == nil,
+               viewModel.contentMode == .collections {
+                LibraryCollectionLoadingView(progress: viewModel.collectionProgress) {
+                    Task { await viewModel.loadFirstPage() }
+                }
+                .padding()
+            }
             if viewModel.contentMode == .recommended, let error = viewModel.recommendationError,
                viewModel.recommendationState.value != nil {
-                HStack(spacing: PlozzTheme.Spacing.large) {
-                    Text(error.userMessage).plozzForeground(.secondary)
-                    Button("Try Again") { Task { await viewModel.loadRecommendations() } }
-                        .plozzActionButton()
+                VStack(alignment: .leading, spacing: 12) {
+                    InlineErrorMessage(Text(error.userMessage))
+                    ContentFailureActions(report: viewModel.recommendationDiagnostic.map(PlaybackDiagnosticReport.library)) {
+                        Task { await viewModel.loadRecommendations() }
+                    }
                 }
                 .padding()
             }
             if viewModel.contentMode != .recommended, let error = viewModel.pageError {
-                HStack(spacing: PlozzTheme.Spacing.large) {
-                    Text(error.userMessage)
+                VStack(alignment: .leading, spacing: PlozzTheme.Spacing.large) {
+                    if viewModel.collectionScanIncomplete {
+                        Text("Some collections haven't been checked yet. The list is incomplete.")
+                    }
+                    Text(viewModel.queryMessage ?? error.userMessage)
                         .plozzForeground(.secondary)
-                    Button("Try Again") {
+                    ContentFailureActions(report: viewModel.browseDiagnostic.map(PlaybackDiagnosticReport.library)) {
                         Task { await viewModel.retryFailedPages() }
                     }
-                    .plozzActionButton()
                 }
                 .padding()
             }
         }
         .task { await viewModel.loadFirstPageIfNeeded() }
+        .task(id: viewModel.availableContentModes) { await viewModel.reconcileContentMode() }
         .background {
             LibraryAlphabetFeedback(letter: viewModel.alphabet.jumpingTo, message: viewModel.alphabet.message)
         }
@@ -304,9 +367,9 @@ public struct LibraryBrowseView: View {
             .compactMap { $0 as? UIWindowScene }
             .flatMap(\.windows)
             .first(where: \.isKeyWindow)?.safeAreaInsets.top ?? 60
-        // The native sidebar's compact page button remains visible above content.
-        let pageButtonHeight: CGFloat = navigationStyle == .sidebar ? 60 : 0
-        return overscan + pageButtonHeight
+        // Keep the scrolling header below native root navigation, not behind its controls.
+        let hasNativeHeader = navigationStyle == .sidebar || (isNavigationRoot && navigationStyle == .tabBar)
+        return overscan + (hasNativeHeader ? 60 : 0)
     }
     #endif
 
@@ -315,13 +378,22 @@ public struct LibraryBrowseView: View {
             state: viewModel.recommendationState,
             emptyMessage: viewModel.emptyMessage,
             errorServers: viewModel.errorServers,
+            errorReport: viewModel.recommendationDiagnostic.map(PlaybackDiagnosticReport.library),
             onRetry: { Task { await viewModel.loadRecommendations() } }
-        ) { sections in
-            #if os(tvOS)
-            recommendedShowcase(sections)
-            #else
-            recommendedRows(sections)
-            #endif
+        ) { loaded in
+            let sections = viewModel.visibleRecommendedRows(loaded)
+            if sections.isEmpty {
+                ContentUnavailableView(
+                    "No visible rows", systemImage: "rectangle.grid.1x2",
+                    description: Text("Show rows in Settings > Screens & Navigation > Customize Libraries.")
+                )
+            } else {
+                #if os(tvOS)
+                recommendedShowcase(sections)
+                #else
+                recommendedRows(sections)
+                #endif
+            }
         }
     }
 
@@ -337,11 +409,17 @@ public struct LibraryBrowseView: View {
         }
     }
 
+    private func recommendedCardStyle(_ section: LibrarySection) -> PosterCardView.Style {
+        section.id == "continueWatching"
+            ? continueWatchingLayout.cardStyle
+            : (section.style == .poster ? .poster : .landscape)
+    }
+
     private func recommendedRow(_ section: LibrarySection) -> some View {
         MediaRowView(
             title: section.displayName,
             items: section.items,
-            style: section.style == .poster ? .poster : .landscape,
+            style: recommendedCardStyle(section),
             spoilerSettings: spoilerSettings,
             showsSeriesArtwork: section.id == "continueWatching" && continueWatchingShowsSeriesArtwork,
             showsResumeChip: section.id == "continueWatching",
@@ -359,7 +437,7 @@ public struct LibraryBrowseView: View {
                 itemIDs: section.items.map(\.stablePresentationID),
                 leadItem: section.items.first,
                 items: section.items,
-                cardArtwork: section.style == .landscape
+                cardArtwork: recommendedCardStyle(section) == .landscape
                     ? { PosterCardView.leadingLandscapeArtwork(
                         for: $0,
                         showsSeriesArtwork: section.id == "continueWatching" && continueWatchingShowsSeriesArtwork,
@@ -370,16 +448,18 @@ public struct LibraryBrowseView: View {
         let sectionsByID = Dictionary(uniqueKeysWithValues: sections.map { ($0.id, $0) })
         return FocusHeroHomeView(
             rows: rows,
-            settings: .default,
+            settings: viewModel.presentation.settings.showcaseSettings,
             spoilerSettings: spoilerSettings,
             navigationStyle: .tabBar,
-            isFrontmost: isFrontmost
+            isFrontmost: isFrontmost,
+            minimumDetailsTop: showcaseHeaderBottom,
+            onReturnToTop: { showcaseNavigation.focusedRowID = nil }
         ) { row, reporter in
             if let section = sectionsByID[row.id] {
                 MediaRowView(
                     title: section.displayName,
                     items: section.items,
-                    style: section.style == .poster ? .poster : .landscape,
+                    style: recommendedCardStyle(section),
                     spoilerSettings: spoilerSettings,
                     showsSeriesArtwork: section.id == "continueWatching" && continueWatchingShowsSeriesArtwork,
                     onFocusEntered: {
@@ -401,6 +481,11 @@ public struct LibraryBrowseView: View {
             }
         }
         .ignoresSafeArea(.container, edges: .trailing)
+        .modifier(ShowcaseDetailsTopModifier(
+            visibility: showcaseNavigation, rowIDs: rows.map(\.id),
+            visibleTop: showcaseHeaderBottom,
+            hiddenTop: headerTopClearance + PlozzTheme.Spacing.large
+        ))
     }
     #endif
 
@@ -409,7 +494,7 @@ public struct LibraryBrowseView: View {
         NativeLibraryGrid(
             viewModel: viewModel, total: total, generation: generation,
             spoilerSettings: spoilerSettings,
-            leadingInset: contentLeadingPadding, trailingInset: HomeLayout.horizontalPadding,
+            leadingInset: gridLeadingPadding, trailingInset: gridTrailingPadding,
             scrollTarget: nativeScrollTarget,
             hidesScrollIndicator: isRailVisible,
             header: scanBanner,
@@ -459,6 +544,7 @@ public struct LibraryBrowseView: View {
                                 index: index,
                                 generation: generation,
                                 spoilerSettings: spoilerSettings,
+                                style: viewModel.gridStyle == .landscape ? .landscape : .poster,
                                 focusRequest: viewModel.alphabet.destination.flatMap {
                                     $0.focusesItem && $0.index == index ? $0.id : nil
                                 },
@@ -479,8 +565,8 @@ public struct LibraryBrowseView: View {
                         }
 
                     }
-                    .padding(.leading, contentLeadingPadding)
-                    .padding(.trailing, HomeLayout.horizontalPadding)
+                    .padding(.leading, gridLeadingPadding)
+                    .padding(.trailing, gridTrailingPadding)
                     .padding(.bottom, PlozzTheme.Metrics.screenVerticalPadding)
                     .focusSection()
                     .id(viewModel.contentMode)
@@ -503,6 +589,7 @@ public struct LibraryBrowseView: View {
             }
             // Never clip a focused card's lift, shadow or border.
             .scrollClipDisabled()
+            .scrollsTopNavigation()
             .onScrollGeometryChange(for: CGFloat.self) {
                 $0.contentOffset.y + $0.contentInsets.top
             } action: { _, offset in
@@ -578,7 +665,7 @@ public struct LibraryBrowseView: View {
                 }
             }
             if !viewModel.availableSortFields.isEmpty {
-                HStack(spacing: PlozzTheme.Spacing.medium) {
+                BrowseQueryControls {
                     if viewModel.showsFilterMenu {
                         LibraryFilterMenu(
                             filters: viewModel.filters, capabilities: viewModel.queryCapabilities, facets: viewModel.queryFacets,
@@ -605,10 +692,8 @@ public struct LibraryBrowseView: View {
     /// growing. Renders nothing for a server-backed library or an idle share, and
     /// does its own status lookup so progress ticks never reach the poster grid.
     ///
-    /// Horizontally it lines up with the poster ARTWORK below it, not the grid's
-    /// column edges: a card insets its artwork inside its own surface, so matching
-    /// only the grid padding left the banner overhanging every poster by that
-    /// inset. Vertically it takes an equal, generous gap on both sides — the first
+    /// Horizontally it shares the header and visible card-surface keyline.
+    /// Vertically it takes an equal, generous gap on both sides — the first
     /// grid row scales up on focus (``mediumFocusedCardScale``) and would
     /// otherwise crowd the banner's lower edge.
     @ViewBuilder
@@ -618,16 +703,10 @@ public struct LibraryBrowseView: View {
                 status: shareScanStatus,
                 shareID: viewModel.sourceServerID
             )
-            .padding(.leading, contentLeadingPadding + posterArtworkInset)
-            .padding(.trailing, HomeLayout.horizontalPadding + posterArtworkInset)
+            .padding(.leading, contentLeadingPadding)
+            .padding(.trailing, HomeLayout.horizontalPadding)
             .padding(.vertical, Self.scanBannerVerticalGap)
         }
-    }
-
-    /// How far a grid card insets its artwork inside its own footprint, so the
-    /// banner can sit flush with the posters in either card style.
-    private var posterArtworkInset: CGFloat {
-        cardStyle == .framed ? metrics.cardInset : metrics.borderlessCardSideMargin
     }
 
     /// Equal breathing room above and below the banner, on top of the stack's own
@@ -636,46 +715,10 @@ public struct LibraryBrowseView: View {
 
     /// A focusable native sort menu.
     private var sortControl: some View {
-        Menu {
-            Picker("Sort By", selection: sortFieldBinding) {
-                ForEach(viewModel.availableSortFields, id: \.self) { field in
-                    Text(field.displayName).tag(field)
-                }
-            }
-            Picker("Order", selection: sortDirectionBinding) {
-                ForEach(SortDirection.allCases, id: \.self) { direction in
-                    Text(direction.displayName).tag(direction)
-                }
-            }
-        } label: {
-            Label("Sort: \(viewModel.sort.field.displayName)", systemImage: "arrow.up.arrow.down")
+        BrowseSortMenu(sort: viewModel.sort, fields: viewModel.availableSortFields) { sort in
+            Task { await viewModel.setSort(sort) }
         }
         .accessibilityIdentifier("library-sort-menu")
-    }
-
-    private var sortFieldBinding: Binding<SortField> {
-        Binding(
-            get: { viewModel.sort.field },
-            set: { field in
-                Task {
-                    await viewModel.setSort(
-                        CoreModels.SortDescriptor(
-                            field: field,
-                            direction: field.defaultDirection
-                        )
-                    )
-                }
-            }
-        )
-    }
-
-    private var sortDirectionBinding: Binding<SortDirection> {
-        Binding(
-            get: { viewModel.sort.direction },
-            set: { direction in
-                Task { await viewModel.setSort(CoreModels.SortDescriptor(field: viewModel.sort.field, direction: direction)) }
-            }
-        )
     }
 
     /// Warms decoded poster art in the viewport's direction once a cell loads.
@@ -685,6 +728,7 @@ public struct LibraryBrowseView: View {
               viewModel.contentMode != .recommended,
               index >= 0, index < viewModel.totalCount else { return }
         let tracker = artworkPrefetch
+        let style: PosterCardView.Style = viewModel.gridStyle == .landscape ? .landscape : .poster
         let range = tracker.indices(
             aheadFrom: index, total: viewModel.totalCount,
             columns: metrics.libraryPosterColumns.count, generation: viewModel.contentGeneration
@@ -693,8 +737,10 @@ public struct LibraryBrowseView: View {
             guard let candidate = viewModel.item(at: candidateIndex) else {
                 return [ArtworkPrefetchWindow.Request]()
             }
-            return candidate.artworkCandidates(for: .poster).prefix(2).compactMap {
-                ArtworkImageCache.shared.prefetchRequest(for: $0, variant: .posterCard)
+            return candidate.artworkCandidates(for: style).prefix(2).compactMap {
+                ArtworkImageCache.shared.prefetchRequest(
+                    for: $0, variant: style == .poster ? .posterCard : .landscapeCard
+                )
             }
         })
         #endif
@@ -774,7 +820,7 @@ private struct LibraryContentSegmentStyle: ButtonStyle {
                             ? (colorScheme == .dark ? Color.white : .black)
                             : palette.primaryText.opacity(isSelected ? 0.18 : 0))
                 }
-                .scaleEffect(configuration.isPressed ? 0.97 : (isFocused ? 1.04 : 1))
+                .scaleEffect(configuration.isPressed ? 0.97 : 1)
                 .animation(.easeOut(duration: 0.16), value: isFocused)
                 .animation(.easeOut(duration: 0.16), value: isSelected)
                 .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
@@ -820,6 +866,7 @@ private struct LibraryGridCell: View {
     let index: Int
     let generation: Int
     let spoilerSettings: SpoilerSettings
+    var style: PosterCardView.Style = .poster
     let focusRequest: UUID?
     let onFocusRequestHandled: (UUID) -> Void
     let onSelect: (MediaItem) -> Void
@@ -836,7 +883,7 @@ private struct LibraryGridCell: View {
                 } else {
                     PosterCardView(
                         item: item,
-                        style: .poster,
+                        style: style,
                         spoilerSettings: spoilerSettings,
                         focusRequest: focusRequest,
                         onFocusRequestHandled: {
@@ -847,7 +894,7 @@ private struct LibraryGridCell: View {
                     }
                 }
             } else {
-                PosterPlaceholderView()
+                PosterPlaceholderView(style: style)
             }
         }
         .task(id: generation) { await onAppear(index) }
@@ -859,13 +906,14 @@ private struct LibraryGridCell: View {
 /// match `PosterCardView`'s `.poster` artwork so columns stay aligned while a page
 /// is in flight. Inert (non-focusable) so focus skips over it.
 private struct PosterPlaceholderView: View {
+    var style: PosterCardView.Style = .poster
     @Environment(\.themePalette) private var palette
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             RoundedRectangle(cornerRadius: PlozzTheme.Metrics.posterArtCornerRadius, style: .continuous)
                 .fill(palette.fill)
-                .aspectRatio(2.0 / 3.0, contentMode: .fit)
+                .aspectRatio(style == .poster ? 2.0 / 3.0 : 16.0 / 9.0, contentMode: .fit)
                 .frame(maxWidth: .infinity)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Loading").font(.headline)

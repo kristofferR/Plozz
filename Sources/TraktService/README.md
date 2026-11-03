@@ -117,6 +117,31 @@ Provider-supported idempotency would be needed to eliminate that failure window.
 Older app versions must be upgraded to honor coordination.
 
 History sync is outbound; server resume state remains server-owned.
+External-player callbacks use the same durable watch outbox as in-app playback.
+Returning before completion sends `/scrobble/pause` with the reported percentage
+for Trakt's paused playback data, as well as saving server resume state. This is
+not a guarantee of an entry in Trakt's own Continue Watching UI: its
+[documented presentation](https://forums.trakt.tv/t/new-trakt-feature-spotlight-continue-watching-start-watching/89875)
+distinguishes next-episode suggestions for shows from paused movies.
+Partial progress is separate from completed-watch mirrors: it does not
+mark watched on Trakt or other trackers, and later returns update it even on the
+same day. Completion still sends `/scrobble/stop` at 100%. No progress is inferred
+without a supported callback, and already-consumed returns are not backfilled.
+A connected movie/episode with insufficient identifiers is not
+considered delivered: the outbox reloads the original server item (and its series
+for episodes) under the same profile/server-user authorization before retrying.
+It never guesses a title match. Still-unidentifiable watches remain pending,
+with a safe diagnostic, without undoing successful server watched-state writes.
+Disconnected integrations and unsupported container kinds remain no-ops.
+
+With playback diagnostics enabled, `TRAKT_SCROBBLE` records the requested and
+returned action, percentage, catalog IDs, and episode coordinates in `PlozzLog`
+and the bounded playback journal included by Send to Developer. It excludes
+titles, account identities, credentials, and raw response bodies; IMDb values
+must match the catalog ID format. An unreadable acknowledgement is explicitly
+logged but does not change delivery or retry an accepted write. These
+diagnostics record Trakt's response, not an independent playback-data readback
+or proof of its mobile UI state.
 
 ## Where to look first
 

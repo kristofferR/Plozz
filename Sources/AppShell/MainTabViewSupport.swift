@@ -13,7 +13,6 @@ import MetadataKit
 import FeatureSearch
 import FeatureSettings
 import FeatureProfiles
-import ProviderTrailers
 import RatingsService
 import TraktService
 import SeerService
@@ -22,27 +21,30 @@ import AniListService
 import MALService
 import LastFmService
 
-/// Resolves the provider that owns `accountID`, falling back to the primary
-/// (first) account. `accounts` is guaranteed non-empty by the caller
-/// (`RootView`).
-///
-/// The fallback is legitimate only for a **nil** `accountID` (a genuinely
-/// untagged item — e.g. a route with no owning server — plays from the primary
-/// account). A **non-nil but unmatched** `accountID` is different: it means the
-/// caller handed an explicit source whose account is no longer signed in, and
-/// silently playing it from `accounts[0]` is the "random / wrong server" symptom
-/// — you'd stream a *different server's* copy than the one selected. The play
-/// paths prune to live accounts first (`bestSourcePlayItem`) so this shouldn't
-/// be reached in practice; when it is, emit a (gated) diagnostic so the stale
-/// pick is observable on device rather than masquerading as a successful play.
-func resolveProvider(_ accountID: String?, in accounts: [ResolvedAccount]) -> any MediaProvider {
+/// An empty enabled-source set is valid. Only genuinely untagged items may use
+/// the primary account; a missing explicit source must never change servers.
+func resolveProvider(_ accountID: String?, in accounts: [ResolvedAccount]) throws -> any MediaProvider {
+    let account: ResolvedAccount?
     if let accountID {
-        if let match = accounts.first(where: { $0.account.id == accountID }) {
-            return match.provider
-        }
-        FanoutDiagnostics.emit("resolveProvider fallback: explicit account \(accountID) not signed in; using primary \(accounts[0].account.id)")
+        account = accounts.first { $0.account.id == accountID }
+    } else {
+        account = accounts.first
     }
-    return accounts[0].provider
+    guard let account else {
+        PlozzLog.app.error("Media source is no longer available for this route")
+        throw AppError.unauthorized
+    }
+    return account.provider
+}
+
+struct MediaSourceUnavailableView: View {
+    var body: some View {
+        ContentUnavailableView(
+            "Source Unavailable",
+            systemImage: "externaldrive.badge.exclamationmark",
+            description: Text("Connect or enable this source in Settings, then try again.")
+        )
+    }
 }
 
 /// Resolves a specific account id to its provider, or `nil` when that account is
@@ -299,7 +301,7 @@ func resolveLibraryBrowse(
     in accounts: [ResolvedAccount],
     identitySources: @escaping @Sendable (MediaItem) -> [MediaSourceRef],
     identityRevision: @escaping @Sendable () -> Int = { 0 }
-) -> (provider: any MediaProvider, sourceAccountID: String?) {
+) throws -> (provider: any MediaProvider, sourceAccountID: String?) {
     let accountIDs = library.allSourceAccountIDs
     if accountIDs.count > 1 {
         let sources: [AggregatedLibrarySource] = accountIDs.compactMap { accountID in
@@ -324,81 +326,10 @@ func resolveLibraryBrowse(
         if let only = sources.first {
             return (only.provider, only.accountID)
         }
+        PlozzLog.app.error("No active source remains for the requested library")
+        throw AppError.unauthorized
     }
-    return (resolveProvider(library.sourceAccountID, in: accounts), library.sourceAccountID)
-}
-
-/// Builds the provider that backs the combined **All Libraries** grid: every
-/// browsable library on every signed-in account, paged concurrently and
-/// de-duplicated into one wall through the same ``AggregatedLibraryProvider`` the
-/// cross-server single-library browse uses.
-///
-/// Each source declares its **own** kind, because this grid mixes a movie library
-/// with a TV library — asking a movie section for series returns nothing on both
-/// backends. A cross-server-merged library contributes one source per server, so a
-/// title held on two servers still collapses to one card here exactly as it does
-/// in that library's own browse.
-///
-/// Returns `nil` when nothing resolves (every account signed out mid-flight), so
-/// the caller can fall back rather than construct a provider with no sources —
-/// ``AggregatedLibraryProvider`` requires at least one.
-func resolveAllLibrariesBrowse(
-    libraries: [AggregatedLibrary],
-    in accounts: [ResolvedAccount],
-    identitySources: @escaping @Sendable (MediaItem) -> [MediaSourceRef],
-    identityRevision: @escaping @Sendable () -> Int = { 0 }
-) -> (any MediaProvider)? {
-    var sources: [AggregatedLibrarySource] = []
-    var seen: Set<String> = []
-    for aggregated in libraries where !aggregated.library.isMusic {
-        let library = aggregated.library
-        for accountID in library.allSourceAccountIDs {
-            guard
-                let provider = resolveOptionalProvider(accountID, in: accounts),
-                let containerID = library.containerID(forSourceAccountID: accountID)
-            else { continue }
-            // A merged library is listed once but names several accounts, and the
-            // same (account, container) pair must never be paged twice — that would
-            // double every one of its titles' fetches for no extra content.
-            guard seen.insert("\(accountID)\u{1F}\(containerID)").inserted else { continue }
-            sources.append(
-                AggregatedLibrarySource(
-                    accountID: accountID,
-                    containerID: containerID,
-                    provider: provider,
-                    kind: library.kind
-                )
-            )
-        }
-    }
-    guard !sources.isEmpty else { return nil }
-    return AggregatedLibraryProvider(
-        sources: sources,
-        serverInfo: accounts.sourceServerInfo(),
-        identitySources: identitySources,
-        identityRevision: identityRevision
-    )
-}
-
-/// A stable signature of every (account, container, kind) the combined grid will
-/// page, used as part of the destination's SwiftUI identity.
-///
-/// `LibraryBrowseView` builds its view model once and holds it in `@State`, so a
-/// destination whose identity doesn't move keeps the ORIGINAL provider. Keying on
-/// library keys alone isn't enough: a server coming back adds sources to libraries
-/// whose keys never changed, and the grid would go on paging the smaller set.
-/// Sorted, so a reordered discovery result alone can't reset the grid.
-func allLibrariesSourceSignature(_ libraries: [AggregatedLibrary]) -> String {
-    libraries
-        .filter { !$0.library.isMusic }
-        .flatMap { aggregated in
-            aggregated.library.allSourceAccountIDs.map { accountID in
-                let container = aggregated.library.containerID(forSourceAccountID: accountID) ?? ""
-                return "\(accountID)/\(container)/\(aggregated.library.kind.rawValue)"
-            }
-        }
-        .sorted()
-        .joined(separator: ",")
+    return (try resolveProvider(library.sourceAccountID, in: accounts), library.sourceAccountID)
 }
 
 /// The same signature for ONE library, so a single-library grid also rebuilds when
@@ -440,9 +371,8 @@ func librarySourceSignature(_ library: MediaLibrary) -> String {
 ///
 /// `accounts` are the currently signed-in accounts. A merged card's `sources`
 /// can still list a server the user has since removed (the eager index snapshot
-/// lags an account sign-out), and ``resolveProvider(_:in:)`` silently falls back
-/// to `accounts[0]` for an unknown account — so selecting a dead source would
-/// play the *wrong* server's copy (or fail). Pruning to live accounts before
+/// lags an account sign-out). Selecting a dead source would fail even when a
+/// reachable copy remains. Pruning to live accounts before
 /// selection guarantees we only ever pick a server we can actually resolve, and
 /// drops the stale refs from the item handed to the player.
 ///
@@ -544,10 +474,7 @@ private func failoverPlayItem(
     )
 }
 
-/// Builds the player for a play request. Online (TMDb → YouTube) trailers carry a
-/// YouTube video-id marker and have no backing account, so they are routed to
-/// ``YouTubeTrailerProvider`` (which extracts a playable stream); every other
-/// item resolves through its owning account provider as usual.
+/// Builds the player for server-owned media. YouTube trailers open externally.
 @MainActor
 private func makePlayerViewModel(
     for request: PlayRequest,
@@ -569,52 +496,10 @@ private func makePlayerViewModel(
     adoptedResolved: PlayerViewModel.PrefetchedPlayback? = nil,
     continuation: PlaybackContinuation? = nil,
     versionPreferences: any VersionPreferenceStoring = VersionPreferenceStore()
-) -> PlayerViewModel {
-    if let videoID = request.item.youTubeTrailerVideoID {
-        let trailerItem = request.item
-        let onlineTrailerResolver = ItemDetailViewModel.defaultOnlineTrailerResolver
-        let engineFactory = HybridPlayback.engineFactory(
-            networkFileResolver: networkFileResolver,
-            authenticatedHTTPResolver: authenticatedHTTPResolver
-        )
-        let trailerViewModel = PlayerViewModel(
-            provider: YouTubeTrailerProvider(
-                item: trailerItem,
-                videoID: videoID,
-                alternatives: {
-                    // The server's stored trailer URL can go stale (the YouTube
-                    // video gets made private/removed). When that happens, fall
-                    // back to a keyless search for a still-playable replacement
-                    // trailer for the same title.
-                    let results = await onlineTrailerResolver(
-                        trailerItem.alternativeTrailerSearchSubject
-                    )
-                    return results.compactMap(\.youTubeTrailerVideoID)
-                },
-                // Adaptive (separate audio) trailers pair a video-only stream
-                // with an audio-only stream. The native engine muxes them via a
-                // synthesized HLS master (TrailerAudioMuxComposer) so AVPlayer
-                // plays them in sync — unlocking 1080p H.264, which YouTube only
-                // serves as adaptive tracks. Falls back to the progressive muxed
-                // (~360p) stream if the adaptive path fails.
-                allowsSeparateAudio: true
-            ),
-            itemID: videoID,
-            behavior: behavior,
-            style: style,
-            subtitlePolicy: subtitlePolicy,
-            audioPolicy: audioPolicy,
-            playbackSettings: playbackSettings,
-            spoilerSettings: spoilerSettings,
-            seriesTrackStore: seriesTrackStore,
-            startPosition: request.startPosition,
-            scrobbler: scrobbler,
-            engineFactory: engineFactory,
-            authenticatedHTTPResolver: authenticatedHTTPResolver,
-            autoDismissOnEnd: true
-        )
-        trailerViewModel.onSubtitleStyleChanged = onSubtitleStyleChanged
-        return trailerViewModel
+) throws -> PlayerViewModel {
+    guard !request.item.isYouTubeTrailer else {
+        PlozzLog.playback.error("External YouTube trailer was incorrectly routed to the built-in player.")
+        throw AppError.invalidResponse
     }
     // The player can invoke convergence off-main. Its bound bridge selects the
     // identity snapshot on the main actor, atomically with profile validation,
@@ -631,7 +516,7 @@ private func makePlayerViewModel(
     // playthrough auto-advances and controls can offer a mid-play jump. The
     // provider is captured (a value-type session); `children(of:)` lists the
     // season in broadcast order. Movies/trailers pass no resolver.
-    let episodeProvider = resolveProvider(request.item.sourceAccountID, in: accounts)
+    let episodeProvider = try resolveProvider(request.item.sourceAccountID, in: accounts)
     let neighborResolver: (@Sendable () async -> (previous: MediaItem?, next: MediaItem?))?
     if convergingItem.kind == .episode, let seasonID = convergingItem.seasonID {
         let originAccountID = convergingItem.sourceAccountID
@@ -879,7 +764,7 @@ extension View {
             PlayerPresentation(
                 request: request,
                 make: { request, adopted, continuation in
-                    let model = makePlayerViewModel(
+                    let model = try makePlayerViewModel(
                         for: request,
                         accounts: accounts,
                         networkFileResolver: networkFileResolver,
@@ -930,22 +815,23 @@ extension View {
                     return try await choice.prepare(
                         item, provider: account.provider, settings: playbackSettingsModel,
                         preferences: versionPreferences, offlineResolver: offlinePlaybackResolver,
+                        sourceResolver: crossServerSourceResolver(in: accounts, identitySources: identitySources),
                         isCurrent: { playRequest.wrappedValue?.traceID == request.traceID }
                     )
                 },
                 versionAuthorizationScope: accounts.flatMap {
                     [$0.account.id, $0.provider.session.userID, $0.plexHomeUserID ?? "",
                      $0.credentialRevision.rawValue.uuidString]
-                }
+                },
+                playbackSettings: playbackSettingsModel.settings
             )
         }
         .resumePrompt(item: resumePrompt) { item, startPosition in
             let origin = pendingPlaylistOrigin.wrappedValue
                 .flatMap { $0.containsSelection(item) ? $0 : nil }
-            let playlist = origin.map {
-                VideoPlaylistPlaybackContext(
-                    origin: $0, provider: resolveProvider($0.accountID, in: accounts)
-                )
+            let playlist: VideoPlaylistPlaybackContext? = origin.flatMap { origin in
+                guard let provider = try? resolveProvider(origin.accountID, in: accounts) else { return nil }
+                return VideoPlaylistPlaybackContext(origin: origin, provider: provider)
             }
             pendingPlaylistOrigin.wrappedValue = nil
             let request = PlayRequest(
@@ -959,117 +845,6 @@ extension View {
             )
             playRequest.wrappedValue = request
         }
-    }
-}
-
-
-
-
-extension View {
-    /// Presents a "Resume vs Start Over" choice for an in-progress `item`.
-    /// `onChoose` receives the chosen start position in seconds (the saved
-    /// resume point for Resume, `0` for Start Over).
-    ///
-    /// Both actions are quantified, in the same unit the card uses: "Continue · 59m
-    /// left" against "Start Over · 1h 48m". The dialog's whole job is a comparison,
-    /// so the two options have to be comparable — the old pairing put a timecode on
-    /// one ("Resume from 49:37") and nothing on the other, which read as two
-    /// different kinds of thing and made the viewer reconcile a position against the
-    /// "59m" they had just pressed. Now each number is simply what that choice costs.
-    ///
-    /// "Resume", not "Continue": the app already distinguishes the two. The hero
-    /// Play button renders "Resume" for exactly this action on exactly this item
-    /// (`resumeProgressFraction != nil ? "Resume" : "Play"`), while "Continue" is
-    /// the onboarding verb — Plex link, Select Theme, Select Libraries — meaning
-    /// "advance this flow". Using it here gave one action two names depending on
-    /// where it was pressed. (The "Continue Watching" row is a collection name, not
-    /// an action, so it doesn't set the verb.)
-    ///
-    /// There is deliberately **no "you stopped at …" line**: it states a fact that
-    /// doesn't inform the decision. The message carries identity instead, because
-    /// the title alone can mislead — a Continue Watching card shows the SERIES name
-    /// while `item.title` for an episode is the EPISODE name, so pressing "Avatar:
-    /// The Last Airbender" used to open a dialog headed "Bato of the Water Tribe".
-    func resumePrompt(
-        item: Binding<MediaItem?>,
-        onChoose: @escaping (MediaItem, TimeInterval) -> Void
-    ) -> some View {
-        confirmationDialog(
-            // The series name for an episode, so the dialog is headed by the same
-            // title the viewer just pressed; the episode itself moves to the message.
-            item.wrappedValue.map(Self.resumePromptTitle) ?? "",
-            isPresented: Binding(
-                get: { item.wrappedValue != nil },
-                set: { if !$0 { item.wrappedValue = nil } }
-            ),
-            titleVisibility: .visible,
-            presenting: item.wrappedValue
-        ) { presented in
-            // Resume is listed first so it receives default focus.
-            if let remaining = presented.resumeRemainingText {
-                Button {
-                    onChoose(presented, presented.resumePosition ?? 0)
-                } label: {
-                    Text(
-                        "Resume · \(remaining) left",
-                        comment: """
-                            Resume-playback dialog button: continue from the saved \
-                            position. The placeholder is a formatted duration (e.g. \
-                            "59m") for the time REMAINING, not the elapsed position. \
-                            Pairs with "Start Over · %@", which quotes the full runtime.
-                            """
-                    )
-                }
-            } else {
-                // No runtime from the provider, so there's no remaining time to
-                // quote — the plain verb still reads correctly.
-                Button("Resume") {
-                    onChoose(presented, presented.resumePosition ?? 0)
-                }
-            }
-            if let runtime = presented.runtime?.runtimeBadgeText {
-                Button {
-                    onChoose(presented, 0)
-                } label: {
-                    Text(
-                        "Start Over · \(runtime)",
-                        comment: """
-                            Resume-playback dialog button: restart from the beginning. \
-                            The placeholder is a formatted duration (e.g. "1h 48m") for \
-                            the item's FULL runtime. Pairs with "Resume · %@ left".
-                            """
-                    )
-                }
-            } else {
-                Button("Start Over") {
-                    onChoose(presented, 0)
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: { presented in
-            if let context = Self.resumePromptContext(for: presented) {
-                Text(verbatim: context)
-            }
-        }
-    }
-
-    /// Title for the resume dialog: the SERIES for an episode (matching the card
-    /// that opened it), otherwise the item's own title.
-    private static func resumePromptTitle(_ item: MediaItem) -> String {
-        if item.kind == .episode, let series = item.parentTitle, !series.isEmpty {
-            return series
-        }
-        return item.title
-    }
-
-    /// Secondary identity line: which episode this is. `nil` for anything whose
-    /// title already says everything (a movie), so no empty message is drawn.
-    private static func resumePromptContext(for item: MediaItem) -> String? {
-        guard item.kind == .episode else { return nil }
-        let parts = [item.subtitle, item.title]
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }
 

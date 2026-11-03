@@ -84,7 +84,7 @@ actor LibraryCollageCache {
                                 let image = await imageLimiter.run { () async -> UIImage? in
                                     await ArtworkFirstPaintResolver.resolve(
                                         references: candidate.references, variant: .posterPreview,
-                                        maxAspectRatio: 1,
+                                        maxAspectRatio: PosterCardPresentation.preservesContainerArtwork(for: candidate.item.kind) ? nil : 1,
                                         asyncOnlineURL: {
                                             await artworkRouter.artworkURL(
                                                 for: candidate.item, placements: [.poster]

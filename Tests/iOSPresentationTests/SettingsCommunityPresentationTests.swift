@@ -9,9 +9,136 @@ import Vision
 import XCTest
 @testable import AppShelliOS
 
+private struct SettingsLanguageScopeProbe: View {
+    @Environment(\.locale) private var locale
+    let update: (String?) -> Void
+
+    var body: some View {
+        Color.clear.frame(height: 1)
+            .onChange(of: locale, initial: true) { _, value in
+                update(value.language.languageCode?.identifier)
+            }
+    }
+}
+
 @MainActor
 final class SettingsCommunityPresentationTests: XCTestCase {
     private var capturedImages: [CGImage] = []
+
+    func testLanguagePickerUsesAppOwnedModelWithoutAnInheritedEnvironment() async throws {
+        let suite = "SettingsLanguage-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = AppLanguageSettingsStore(defaults: defaults)
+        store.save(.explicit("en"))
+        let language = AppLanguageSettingsModel(store: store)
+        let app = PlozziOSAppModel(appLanguage: language)
+        XCTAssertTrue(app.appLanguage === language)
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !UIApplication.shared.connectedScenes.contains(where: { $0.activationState == .foregroundActive }),
+              ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        var observedLanguage: String?
+        window.rootViewController = UIHostingController(rootView:
+            VStack {
+                AppLanguageScope(model: app.appLanguage) {
+                    SettingsLanguageScopeProbe { observedLanguage = $0 }
+                }
+                // Deliberately outside the scope: Settings can be hosted separately.
+                List { PlozziOSSettingsLanguagePicker(appLanguage: app.appLanguage) }
+            }
+            .environment(\.locale, Locale(identifier: "en_US"))
+        )
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKeyAndVisible()
+        }
+        for code in ["en", "de"] {
+            app.appLanguage.language = .explicit(code)
+            try await waitForHostedLayout(window)
+            let text = try recognizedText(in: window, name: "settings-language-\(code)")
+            XCTAssertTrue(text.contains(try XCTUnwrap(language.language.endonym)), text)
+            XCTAssertEqual(observedLanguage, code)
+            XCTAssertEqual(store.load(), .explicit(code))
+        }
+        app.appLanguage.language = .system
+        try await waitForHostedLayout(window)
+        XCTAssertEqual(observedLanguage, "en")
+        XCTAssertEqual(store.load(), .system)
+    }
+
+    func testCategoryTitlesAlignIncludingScreensAndNavigation() throws {
+        for (width, textSize) in [(320.0, DynamicTypeSize.large), (390.0, .accessibility3), (500.0, .large)] {
+            let renderer = ImageRenderer(content:
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(ProfileSettingsCategory.allCases) { category in
+                        PlozziOSSettingsCategoryLabel(
+                            category: category, accounts: [], isAccountIncluded: { _ in true }
+                        )
+                        .frame(width: width, height: 180, alignment: .leading)
+                    }
+                }
+                .labelStyle(SettingsIconLabelStyle())
+                .environment(\.themePalette, .dark)
+                .environment(\.colorScheme, .dark)
+                .environment(\.locale, Locale(identifier: "en_US"))
+                .environment(\.dynamicTypeSize, textSize)
+                .background(Color.black)
+            )
+            renderer.scale = 1
+            let image = try XCTUnwrap(renderer.cgImage)
+            let attachment = XCTAttachment(image: UIImage(cgImage: image))
+            attachment.name = "Settings category alignment \(width) \(textSize)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
+            try pixels.withUnsafeMutableBytes { buffer in
+                let context = try XCTUnwrap(CGContext(
+                    data: buffer.baseAddress, width: image.width, height: image.height,
+                    bitsPerComponent: 8, bytesPerRow: image.width * 4,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+                ))
+                context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            }
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.recognitionLanguages = ["en-US"]
+            try VNImageRequestHandler(cgImage: image).perform([request])
+            let titles = try ["Playback", "Subtitles", "Live TV", "Libraries", "Appearance",
+                              "Screens", "Trackers", "Language"].map { title in
+                let result = try XCTUnwrap(request.results?.first {
+                    $0.topCandidates(1).first?.string.contains(title) == true
+                }, "Missing category \(title)")
+                let candidate = try XCTUnwrap(result.topCandidates(1).first)
+                let range = try XCTUnwrap(candidate.string.range(of: title))
+                let bounds = try XCTUnwrap(candidate.boundingBox(for: range)).boundingBox
+                let top = max(0, Int((1 - bounds.maxY) * CGFloat(image.height)) - 2)
+                let bottom = min(image.height, Int((1 - bounds.minY) * CGFloat(image.height)) + 2)
+                // OCR locates the title line; its estimated left edge can include the adjacent icon.
+                let leading = try XCTUnwrap((0..<image.width).first { x in
+                    (top..<bottom).contains { y in
+                        let offset = (y * image.width + x) * 4
+                        return pixels[offset] > 230 && pixels[offset + 1] > 230 && pixels[offset + 2] > 230
+                    }
+                })
+                return CGFloat(leading)
+            }
+            let leading = try XCTUnwrap(titles.first)
+            for title in titles {
+                XCTAssertEqual(title, leading, accuracy: 3, "All category titles must share one leading column.")
+            }
+        }
+    }
 
     func testCompactSettingsTitleStartsLeadingAndCentersOnlyAfterScrolling() async throws {
         let model = PlozziOSAppModel()
@@ -41,7 +168,6 @@ final class SettingsCommunityPresentationTests: XCTestCase {
             window.frame = CGRect(origin: .zero, size: size)
             window.rootViewController = UIHostingController(rootView:
                 PlozziOSSettingsView(appModel: model, onClose: {}, systemColorScheme: .dark)
-                    .environment(AppLanguageSettingsModel())
                     .environment(\.horizontalSizeClass, .compact)
                     .environment(\.dynamicTypeSize, textSize)
                     .environment(\.locale, Locale(identifier: "en_US"))
@@ -226,7 +352,6 @@ final class SettingsCommunityPresentationTests: XCTestCase {
                     onClose: {},
                     systemColorScheme: light ? .light : .dark
                 )
-                .environment(AppLanguageSettingsModel())
                 .environment(\.horizontalSizeClass, .compact)
                 let text = try await renderedText(
                     content, size: size, light: light,
@@ -251,7 +376,6 @@ final class SettingsCommunityPresentationTests: XCTestCase {
                 let content = PlozziOSSettingsView(
                     appModel: model, onClose: {}, systemColorScheme: light ? .light : .dark
                 )
-                .environment(AppLanguageSettingsModel())
                 .environment(\.horizontalSizeClass, .regular)
                 let text = try await renderedText(
                     content, size: size, light: light,

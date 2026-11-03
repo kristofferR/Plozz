@@ -95,6 +95,28 @@ final class PlayerTouchGestureFeedbackPresentationTests: XCTestCase {
         }
     }
 
+    func testNativeSkipCountAndChevronKeepLightInkInBothAppearances() async throws {
+        guard #available(iOS 26.0, *) else { throw XCTSkip("Native Liquid Glass requires iOS 26.") }
+        for scheme in [ColorScheme.light, .dark] {
+            for direction in [PlayerTouchSkipDirection.forward, .backward] {
+                try await withFeedback(reduceMotion: true, reducePanelGlass: false, colorScheme: scheme) { fixture, window in
+                    fixture.seek(by: direction == .forward ? 25 : -25)
+                    try await Task.sleep(for: .milliseconds(150))
+                    let frame = try self.captureIndicator(window, direction: direction, label: "Native skip \(scheme)")
+                    let middle = frame.width / 2
+                    for region in [
+                        CGRect(x: 0, y: 20, width: middle, height: 32),
+                        CGRect(x: middle, y: 20, width: frame.width - middle, height: 32)
+                    ] {
+                        let ink = self.cropped(frame, to: region)
+                        XCTAssertGreaterThan(ink.pixels.filter { $0 > 230 }.count, 20,
+                                             "Both the signed count and chevron need light ink in \(scheme).")
+                    }
+                }
+            }
+        }
+    }
+
     func testSkipCapsulesContainMovingAndParkedChevronsWithNativeAndReducedGlass() async throws {
         for reducePanelGlass in [false, true] {
             if !reducePanelGlass {
@@ -242,7 +264,7 @@ final class PlayerTouchGestureFeedbackPresentationTests: XCTestCase {
     func testVerticalLevelMetersMaskIconContrastAtZeroPartialAndFullWithoutVisibleNumbers() async throws {
         for reducePanelGlass in [false, true] {
             for kind in [PlayerTouchLevel.brightness, .volume] {
-                try await withFeedback(reducePanelGlass: reducePanelGlass, colorScheme: .light) { fixture, window in
+                try await withFeedback(reducePanelGlass: reducePanelGlass, colorScheme: .dark) { fixture, window in
                     let rect = CGRect(x: kind == .brightness ? 8 : 360, y: 22, width: 32, height: 156)
                     var frames: [Double: RenderedFrame] = [:]
                     for value in [0.0, 0.5, 1.0] {
@@ -255,9 +277,12 @@ final class PlayerTouchGestureFeedbackPresentationTests: XCTestCase {
                         frames[value] = frame
                         let boundary = 156 * (1 - value)
                         for y in 30..<144 {
-                            let pixel = frame.pixels[y * frame.width + 2]
+                            let pixel = frame.pixels[y * frame.width + 5]
                             if Double(y) > boundary + 2 {
-                                XCTAssertGreaterThan(pixel, 235, "The fill must rise from the bottom: \(kind), \(value), row \(y)")
+                                if y < 110 {
+                                    XCTAssertGreaterThan(pixel, 215, "The translucent fill must rise from the bottom: \(kind), \(value), row \(y)")
+                                    XCTAssertLessThan(pixel, 250, "The fill must not become opaque.")
+                                }
                             } else if Double(y) < boundary - 2 {
                                 XCTAssertLessThan(pixel, 200, "The unfilled area must remain dark: \(kind), \(value), row \(y)")
                             }
@@ -355,6 +380,47 @@ final class PlayerTouchGestureFeedbackPresentationTests: XCTestCase {
         }
     }
 
+    func testLevelMetersMatchSeekFillAndTrackAcrossAppearancesAndInteractionStates() async throws {
+        for reduced in [false, true] {
+            for scheme in [ColorScheme.dark, .light] {
+                try await withFeedback(reducePanelGlass: reduced, colorScheme: scheme) { fixture, window in
+                    fixture.showsSeekReference = true
+                    for kind in [PlayerTouchLevel.brightness, .volume] {
+                        var filledLevels: [Double] = []
+                        for active in [false, true] {
+                            fixture.state.showLevel(kind, value: 0.5)
+                            if !active {
+                                try await Task.sleep(for: .milliseconds(300))
+                                fixture.state.finishLevel()
+                            }
+                            try await Task.sleep(for: .milliseconds(450))
+                            let frame = try self.capture(window, rect: CGRect(x: 0, y: 0, width: 400, height: 200),
+                                                         label: "\(kind), \(scheme), reduced \(reduced), active \(active)")
+                            let x = kind == .brightness ? 24 : 376
+                            @MainActor func level(_ rect: CGRect) -> Double {
+                                let pixels = self.cropped(frame, to: rect).pixels
+                                return pixels.reduce(0) { $0 + Double($1) } / Double(pixels.count)
+                            }
+                            let meterFill = level(CGRect(x: x - 2, y: 112, width: 4, height: 4))
+                            let seekFill = level(CGRect(x: 178, y: 98, width: 4, height: 4))
+                            XCTAssertEqual(meterFill, seekFill, accuracy: 12,
+                                           "Vertical progress must use the seek bar's actual rendered fill.")
+                            let meterTrack = level(CGRect(x: x - 2, y: 58, width: 4, height: 4))
+                            let seekTrack = level(CGRect(x: 218, y: 98, width: 4, height: 4))
+                            XCTAssertEqual(meterTrack, seekTrack, accuracy: 12,
+                                           "Both unfilled tracks must use the same native/fallback surface.")
+                            XCTAssertGreaterThan(meterFill - meterTrack, 70,
+                                                 "Progress must stay lighter than the track, never black on a pale slab.")
+                            filledLevels.append(meterFill)
+                        }
+                        XCTAssertGreaterThan(abs(filledLevels[1] - filledLevels[0]), 20,
+                                             "Adjusting must brighten the fill like active seeking, without becoming opaque.")
+                    }
+                }
+            }
+        }
+    }
+
     func testLevelMetersSlideAndScaleWithoutFadingAndRespectReduceMotion() async throws {
         for reduceMotion in [false, true] {
             for kind in [PlayerTouchLevel.brightness, .volume] {
@@ -368,6 +434,8 @@ final class PlayerTouchGestureFeedbackPresentationTests: XCTestCase {
                     let settled = try self.capture(window, rect: rect, label: "\(kind) settled, reduced motion \(reduceMotion)")
                     let finished = ContinuousClock.now
                     fixture.state.finishLevel()
+                    try await Task.sleep(until: finished + .milliseconds(400), clock: .continuous)
+                    let released = try self.capture(window, rect: rect, label: "\(kind) released, reduced motion \(reduceMotion)")
                     try await Task.sleep(until: finished + .milliseconds(1360), clock: .continuous)
                     let exiting = try self.capture(window, rect: rect, label: "\(kind) exiting, reduced motion \(reduceMotion)")
                     try await Task.sleep(until: finished + .milliseconds(1500), clock: .continuous)
@@ -381,9 +449,16 @@ final class PlayerTouchGestureFeedbackPresentationTests: XCTestCase {
                         XCTAssertEqual(try self.inkBounds(entering, threshold: 128), fullBounds)
                         self.assertAbsent(exiting, message: "Reduce Motion must remove the meter without movement or fading.")
                     } else {
-                        for frame in [entering, exiting] {
+                        for (frame, reference) in [(entering, settled), (exiting, released)] {
                             self.assertVisible(frame)
-                            XCTAssertGreaterThan(try XCTUnwrap(frame.pixels.max()), 252, "Moving fill must remain fully opaque.")
+                            let movingFill = frame.pixels.filter { $0 > 128 }.sorted()
+                            let restingFill = reference.pixels.filter { $0 > 128 }.sorted()
+                            XCTAssertFalse(movingFill.isEmpty)
+                            XCTAssertEqual(
+                                Double(movingFill[movingFill.count / 2]),
+                                Double(restingFill[restingFill.count / 2]), accuracy: 15,
+                                "Motion must not add a fade to the seek-style translucent fill."
+                            )
                             let bounds = try self.inkBounds(frame, threshold: 128)
                             let outward = kind == .brightness ? fullBounds.midX - bounds.midX : bounds.midX - fullBounds.midX
                             XCTAssertGreaterThan(outward, 2, "The capsule must travel through its nearest edge.")
@@ -403,6 +478,8 @@ final class PlayerTouchGestureFeedbackPresentationTests: XCTestCase {
                 let rect = CGRect(x: 0, y: 0, width: 400, height: 200)
                 fixture.state.showLevel(kind, value: 1)
                 try await Task.sleep(for: .milliseconds(350))
+                fixture.state.finishLevel()
+                try await Task.sleep(for: .milliseconds(400))
                 let resting = try self.inkBounds(self.capture(window, rect: rect, label: "\(kind) passive"), threshold: 128)
                 let region = try XCTUnwrap(fixture.state.levelInteractionRegion)
                 XCTAssertEqual(region.kind, kind)
@@ -1113,6 +1190,7 @@ private final class FeedbackFixture {
     var referenceCount: TimeInterval = 25
     var referenceIconsVisible = true
     var showsTypographyReferences = true
+    var showsSeekReference = false
     let reducePanelGlass: Bool
     let colorScheme: ColorScheme
     let feedbackSize: CGSize
@@ -1138,6 +1216,16 @@ private struct FeedbackFixtureView: View {
             .fixedSize()
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(.black)
+            .overlay(alignment: .topLeading) {
+                if fixture.showsSeekReference, let level = fixture.state.level, let value = level.value {
+                    PlayerTouchScrubTrack(
+                        width: 80, progressFraction: value, bufferedFraction: 0,
+                        segments: [], duration: 600, isTouching: level.isDragging
+                    )
+                    .frame(width: 80, height: 20)
+                    .offset(x: 160, y: 90)
+                }
+            }
             .overlay(alignment: .topLeading) {
                 if fixture.showsTypographyReferences {
                     FeedbackTypographyReferenceView(fixture: fixture)

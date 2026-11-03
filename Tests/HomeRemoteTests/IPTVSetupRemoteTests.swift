@@ -37,6 +37,8 @@ final class IPTVSetupRemoteTests: XCTestCase {
         let advanced = app.buttons["iptv-advanced-options"]
         XCTAssertTrue(advanced.waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertEqual(advanced.value as? String, "Collapsed")
+        XCTAssertTrue(app.textFields["EPG URL (optional)"].exists)
+        XCTAssertFalse(app.switches["Find guides in playlist"].exists)
         XCTAssertFalse(app.buttons["iptv-authentication"].exists)
         XCTAssertFalse(app.staticTexts["HTTP is unencrypted. Use HTTPS when available."].exists)
         for _ in 0..<8 {
@@ -69,7 +71,7 @@ final class IPTVSetupRemoteTests: XCTestCase {
         XCTAssertEqual(advanced.value as? String, "Collapsed")
         assertFocused(advanced)
         XCTAssertFalse(authentication.exists)
-        XCTAssertFalse(app.textFields["Guide URL (optional)"].exists)
+        XCTAssertTrue(app.textFields["EPG URL (optional)"].exists)
     }
 
     func testGuideAndHeaderActionsHavePaddedFocusRows() throws {

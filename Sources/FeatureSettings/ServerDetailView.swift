@@ -76,7 +76,7 @@ struct ServerDetailView: View {
                     // Safety net if the group vanishes while viewing (e.g. a remote
                     // "Remove Everywhere" landed): offer a working way back.
                     VStack(alignment: .leading, spacing: 16) {
-                        SettingsPageHeader("Servers")
+                        SettingsPageHeader(SettingsCopy.sources)
                         Text("This server is no longer signed in.")
                             .font(.headline)
                             .plozzForeground(.secondary)
@@ -288,6 +288,11 @@ struct ServerDetailView: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 8)
+            if account.server.provider.supportsAccountReauthentication, let providerSetupRouter {
+                Button("Sign In Again", systemImage: "arrow.clockwise") {
+                    providerSetupRouter.reauthenticationAccount = account
+                }
+            }
             if account.server.provider == .iptv, let providerSetupRouter {
                 Button("Edit connection", systemImage: "pencil") {
                     providerSetupRouter.connectIPTV(account: account)

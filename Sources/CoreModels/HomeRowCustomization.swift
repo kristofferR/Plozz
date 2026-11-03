@@ -7,6 +7,7 @@ public enum HomeRowID: Hashable, Codable, Sendable {
     case liveTV
     case library(key: String, section: String)
     case server(accountID: String, section: String)
+    case section(String)
 
     public static func library(_ key: String, kind: LibraryHomeRowKind) -> Self {
         .library(key: key, section: kind.rawValue)
@@ -27,6 +28,7 @@ public enum HomeRowID: Hashable, Codable, Sendable {
         case let .global(row): return "home-\(row.rawValue)"
         case .libraries: return "home-libraries"
         case .liveTV: return "home-live-tv"
+        case let .section(id): return "home-section-\(id)"
         case let .library(key, section):
             return "home-library-\(key.utf8.count):\(key)-\(section)"
         case let .server(accountID, section):
@@ -44,11 +46,14 @@ public struct HomeRowChoice: Identifiable, Equatable, Sendable {
     public let isProviderDefault: Bool
     public let isLegacyDefault: Bool
     public let serverRow: HomeServerRowDefinition?
+    public let collectionSection: CollectionSection?
+    public let hasCollectionCovers: Bool
 
     public init(
         id: HomeRowID, title: String, localizedTitle: LocalizedStringResource? = nil,
         library: AggregatedLibrary? = nil, isProviderDefault: Bool, isLegacyDefault: Bool = true,
-        serverRow: HomeServerRowDefinition? = nil
+        serverRow: HomeServerRowDefinition? = nil, collectionSection: CollectionSection? = nil,
+        hasCollectionCovers: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -57,6 +62,8 @@ public struct HomeRowChoice: Identifiable, Equatable, Sendable {
         self.isProviderDefault = isProviderDefault
         self.isLegacyDefault = isLegacyDefault
         self.serverRow = serverRow
+        self.collectionSection = collectionSection
+        self.hasCollectionCovers = hasCollectionCovers
     }
 
     public static var shared: [Self] {
@@ -79,12 +86,20 @@ public struct HomeRowChoice: Identifiable, Equatable, Sendable {
         )
     }
 
+    public init(collectionSection: CollectionSection, library: AggregatedLibrary? = nil) {
+        self.init(
+            id: collectionSection.rowID, title: collectionSection.title, library: library,
+            isProviderDefault: false, isLegacyDefault: false, collectionSection: collectionSection
+        )
+    }
+
     public static func baseRows(for library: AggregatedLibrary) -> [Self] {
         LibraryHomeRowKind.available(for: library).filter { $0 != .hubs }.map {
             Self(
                 id: .library(library.key, kind: $0),
                 title: $0.rawValue, localizedTitle: $0.displayName,
-                library: library, isProviderDefault: true
+                library: library, isProviderDefault: true,
+                hasCollectionCovers: library.library.kind == .collection
             )
         }
     }
@@ -96,7 +111,9 @@ public struct HomeRowChoice: Identifiable, Equatable, Sendable {
             library: library,
             isProviderDefault: section.isHomeDefault
                 ?? (section.id == "recentlyAdded" || section.id == "nextUp" || library.providerKind == .plex),
-            isLegacyDefault: section.isLegacyHomeDefault ?? true
+            isLegacyDefault: section.isLegacyHomeDefault ?? true,
+            hasCollectionCovers: CollectionCoverLayout.isCollectionGroup(section.items)
+                || library.library.kind == .collection
         )
     }
 }
@@ -174,7 +191,7 @@ public struct HomeRowCustomization: Codable, Equatable, Sendable {
     private static func isCombinedRow(_ id: HomeRowID) -> Bool {
         switch id {
         case .global, .libraries, .liveTV: return true
-        case .library, .server: return false
+        case .library, .server, .section: return false
         }
     }
 

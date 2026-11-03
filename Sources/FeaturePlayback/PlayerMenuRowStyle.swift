@@ -200,7 +200,7 @@ private struct SubtitleBadgeStyle: ViewModifier {
 /// long titles that don't fit. Reads the row's focus from `playerMenuRowIsFocused`
 /// so it only animates the focused row.
 struct MarqueeText: View {
-    let text: String
+    let text: Text
     var font: Font = .body
     /// Focus, when the label isn't inside a player menu row.
     ///
@@ -215,6 +215,17 @@ struct MarqueeText: View {
     /// opening words out of view. Menu rows are leading either way; a card that
     /// centres its labels needs its short ones to stay centred.
     var restingAlignment: Alignment = .leading
+
+    init(text: String, font: Font = .body, isFocused: Bool? = nil, restingAlignment: Alignment = .leading) {
+        self.init(text: Text(verbatim: text), font: font, isFocused: isFocused, restingAlignment: restingAlignment)
+    }
+
+    init(text: Text, font: Font = .body, isFocused: Bool? = nil, restingAlignment: Alignment = .leading) {
+        self.text = text
+        self.font = font
+        self.isFocused = isFocused
+        self.restingAlignment = restingAlignment
+    }
 
     @Environment(\.playerMenuRowIsFocused) private var rowFocused
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -240,7 +251,7 @@ struct MarqueeText: View {
         // overlay — overlays don't influence the parent's size — so the row stays
         // bounded to the panel width (no focus outline running off-screen), and the
         // real text overflows *inside* it, clipped, free to scroll.
-        Text(text)
+        text
             .font(font)
             .lineLimit(1)
             .hidden()
@@ -251,7 +262,7 @@ struct MarqueeText: View {
                     .onChange(of: g.size.width) { _, w in containerWidth = w }
             })
             .overlay(alignment: overflows ? .leading : restingAlignment) {
-                Text(text)
+                text
                     .font(font)
                     .lineLimit(1)
                     .fixedSize()
@@ -276,6 +287,7 @@ struct MarqueeText: View {
             .onChange(of: reduceMotion) { _, _ in restart() }
             .onChange(of: textWidth) { _, _ in restart() }
             .onChange(of: containerWidth) { _, _ in restart() }
+            .onChange(of: text) { _, _ in restart() }
     }
 
     private var overflows: Bool {

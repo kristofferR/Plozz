@@ -487,6 +487,39 @@ final class PlexProviderMappingTests: XCTestCase {
         XCTAssertFalse(try provider.map(stream: plain, itemID: "movie", mediaSourceID: "file").isHearingImpaired)
     }
 
+    func testAudioTrackMappingRetainsItsOwnProfileAndSpatialEvidence() throws {
+        let provider = PlexProvider(session: makeSession(), http: StubHTTPClient())
+        for (fields, expected) in [
+            (#""codec":"dca","profile":"MA + DTS:X IMAX""#, "MA + DTS:X IMAX"),
+            (#""codec":"truehd","extendedDisplayTitle":"English TrueHD Atmos""#, "Atmos"),
+            (#""codec":"eac3","profile":"JOC""#, "JOC")
+        ] {
+            let dto = try JSONDecoder.plozz.decode(PlexStream.self, from: Data(
+                (#"{"index":3,"streamType":2,"channels":8,"# + fields + "}").utf8
+            ))
+            let track = try provider.map(stream: dto, itemID: "movie", mediaSourceID: "file")
+            XCTAssertEqual(track.id, 3)
+            XCTAssertEqual(track.profile, expected)
+        }
+    }
+
+    func testAudioMappingPreservesRawVersionTitle() throws {
+        let provider = PlexProvider(session: makeSession(), http: StubHTTPClient())
+        let dto = try JSONDecoder.plozz.decode(PlexStream.self, from: Data(
+            #"{"index":3,"streamType":2,"codec":"dca","channels":6,"languageTag":"fr","language":"French","extendedDisplayTitle":"French DTS 5.1","title":"VFQ"}"#.utf8
+        ))
+        let track = try provider.map(stream: dto, itemID: "movie", mediaSourceID: "file")
+        XCTAssertEqual(track.id, 3)
+        XCTAssertEqual(track.language, "fr")
+        XCTAssertEqual(track.displayTitle, "French DTS 5.1 VFQ")
+        XCTAssertEqual(
+            TrackLabeling.audioLabel(displayTitle: track.displayTitle, language: track.language,
+                                    codec: track.codec, channels: track.channels, trackID: track.id,
+                                    locale: Locale(identifier: "fr")),
+            TrackLabel(base: .content("Français"), qualifiers: [.audioVersion("VFQ"), .format("DTS 5.1")])
+        )
+    }
+
     private func makeSession() -> UserSession {
         UserSession(
             server: MediaServer(id: "srv", name: "Home", baseURL: URL(string: "https://plex.host:32400")!, provider: .plex),
@@ -1324,9 +1357,7 @@ final class PlexProviderMappingTests: XCTestCase {
         let item = try await provider.item(id: "77")
         XCTAssertEqual(item.officialRating, "PG-13")
         XCTAssertEqual(item.genres, ["Sci-Fi", "Adventure"])
-        // 4K + HDR10 (from smpte2084 transfer) + Dolby Atmos. Dolby badges group
-        // first, so Atmos sits before the HDR10 pill.
-        XCTAssertEqual(item.technicalBadges.map(\.label), ["4K", "Dolby Atmos", "HDR10"])
+        XCTAssertEqual(item.technicalBadges.map(\.label), ["4K", "HDR10", "Dolby Digital+", "Dolby Atmos"])
         XCTAssertEqual(item.mediaInfo?.video?.isInterlaced, true)
         // RT critic rendered as a percentage; IMDb audience stays 0–10 (one decimal).
         XCTAssertEqual(item.ratings.first(where: { $0.source == .rottenTomatoes })?.displayValue, "83%")
@@ -1405,6 +1436,46 @@ final class PlexProviderMappingTests: XCTestCase {
 
         let item = try await provider.item(id: "79")
         XCTAssertEqual(item.mediaInfo?.dynamicRangeBadges.map(\.label), ["HDR10+"])
+    }
+
+    func testPlexDolbyVisionCompatibilityAndFalseFlagsRemainAccurate() throws {
+        let cases: [(String, [String], String?)] = [
+            (#""DOVIPresent":true,"DOVIProfile":8,"DOVIBLCompatID":1,"displayTitle":"4K DoVi/HDR10+""#,
+             ["Dolby Vision"], "HDR10+"),
+            (#""DOVIPresent":true,"DOVIProfile":8,"DOVIBLCompatID":1"#, ["Dolby Vision"], "HDR10"),
+            (#""DOVIPresent":true,"DOVIProfile":8,"DOVIBLCompatID":4"#, ["Dolby Vision"], "HLG"),
+            (#""DOVIPresent":true,"DOVIProfile":8,"displayTitle":"DoVi/HLG""#, ["Dolby Vision"], "HLG"),
+            (#""DOVIPresent":true,"DOVIProfile":8"#, ["Dolby Vision"], nil),
+            (#""DOVIPresent":true,"DOVIProfile":5,"DOVIBLCompatID":0,"colorTrc":"smpte2084""#,
+             ["Dolby Vision"], nil),
+            (#""DOVIPresent":false,"DOVIBLPresent":false,"DOVIProfile":0,"DOVILevel":0"#, ["SDR"], nil),
+            (#""colorTrc":"smpte2094-40""#, ["HDR10+"], nil),
+            (#""colorTrc":"arib-std-b67""#, ["HLG"], nil)
+        ]
+        for (fields, expected, detail) in cases {
+            let streams = try JSONDecoder.plozz.decode([PlexStream].self, from: Data("""
+            [{"streamType":1,"codec":"hevc",\(fields)},
+             {"streamType":2,"codec":"eac3","channels":6,"profile":"JOC","selected":true},
+             {"streamType":2,"codec":"truehd","channels":8,"profile":"Atmos","selected":false}]
+            """.utf8))
+            let metadata = try XCTUnwrap(PlexProvider.sourceMetadata(container: "mkv", streams: streams))
+            XCTAssertEqual(metadata.technicalBadges.filter { !$0.isAudio }.map(\.label), expected, fields)
+            XCTAssertEqual(metadata.technicalBadges.first?.detail, detail, fields)
+            XCTAssertEqual(metadata.audioBadges.map(\.label), ["Dolby Digital+", "Dolby Atmos"])
+            XCTAssertEqual(metadata.audioBadges.first?.detail, "5.1")
+        }
+    }
+
+    func testPlex8KSummaryAndPerVersionFactsRetainCombinedBadges() throws {
+        let media = try JSONDecoder.plozz.decode([PlexMedia].self, from: Data("""
+        [{"id":1,"videoResolution":"8k","videoCodec":"hevc","videoStreamDisplayTitle":"DoVi/HDR10+",
+          "audioCodec":"truehd","audioChannels":8,"audioProfile":"Atmos"},
+         {"id":2,"videoResolution":"1080","videoCodec":"h264","audioCodec":"aac","audioChannels":2}]
+        """.utf8))
+        let versions = PlexProvider.versions(from: media)
+        XCTAssertEqual(versions[0].technicalBadges.map(\.label), ["8K", "Dolby Vision", "Dolby TrueHD", "Dolby Atmos"])
+        XCTAssertEqual(versions[0].technicalBadges[1].detail, "HDR10+")
+        XCTAssertEqual(versions[1].technicalBadges.map(\.label), ["1080p"])
     }
 
     func testItemMapsDolbyVisionFromMediaLevelDisplayTitleWithoutStreams() async throws {
@@ -1550,11 +1621,11 @@ final class PlexProviderMappingTests: XCTestCase {
         XCTAssertEqual(item.mediaInfo?.dynamicRangeBadges.map(\.label), ["Dolby Vision", "HDR10"])
         XCTAssertTrue(labels.contains("Dolby Atmos"),
                       "Atmos must be picked up from Media-level audioProfile, got \(labels)")
-        XCTAssertFalse(labels.contains("Dolby Digital+"),
-                       "Atmos supersedes Dolby Digital+ when both apply, got \(labels)")
-        // Final ordering: 4K · Dolby Vision · Dolby Atmos · HDR10 (Dolby logos
-        // adjacent, HDR pill after).
-        XCTAssertEqual(labels, ["4K", "Dolby Vision", "Dolby Atmos", "HDR10"])
+        XCTAssertTrue(labels.contains("Dolby Digital+"),
+                      "The codec and spatial capability describe the same stream, got \(labels)")
+        XCTAssertEqual(item.technicalBadges.first(where: { $0.label == "Dolby Digital+" })?.detail, "5.1")
+        XCTAssertEqual(labels, ["4K", "Dolby Vision", "Dolby Digital+", "Dolby Atmos"])
+        XCTAssertEqual(item.technicalBadges[1].detail, "HDR10")
     }
 
     func testMediaLevelFallbackDetectsAtmosFromAudioProfile() async throws {
@@ -1578,7 +1649,8 @@ final class PlexProviderMappingTests: XCTestCase {
         let labels = item.technicalBadges.map(\.label)
         XCTAssertEqual(item.mediaInfo?.dynamicRangeBadges.map(\.label), ["Dolby Vision", "HDR10"])
         XCTAssertTrue(labels.contains("Dolby Atmos"))
-        XCTAssertEqual(labels, ["4K", "Dolby Vision", "Dolby Atmos", "HDR10"])
+        XCTAssertEqual(labels, ["4K", "Dolby Vision", "Dolby Digital+", "Dolby Atmos"])
+        XCTAssertEqual(item.technicalBadges[1].detail, "HDR10")
     }
 
     func testItemFallsBackToMediaLevelFactsWithoutStreams() async throws {
@@ -1611,7 +1683,7 @@ final class PlexProviderMappingTests: XCTestCase {
         // only emits the coarse `videoProfile="main 10"` plus the Media-level
         // `audioProfile`. We can't prove HDR from "main 10" alone, but we also
         // must not lie and say SDR; Atmos must still come through. Result:
-        // "4K · Dolby Atmos" with no range pill at all.
+        // Resolution and audio with no range badge at all.
         let stub = StubHTTPClient()
         stub.stub(pathSuffix: "/library/metadata/95", json: """
         {"MediaContainer":{"Metadata":[
@@ -1631,7 +1703,7 @@ final class PlexProviderMappingTests: XCTestCase {
                       "Atmos must come through media-level audioProfile, got \(labels)")
         XCTAssertFalse(labels.contains("SDR"),
                        "Coarse fallback must not assert SDR with no HDR evidence, got \(labels)")
-        XCTAssertEqual(labels, ["4K", "Dolby Atmos"])
+        XCTAssertEqual(labels, ["4K", "Dolby Digital+", "Dolby Atmos"])
     }
 
     func testItemsPagePassesContainerParamsAndType() async throws {
@@ -1771,7 +1843,7 @@ final class PlexProviderMappingTests: XCTestCase {
         let children = try await provider.children(of: "s1")
         XCTAssertEqual(children.count, 1)
         let labels = children[0].technicalBadges.map(\.label)
-        XCTAssertEqual(labels, ["4K", "Dolby Vision", "Dolby Atmos", "HDR10"],
+        XCTAssertEqual(labels, ["4K", "Dolby Vision", "Dolby Digital+", "Dolby Atmos"],
                        "DoVi/HDR10/Atmos must all survive the /children path; got \(labels)")
     }
 
@@ -2352,9 +2424,71 @@ final class PlexAuthClientTests: XCTestCase {
         PlexAuthClient(deviceProfile: PlexDeviceProfile(clientIdentifier: "dev1"), http: stub, probeHTTP: UnreachableProbe())
     }
 
-    func testDefaultDeviceProfileReportsMinimumSupportedTVOS() {
+    func testDefaultDeviceProfileReportsRuntimeIdentity() {
         let profile = PlexDeviceProfile(clientIdentifier: "device")
-        XCTAssertEqual(profile.headers()["X-Plex-Platform-Version"], "18.0")
+        let headers = profile.headers()
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        let expectedVersion = version.patchVersion == 0
+            ? "\(version.majorVersion).\(version.minorVersion)"
+            : "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
+        XCTAssertEqual(headers["X-Plex-Platform-Version"], expectedVersion)
+        XCTAssertEqual(headers["X-Plex-Version"], AppVersionIdentity.current.marketingVersion)
+        XCTAssertEqual(headers["X-Plex-Client-Identifier"], "device")
+        XCTAssertEqual(headers["X-Plex-Device-Name"], DeviceDisplayName.current(fallback: profile.device))
+        #if os(tvOS)
+        XCTAssertEqual(headers["X-Plex-Platform"], "tvOS")
+        XCTAssertEqual(headers["X-Plex-Device"], "Apple TV")
+        #elseif os(iOS)
+        XCTAssertEqual(headers["X-Plex-Platform"], "iOS")
+        XCTAssertTrue(["iPhone", "iPad"].contains(profile.device))
+        #endif
+    }
+
+    func testDeviceFamiliesDistinguishPhoneTabletAndTV() {
+        XCTAssertEqual(PlexDeviceProfile.deviceFamily(modelIdentifier: "iPhone18,4"), "iPhone")
+        XCTAssertEqual(PlexDeviceProfile.deviceFamily(modelIdentifier: "iPad16,6"), "iPad")
+        XCTAssertEqual(PlexDeviceProfile.deviceFamily(modelIdentifier: "AppleTV14,1"), "Apple TV")
+        XCTAssertEqual(PlexDeviceProfile.deviceFamily(modelIdentifier: "FutureDevice1,1"), "FutureDevice1,1")
+        XCTAssertEqual(PlexDeviceProfile.deviceFamily(modelIdentifier: ""), "Apple device")
+    }
+
+    func testExplicitDeviceIdentityReachesAuthAndTimelineRequests() async throws {
+        let profile = PlexDeviceProfile(
+            product: "Plozz",
+            version: "2026.11.2",
+            device: "iPad",
+            platform: "iOS",
+            platformVersion: "27.1",
+            deviceName: "Living Room iPad",
+            clientIdentifier: "existing-install"
+        )
+        let expected = [
+            "Accept": "application/json",
+            "X-Plex-Product": "Plozz",
+            "X-Plex-Version": "2026.11.2",
+            "X-Plex-Device": "iPad",
+            "X-Plex-Platform": "iOS",
+            "X-Plex-Platform-Version": "27.1",
+            "X-Plex-Device-Name": "Living Room iPad",
+            "X-Plex-Client-Identifier": "existing-install"
+        ]
+        XCTAssertEqual(profile.headers(), expected)
+        let stub = StubHTTPClient()
+        stub.stub(pathSuffix: "/api/v2/pins", json: #"{"id":42,"code":"CODE","authToken":null}"#)
+        _ = try await PlexAuthClient(deviceProfile: profile, http: stub).createPin()
+        XCTAssertEqual(stub.sentHeaders.last, expected)
+
+        stub.stub(pathSuffix: "/:/timeline", json: "{}")
+        let client = PlexClient(
+            baseURL: URL(string: "https://plex.example")!,
+            deviceProfile: profile,
+            token: "TOKEN",
+            http: stub
+        )
+        try await client.reportTimeline(
+            ratingKey: "1", playSessionID: nil, state: "playing", timeMs: 1000, durationMs: 10000
+        )
+        XCTAssertEqual(stub.sentHeaders.last, expected.merging(["X-Plex-Token": "TOKEN"]) { _, new in new })
     }
 
     func testAuthorizationURLCarriesPinAndDeviceIdentity() {

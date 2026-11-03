@@ -43,8 +43,26 @@ final class CloudSyncDataInventoryTests: XCTestCase {
         XCTAssertEqual(inventory.recordCount, 2)
         XCTAssertEqual(inventory.payloadBytes, 27)
         XCTAssertEqual(inventory.pendingUploads, 2)
+        XCTAssertEqual(inventory.pendingUploadBytes, 27)
         XCTAssertEqual(inventory.pendingDeletions, 1)
         XCTAssertEqual(inventory.rows.map(\.category), [.settings])
+    }
+
+    func testUnchangedSnapshotBytesRemainInInventoryButAreNotPendingUploads() {
+        let name = LiveTVPortableRecordKey(
+            profileID: "profile", kind: .snapshot, entityID: "snapshot.0"
+        ).recordName
+        let value = Data(repeating: 7, count: 128 * 1_024)
+        var ledger = SyncLedger()
+        _ = ledger.reconcileLocal(desired: [name: value], now: 1)
+        ledger.applySendSuccess(recordName: name, savedValue: value, savedEditedAt: 1, systemFields: Data())
+        _ = ledger.reconcileLocal(desired: [name: value], now: 2)
+        var inventory = SyncDataInventory()
+        inventory.include(ledger) { _ in .libraryChannelSchedules }
+        XCTAssertEqual(inventory.payloadBytes, Int64(value.count))
+        XCTAssertEqual(inventory.pendingUploadBytes, 0)
+        XCTAssertEqual(inventory.pendingUploads, 0)
+        XCTAssertTrue(ledger.pendingUploads().isEmpty)
     }
 
     func testRestoredInventoryClassifiesEveryChannelWithoutCloudKit() async throws {
@@ -66,7 +84,13 @@ final class CloudSyncDataInventoryTests: XCTestCase {
         let schemas: [CloudSyncSchemaDescriptor] = [.mediaStateV1, .liveTVStateV1, .liveTVSourcesV1, .trackerTokensV1]
         let records = [
             ["watchlist:p:\(id)": Data(repeating: 0, count: 11), "alias:p:\(id)": Data(repeating: 0, count: 12)],
-            ["favorite:p:channel": Data(repeating: 0, count: 13)],
+            [
+                "favorite:p:channel": Data(repeating: 0, count: 13),
+                LiveTVPortableRecordKey(profileID: "p", kind: .library, entityID: id).recordName:
+                    Data(repeating: 0, count: 16),
+                LiveTVPortableRecordKey(profileID: "p", kind: .snapshot, entityID: "\(id).0").recordName:
+                    Data(repeating: 0, count: 17)
+            ],
             ["source:p:playlist": Data(repeating: 0, count: 14)],
             ["trackerToken:opaque": Data(repeating: 0, count: 15)]
         ]
@@ -93,8 +117,11 @@ final class CloudSyncDataInventoryTests: XCTestCase {
         ), channels: channels)
         let inventory = try await service.dataInventory()
         XCTAssertEqual(inventory.rows.map(\.category), SyncDataInventory.Category.allCases)
-        XCTAssertEqual(inventory.recordCount, 11)
-        XCTAssertEqual(inventory.payloadBytes, 98)
-        XCTAssertEqual(inventory.pendingUploads, 11)
+        XCTAssertEqual(inventory.recordCount, 13)
+        XCTAssertEqual(inventory.payloadBytes, 131)
+        XCTAssertEqual(inventory.pendingUploads, 13)
+        XCTAssertEqual(inventory.pendingUploadBytes, 131)
+        XCTAssertEqual(inventory.rows.first { $0.category == .liveTVPreferences }?.payloadBytes, 13)
+        XCTAssertEqual(inventory.rows.first { $0.category == .libraryChannelSchedules }?.payloadBytes, 33)
     }
 }

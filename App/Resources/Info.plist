@@ -30,6 +30,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>plozz</string>
+				<string>$(PRODUCT_BUNDLE_IDENTIFIER).external-player</string>
 			</array>
 		</dict>
 	</array>
@@ -50,6 +51,12 @@
 	<true/>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>nativeplayer</string>
+		<string>infuse</string>
+		<string>vlc-x-callback</string>
+	</array>
 	<key>LastFmAPIKey</key>
 	<string>$(LASTFM_API_KEY)</string>
 	<key>LastFmSharedSecret</key>

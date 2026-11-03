@@ -1,7 +1,6 @@
 import Foundation
 import Observation
 import CoreModels
-import OSLog
 
 // MARK: - Pairing view model (drives both roles)
 //
@@ -43,9 +42,13 @@ public final class SyncSetupPairingModel {
 
     private let service: SyncSetupService
     private let isAuthorized: @MainActor () -> Bool
+    public var canSend: Bool { isAuthorized() }
+    private let diagnostics: DeviceSetupDiagnostics
+    private let confirmationTimeout: Duration
+    @ObservationIgnored private var sendAttempt: DeviceSetupAttempt?
+    @ObservationIgnored private var receiveAttempt: DeviceSetupAttempt?
     private var sendGeneration = 0
     private var sendingLink: (any PairingLink)?
-    private static let logger = Logger(subsystem: "com.plozz.app", category: "sync")
     private let existingAuthorizations: @MainActor () -> [String: LocalAuthorization]
     private let makeHostLink: @MainActor (SyncSetupService.HostPairing) -> any PairingLinkHosting
     private let makeGuestLink: @MainActor (String) -> any PairingLinkConnecting
@@ -61,6 +64,8 @@ public final class SyncSetupPairingModel {
     private var receiveGeneration = 0
     /// Continuation the sender awaits while the user confirms the SAS match.
     private var sasContinuation: CheckedContinuation<Bool, Never>?
+    @ObservationIgnored private var sasTimeoutTask: Task<Void, Never>?
+    @ObservationIgnored private var sasTimedOut = false
     /// When receiving for a SINGLE server (from the per-server "set up with other
     /// device" entry), the account id + name to advertise so the source transfers only
     /// that server and names it in its confirm prompt. nil = whole-device request.
@@ -70,6 +75,8 @@ public final class SyncSetupPairingModel {
     public init(
         service: SyncSetupService,
         isAuthorized: @escaping @MainActor () -> Bool = { true },
+        diagnostics: DeviceSetupDiagnostics = .shared,
+        confirmationTimeout: Duration = .seconds(60),
         existingAuthorizations: @escaping @MainActor () -> [String: LocalAuthorization] = { [:] },
         makeHostLink: @escaping @MainActor (SyncSetupService.HostPairing) -> any PairingLinkHosting = {
             BonjourPairingHost(
@@ -82,6 +89,8 @@ public final class SyncSetupPairingModel {
     ) {
         self.service = service
         self.isAuthorized = isAuthorized
+        self.diagnostics = diagnostics
+        self.confirmationTimeout = confirmationTimeout
         self.existingAuthorizations = existingAuthorizations
         self.makeHostLink = makeHostLink
         self.makeGuestLink = makeGuestLink
@@ -90,24 +99,27 @@ public final class SyncSetupPairingModel {
 
     /// Target role: show a code + QR, advertise, receive + apply the config.
     ///
-    /// Runs as a re-arm loop: the pairing code stays valid for as long as this
-    /// screen is open (a very generous TTL), and if a peer connects but doesn't
-    /// complete the handshake (aborted, dropped, or timed out), we tear that
-    /// attempt down and show a fresh code again instead of dead-ending on a
-    /// spinner. Call `stopReceiving()` when leaving the screen.
+    /// One explicit attempt. Failures remain visible until retry or dismissal;
+    /// a failed listener must not silently spin and replace the displayed code.
     public func startReceiving(
         requestedAccountID: String? = nil,
         requestedServerName: String? = nil,
         sourceInvite: SyncSetupSourceInvite? = nil
     ) async {
+        stopReceiving()
         self.requestedAccountID = requestedAccountID
         self.requestedServerName = requestedServerName
         isReceiving = true
         receiveGeneration += 1
         let generation = receiveGeneration
-        while isReceiving && generation == receiveGeneration && !Task.isCancelled {
+        receiveAttempt = DeviceSetupAttempt(
+            role: .receiver, route: sourceInvite == nil ? .receive : .sourceQR, diagnostics: diagnostics
+        )
+        await withTaskCancellationHandler {
+            guard !Task.isCancelled else { stopReceiving(); return }
             if let sourceInvite, !sourceInvite.isUsable() {
                 isReceiving = false
+                receiveAttempt?.record(.failed, reason: .expired)
                 phase = .failed("This setup code expired. Scan a new code on your Apple TV.")
                 return
             }
@@ -133,6 +145,17 @@ public final class SyncSetupPairingModel {
             }
             let host = makeHostLink(pairing)
             currentHost = host
+            receiveAttempt?.stage = .connection
+            receiveAttempt?.record(.started)
+            defer {
+                host.stop()
+                if currentHost === host { currentHost = nil }
+                if generation == receiveGeneration {
+                    isReceiving = false
+                    hostSASCode = nil
+                    service.withdrawRendezvous()
+                }
+            }
             do {
                 let link: any PairingLink
                 if let sourceInvite {
@@ -145,7 +168,7 @@ public final class SyncSetupPairingModel {
                 } else {
                     link = try await host.awaitConnection()
                 }
-                guard isReceiving, generation == receiveGeneration else { link.close(); host.stop(); return }
+                guard isReceiving, generation == receiveGeneration else { link.close(); return }
                 receivingLink = link
                 defer {
                     link.close()
@@ -157,29 +180,28 @@ public final class SyncSetupPairingModel {
                     existingAuthorizations: existingAuthorizations(),
                     presentSAS: { [weak self] code in
                         Task { @MainActor in
-                            guard let self, self.receiveGeneration == generation else { return }
+                            guard let self, self.isReceiving, self.receiveGeneration == generation else { return }
                             self.hostSASCode = code
                         }
+                    },
+                    progress: { [weak self] stage in
+                        await self?.recordReceiveStage(stage, generation: generation)
                     }
                 )
                 guard isReceiving, generation == receiveGeneration, !Task.isCancelled else { return }
-                link.close()
-                host.stop()
-                if currentHost === host { currentHost = nil }
-                isReceiving = false
-                hostSASCode = nil
-                service.withdrawRendezvous()   // paired — stop advertising the offer
+                receiveAttempt?.record(.succeeded)
                 phase = .applied(received)
                 return
             } catch {
-                host.stop()
-                // Only clear shared state if it still refers to THIS run's host, so
-                // a stale run can't orphan a newer run's live listener.
-                if currentHost === host { currentHost = nil }
                 if !isReceiving || generation != receiveGeneration || Task.isCancelled { return }
-                // A peer connected but didn't finish. Re-arm with a fresh code and
-                // keep waiting rather than showing a permanent spinner or error.
-                try? await Task.sleep(nanoseconds: 250_000_000)
+                receiveAttempt?.fail(error)
+                phase = .failed(sourceInvite == nil ? Self.describe(error)
+                    : "Setup didn’t finish. Show a new setup code on your Apple TV and scan it again.")
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                guard let self, self.receiveGeneration == generation else { return }
+                self.stopReceiving()
             }
         }
     }
@@ -187,6 +209,7 @@ public final class SyncSetupPairingModel {
     /// Stop advertising / awaiting a setup (call when the receive screen closes) so
     /// the device stops appearing in other devices' "set up another device" lists.
     public func stopReceiving() {
+        if isReceiving { receiveAttempt?.record(.cancelled, reason: .cancelled) }
         isReceiving = false
         receiveGeneration += 1
         currentHost?.stop()
@@ -195,6 +218,20 @@ public final class SyncSetupPairingModel {
         receivingLink = nil
         hostSASCode = nil
         service.withdrawRendezvous()   // no longer waiting — remove the iCloud offer
+    }
+
+    private func recordReceiveStage(_ stage: DeviceSetupDiagnostic.Stage, generation: Int) {
+        guard isReceiving, receiveGeneration == generation else { return }
+        receiveAttempt?.stage = stage
+        receiveAttempt?.record(.started)
+    }
+
+    public func recordApplication(_ outcome: SyncSetupService.ApplyOutcome) {
+        receiveAttempt?.stage = .persistence
+        receiveAttempt?.record(
+            outcome.failedAccountIDs.isEmpty ? .succeeded : .failed,
+            reason: outcome.failedAccountIDs.isEmpty ? .none : .storage
+        )
     }
 
     // MARK: Source-side auto-discovery (tap-to-pair, no code)
@@ -222,6 +259,7 @@ public final class SyncSetupPairingModel {
     /// offer requested a single server, only that account is transferred.
     public func adopt(_ rendezvous: SyncPairingRendezvous) async {
         guard rendezvous.isUsable() else {
+            failValidation(route: .automatic, reason: .expired)
             phase = .failed("The setup code expired. Try again.")
             return
         }
@@ -229,6 +267,7 @@ public final class SyncSetupPairingModel {
         await send(
             serviceName: rendezvous.serviceName,
             expectedPublicKey: rendezvous.publicKeyData,
+            route: .automatic,
             restrictToAccountIDs: restrict
         )
     }
@@ -279,11 +318,12 @@ public final class SyncSetupPairingModel {
     public func sendToSourceReceiver(_ device: DiscoveredPairingDevice) async {
         guard let invite = sourceInvite, invite.isUsable(),
               device.sourceRequestID == invite.requestID else {
+            failValidation(route: .sourceQR, reason: .expired)
             phase = .failed("This setup code expired. Scan a new code on your Apple TV.")
             return
         }
         stopDiscovery()
-        await send(serviceName: device.serviceName, expectedPublicKey: nil)
+        await send(serviceName: device.serviceName, expectedPublicKey: nil, route: .sourceQR)
     }
 
     /// Pair with a discovered device. If that device published a rendezvous to THIS
@@ -293,7 +333,7 @@ public final class SyncSetupPairingModel {
     public func pair(with device: DiscoveredPairingDevice) async {
         stopDiscovery()
         let key = service.rendezvousPublicKey(forServiceName: device.serviceName)
-        await send(serviceName: device.serviceName, expectedPublicKey: key)
+        await send(serviceName: device.serviceName, expectedPublicKey: key, route: .nearby)
     }
 
     /// Source role: send using a scanned QR invite string. The in-app camera scan
@@ -301,10 +341,11 @@ public final class SyncSetupPairingModel {
     /// numeric SAS check is skipped for a zero-friction transfer.
     public func send(inviteString: String) async {
         guard let invite = SyncPairingInvite.decode(inviteString) else {
+            failValidation(route: .qr, reason: .invalidInvite)
             phase = .failed("That doesn't look like a Plozz setup code.")
             return
         }
-        await send(serviceName: invite.serviceName, expectedPublicKey: invite.publicKeyData)
+        await send(serviceName: invite.serviceName, expectedPublicKey: invite.publicKeyData, route: .qr)
     }
 
     /// Source role: send from a universal-link invite (`https://plozz.app/pair#…`).
@@ -313,10 +354,11 @@ public final class SyncSetupPairingModel {
     /// but force the numeric SAS confirmation, exactly like a typed code.
     public func send(deepLink invite: String) async {
         guard let decoded = SyncPairingInvite.decode(invite) else {
+            failValidation(route: .link, reason: .invalidInvite)
             phase = .failed("That doesn't look like a Plozz setup link.")
             return
         }
-        await send(serviceName: decoded.serviceName, expectedPublicKey: nil)
+        await send(serviceName: decoded.serviceName, expectedPublicKey: nil, route: .link)
     }
 
     /// Source role: send using a typed short code. If a same-Apple-ID device published
@@ -326,50 +368,79 @@ public final class SyncSetupPairingModel {
     public func send(code: String) async {
         let normalized = SyncPairingCode.normalize(code)
         guard normalized.count >= 4 else {
+            failValidation(route: .code, reason: .invalidInvite)
             phase = .failed("Enter the code shown on your other device.")
             return
         }
         let key = service.rendezvousPublicKey(forServiceName: normalized)
-        await send(serviceName: normalized, expectedPublicKey: key)
+        await send(serviceName: normalized, expectedPublicKey: key, route: .code)
     }
 
     private func send(
         serviceName: String,
         expectedPublicKey: Data?,
+        route: DeviceSetupDiagnostic.Route,
         restrictToAccountIDs: Set<String>? = nil
     ) async {
         stopDiscovery()
         cancelSending()
         let generation = sendGeneration
+        sendAttempt = DeviceSetupAttempt(role: .sender, route: route, diagnostics: diagnostics)
         phase = .connecting
-        do {
-            try validateSend(generation: generation)
-            let guest = makeGuestLink(serviceName)
-            let link = try await guest.connect()
-            defer { link.close() }   // signal the peer promptly on success OR abort
-            try validateSend(generation: generation)
-            sendingLink = link
-            defer { if generation == sendGeneration { sendingLink = nil } }
-            let authorizedLink = AuthorizedSetupLink(base: link) { [weak self] in
-                guard let self else { throw CancellationError() }
-                try await self.validateSend(generation: generation)
-            }
-            phase = .sending
-            try await service.sendSetup(
-                over: authorizedLink,
-                expectedPublicKey: expectedPublicKey,
-                restrictToAccountIDs: restrictToAccountIDs,
-                confirmSAS: { [weak self] code in
-                    await self?.awaitSASConfirmation(code: code) ?? false
+        await withTaskCancellationHandler {
+            do {
+                try validateSend(generation: generation)
+                sendAttempt?.stage = .connection
+                sendAttempt?.record(.started)
+                let guest = makeGuestLink(serviceName)
+                let link = try await guest.connect()
+                defer { link.close() }   // signal the peer promptly on success OR abort
+                try validateSend(generation: generation)
+                sendingLink = link
+                defer { if generation == sendGeneration { sendingLink = nil } }
+                let authorizedLink = AuthorizedSetupLink(base: link) { [weak self] in
+                    guard let self else { throw CancellationError() }
+                    try await self.validateSend(generation: generation)
                 }
-            )
-            try validateSend(generation: generation)
-            phase = .sent
-        } catch {
-            guard generation == sendGeneration else { return }
-            Self.logger.error("Device setup did not finish")
-            phase = .failed(Self.describe(error))
+                phase = .sending
+                try await service.sendSetup(
+                    over: authorizedLink,
+                    expectedPublicKey: expectedPublicKey,
+                    restrictToAccountIDs: restrictToAccountIDs,
+                    confirmSAS: { [weak self] code in
+                        await self?.awaitSASConfirmation(code: code, generation: generation) ?? false
+                    },
+                    progress: { [weak self] stage in
+                        await self?.recordSendStage(stage, generation: generation)
+                    }
+                )
+                try validateSend(generation: generation)
+                sendAttempt?.record(.succeeded)
+                phase = .sent
+            } catch {
+                guard generation == sendGeneration else { return }
+                let failure: Error = sasTimedOut ? BonjourPairingError.timedOut : error
+                sendAttempt?.fail(failure)
+                phase = .failed(Self.describe(failure))
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                guard let self, self.sendGeneration == generation else { return }
+                self.cancelSending()
+            }
         }
+    }
+
+    private func failValidation(route: DeviceSetupDiagnostic.Route, reason: DeviceSetupDiagnostic.Reason) {
+        cancelSending()
+        sendAttempt = DeviceSetupAttempt(role: .sender, route: route, diagnostics: diagnostics)
+        sendAttempt?.record(.failed, reason: reason)
+    }
+
+    private func recordSendStage(_ stage: DeviceSetupDiagnostic.Stage, generation: Int) {
+        guard sendGeneration == generation else { return }
+        sendAttempt?.stage = stage
+        sendAttempt?.record(.started)
     }
 
     private func validateSend(generation: Int) throws {
@@ -379,11 +450,17 @@ public final class SyncSetupPairingModel {
     }
 
     public func cancelSending() {
+        if phase == .connecting || phase == .sending || sasContinuation != nil {
+            sendAttempt?.record(.cancelled, reason: .cancelled)
+        }
         sendGeneration += 1
         sendingLink?.close()
         sendingLink = nil
         sasContinuation?.resume(returning: false)
         sasContinuation = nil
+        sasTimeoutTask?.cancel()
+        sasTimeoutTask = nil
+        sasTimedOut = false
     }
 
     public func authorizationDidChange() {
@@ -391,18 +468,29 @@ public final class SyncSetupPairingModel {
         guard !isAuthorized() else { return }
         stopDiscovery()
         cancelSending()
-        Self.logger.warning("Device setup stopped because its profile authorization changed")
+        sendAttempt?.record(.failed, reason: .authorizationChanged)
         phase = .failed("Setup didn't complete. Please try again.")
     }
 
     /// Transition to the SAS-confirmation phase and suspend until the user taps
     /// "Matches" / "Doesn't match" (`confirmSASMatch`). Called from the send task
     /// on the non-QR path only.
-    private func awaitSASConfirmation(code: String) async -> Bool {
-        let generation = sendGeneration
+    private func awaitSASConfirmation(code: String, generation: Int) async -> Bool {
+        guard generation == sendGeneration, !Task.isCancelled, isAuthorized() else { return false }
         // Resolve any prior dangling continuation defensively.
         sasContinuation?.resume(returning: false)
         sasContinuation = nil
+        sasTimedOut = false
+        sasTimeoutTask?.cancel()
+        sasTimeoutTask = Task { [weak self, confirmationTimeout] in
+            do { try await Task.sleep(for: confirmationTimeout) } catch { return }
+            guard let self, self.sendGeneration == generation, self.sasContinuation != nil else { return }
+            self.sasTimedOut = true
+            self.confirmSASMatch(false)
+        }
+        defer {
+            if generation == sendGeneration { sasTimeoutTask?.cancel(); sasTimeoutTask = nil }
+        }
         phase = .confirmingSAS(code: code)
         let confirmed = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
             sasContinuation = cont
@@ -422,10 +510,6 @@ public final class SyncSetupPairingModel {
     public func reset() {
         cancelSending()
         phase = .idle
-    }
-
-    private enum SetupAuthorizationError: Error {
-        case changed
     }
 
     private struct AuthorizedSetupLink: PairingLink {
@@ -451,8 +535,10 @@ public final class SyncSetupPairingModel {
         case SyncPairingError.notConfirmed: return "Setup was cancelled — the codes didn't match."
         case SyncPairingError.commitmentMismatch, SyncPairingError.decryptionFailed:
             return "Couldn't verify the other device. Try again."
-        case BonjourPairingError.connectionFailed, BonjourPairingError.timedOut:
+        case BonjourPairingError.listenerFailed, BonjourPairingError.connectionFailed:
             return "Couldn't reach the other device. Make sure both are on the same Wi-Fi."
+        case BonjourPairingError.timedOut:
+            return "Setup timed out. Keep Plozz open on both devices and try again."
         default: return "Setup didn't complete. Please try again."
         }
     }

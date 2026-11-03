@@ -66,6 +66,8 @@ targets:
     deploymentTarget: "18.0"
     sources:
       - path: App/Plozz
+      - path: App/Privacy/tvOS/PrivacyInfo.xcprivacy
+        buildPhase: resources
       - path: App/Resources/Assets.xcassets
       - path: App/Resources/CommunityAssets.xcassets
       - path: App/Resources/Fonts
@@ -84,8 +86,6 @@ targets:
       - path: App/Resources/LibTrueHDNotices.txt
       - path: App/Resources/LibTrueHDLicense.txt
       - path: App/Resources/LibTrueHDApacheLicense.txt
-      - path: App/Resources/LibDTSXNotices.txt
-      - path: App/Resources/LibDTSXLicense.txt
     info:
       path: App/Resources/Info.plist
       properties:
@@ -251,6 +251,11 @@ targets:
           - CFBundleURLName: com.thatcube.Plozz.deeplink
             CFBundleURLSchemes:
               - ${PLOZZ_URL_SCHEME}
+              - "$(PRODUCT_BUNDLE_IDENTIFIER).external-player"
+        LSApplicationQueriesSchemes:
+          - nativeplayer
+          - infuse
+          - vlc-x-callback
     settings:
       base:
         # ${PLOZZ_ID_SUFFIX} is EMPTY for a normal (canonical) build → the real
@@ -303,10 +308,13 @@ targets:
     deploymentTarget: "18.0"
     sources:
       - path: TopShelf/ContentProvider.swift
+      - path: TopShelf/PrivacyInfo.xcprivacy
+        buildPhase: resources
       # The snapshot model + store are compiled into the extension directly so
       # it stays free of CoreModels and the rest of the app's stack.
       - path: Sources/TopShelfKit/TopShelfSnapshot.swift
       - path: Sources/TopShelfKit/TopShelfStore.swift
+      - path: Sources/TopShelfKit/TopShelfContentBuilder.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.thatcube.Plozz${PLOZZ_ID_SUFFIX}.TopShelf
@@ -329,6 +337,8 @@ targets:
     deploymentTarget: "18.0"
     sources:
       - path: App/PlozziOS
+      - path: App/Privacy/iOS/PrivacyInfo.xcprivacy
+        buildPhase: resources
       - path: App/Resources/CommunityAssets.xcassets
       - path: App/Resources/Fonts
       # Same shared catalog as the tvOS target — see the note there.
@@ -338,8 +348,6 @@ targets:
       - path: App/Resources/LibTrueHDNotices.txt
       - path: App/Resources/LibTrueHDLicense.txt
       - path: App/Resources/LibTrueHDApacheLicense.txt
-      - path: App/Resources/LibDTSXNotices.txt
-      - path: App/Resources/LibDTSXLicense.txt
     info:
       path: App/PlozziOS/Info.plist
       properties:
@@ -426,6 +434,10 @@ targets:
           - CFBundleURLName: com.thatcube.Plozz.deeplink
             CFBundleURLSchemes:
               - ${PLOZZ_URL_SCHEME}
+              - "$(PRODUCT_BUNDLE_IDENTIFIER).external-player"
+        LSApplicationQueriesSchemes:
+          - infuse
+          - vlc-x-callback
         TraktClientID: "$(TRAKT_CLIENT_ID)"
         WetrakrClientID: "$(WETRAKR_CLIENT_ID)"
         SimklClientID: "$(SIMKL_CLIENT_ID)"
@@ -465,8 +477,10 @@ targets:
       - path: Tests/FocusHost
       - path: Tests/PlaybackPresentationSupport/PlaybackFailureFixture.swift
       - path: Tests/LiveTVPresentationSupport/IPTVOrganizationFixture.swift
+      - path: Tests/LiveTVPresentationSupport/LiveTVCategorySearchFixture.swift
       - path: Tests/AuthPresentationSupport/IPTVSetupFixture.swift
       - path: Tests/AuthPresentationSupport/ServerAddressNavigationFixture.swift
+      - path: Tests/AuthPresentationSupport/PlexHomeOnboardingFixture.swift
       - path: Tests/FeatureLiveTVRemoteTests/NavigationRailFixture.swift
       - path: App/Resources/Assets.xcassets
       - path: App/Resources/CommunityAssets.xcassets
@@ -490,14 +504,23 @@ targets:
     platform: iOS
     sources:
       - path: Tests/iOSPresentationHost
+      - path: Tests/AuthPresentationSupport/MobileServerOnboardingFixture.swift
+      - path: Tests/AuthPresentationSupport/OnboardingPreviewHTTP.swift
+      - path: Tests/FeatureLiveTVRemoteTests/SourceOnboardingFixture.swift
       - path: Tests/PlaybackPresentationSupport/PlaybackFailureFixture.swift
       - path: Tests/LiveTVPresentationSupport/IPTVOrganizationFixture.swift
+      - path: Tests/LiveTVPresentationSupport/LiveTVCategorySearchFixture.swift
       - path: Tests/ProviderIPTVTests/IPTVTestHTTPServer.swift
       - path: Tests/SubtitlePresentationSupport/Fixtures/four-three.mp4
+        buildPhase: resources
+      - path: Tests/SubtitlePresentationSupport/Fixtures/live-continuity.mp4
+        buildPhase: resources
+      - path: Tests/SubtitlePresentationSupport/Fixtures/live-continuity-dim.mp4
         buildPhase: resources
       - path: Tests/AuthPresentationSupport/IPTVSetupFixture.swift
       - path: App/Resources/Localizable.xcstrings
       - path: Tests/AuthPresentationSupport/ServerAddressNavigationFixture.swift
+      - path: Tests/AuthPresentationSupport/PlexHomeOnboardingFixture.swift
       - path: App/PlozziOS/Assets.xcassets
       - path: App/Resources/CommunityAssets.xcassets
       - path: App/Resources/ReleaseNotes.json
@@ -539,7 +562,18 @@ targets:
     platform: iOS
     sources:
       - path: Tests/iOSPresentationTests
+      - path: Tests/EnginePlozzigenTests/SpatialAudioLayoutPreferenceTests.swift
+      - path: Tests/FeaturePlaybackTests/NativePlaybackLifecycleTests.swift
+      - path: Tests/FeatureLiveTVCoreTests/LiveTVPlaybackCoordinatorTests.swift
+      - path: Tests/FeatureLiveTVTests/LiveTVGuideRowLayoutTests.swift
+      - path: Tests/CoreModelsTests/SettingsHydrationTests.swift
+      - path: Tests/CoreModelsTests/ResumeRewindSettingsTests.swift
+      - path: Tests/CoreModelsTests/SubtitleStylePreferencesTests.swift
+      - path: Tests/CoreModelsTests/SettingsSearchTests.swift
+      - path: Tests/CoreModelsTests/ProfileLockPresentationTests.swift
+      - path: Tests/FeaturePlaybackTests/SubtitleOverlayGeometryTests.swift
       - path: Tests/FocusIntegrationTests/LiveTVSourcesRuntimeHostedTests.swift
+      - path: Tests/FocusIntegrationTests/DiagnosticRecordingStatusHostedTests.swift
       - path: Tests/FocusIntegrationTests/PINRequirementPresentationTests.swift
       - path: Tests/HomePresentationSupport
       - path: Tests/TestSupportPerformance
@@ -558,6 +592,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.thatcube.Plozz.PresentationTests
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: YES
+        # Spatial layout tests call the dynamic engine directly, not only through the app umbrella.
+        OTHER_LDFLAGS: "$(inherited) -framework AetherEngine"
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/PlozziOSPresentationHost.app/PlozziOSPresentationHost"
         BUNDLE_LOADER: "$(TEST_HOST)"
     dependencies:
@@ -572,7 +608,9 @@ targets:
       - path: Tests/iOSInteractionTests
       - path: Tests/PlaybackPresentationSupport/PlaybackFailureInteractionTests.swift
       - path: Tests/LiveTVPresentationSupport/IPTVOrganizationInteractionTests.swift
+      - path: Tests/LiveTVPresentationSupport/LiveTVCategorySearchInteractionTests.swift
       - path: Tests/HomeRemoteTests/ServerAddressNavigationInteractionTests.swift
+      - path: Tests/HomeRemoteTests/PlexHomeOnboardingInteractionTests.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.thatcube.Plozz.InteractionTests
@@ -589,6 +627,7 @@ targets:
       - path: Tests/HomeRemoteTests
       - path: Tests/PlaybackPresentationSupport/PlaybackFailureInteractionTests.swift
       - path: Tests/LiveTVPresentationSupport/IPTVOrganizationInteractionTests.swift
+      - path: Tests/LiveTVPresentationSupport/LiveTVCategorySearchInteractionTests.swift
       - path: Sources/FeatureHomeCore/LibraryTraversalEvidence.swift
     settings:
       base:
@@ -600,6 +639,7 @@ targets:
     platform: tvOS
     sources:
       - path: Tests/FocusIntegrationTests
+      - path: Tests/EnginePlozzigenTests/SpatialAudioLayoutPreferenceTests.swift
       - path: Tests/HomePresentationSupport
       - path: Tests/TestSupportPerformance
       - path: Tests/PerformancePresentationSupport
@@ -617,6 +657,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.thatcube.Plozz.FocusTests
         GENERATE_INFOPLIST_FILE: YES
+        OTHER_LDFLAGS: "$(inherited) -framework AetherEngine"
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/PlozzFocusHost.app/FocusHost"
         BUNDLE_LOADER: "$(TEST_HOST)"
     dependencies:

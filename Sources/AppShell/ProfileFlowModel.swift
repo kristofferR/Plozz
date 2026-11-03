@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import AppRuntime
 import CoreModels
+import CoreNetworking
 import CoreUI
 import FeatureMusic
 import FeatureProfiles
@@ -30,10 +31,30 @@ public final class ProfileFlowModel {
     /// When `true`, `RootView` shows the profile picker instead of the signed-in
     /// UI (shown at launch with >1 profile, and from "Switch Profile").
     public private(set) var isChoosingProfile = false
+    /// Presentation ownership only; never authorizes profile or server access.
+    public private(set) var profilePickerSelectionID: String?
+    public var profilePickerOwnsAuthorization: Bool { profilePickerSelectionID != nil }
+    public var isPresentingProfileSelection: Bool {
+        isChoosingProfile || (profilePickerOwnsAuthorization && (
+            pendingLockedProfile != nil || pendingParentalSwitch != nil
+                || plexHomeUsers.pendingPlexPINRequest != nil
+        ))
+    }
     /// Whether the profile picker may be dismissed without choosing (false at the
     /// mandatory launch picker; true when opened from Settings behind an active
     /// profile).
     public private(set) var isProfileSelectionCancelable = false
+    public private(set) var foregroundLockedProfileID: String?
+    public var isForegroundLocked: Bool { foregroundLockedProfileID != nil }
+    public var foregroundReturnDelay: TimeInterval? {
+        ProfileReturnPolicy.delay(
+            for: profilesModel.profiles,
+            automaticallySignIn: plexHomeUsers.automaticallySignIn
+        )
+    }
+    /// One-shot Settings entry, scoped to the profile whose admission authorized it.
+    public private(set) var pendingSettingsProfileID: String?
+    @ObservationIgnored private var settingsSelectionProfileID: String?
     /// True while the one-time Theme + Navigation flow for a just-created profile
     /// is showing.
     public private(set) var isPickingAppearanceForNewProfile = false
@@ -104,6 +125,7 @@ public final class ProfileFlowModel {
     /// `switchProfile(to:)` gate with the picker sitting behind it. It also
     /// matches what people expect from "who's watching?" elsewhere.
     public func prepareLaunchPicker() {
+        clearSettingsEntry()
         let restored = plexHomeUsers.restoreAutomaticSignInAtLaunch()
         isChoosingProfile = !restored && (
             activeProfileAwaitsUnlock || profilesModel.profiles.count > 1
@@ -120,7 +142,9 @@ public final class ProfileFlowModel {
 
     /// Force-dismisses the picker (used by the debug first-run reset).
     public func dismissPicker() {
+        clearSettingsEntry()
         isChoosingProfile = false
+        profilePickerSelectionID = nil
     }
 
     /// Clears new-profile appearance setup once its cover is dismissed.
@@ -141,14 +165,111 @@ public final class ProfileFlowModel {
 
     /// Opens the profile picker (from Settings → "Switch Profile").
     public func requestProfileSelection() {
-        isProfileSelectionCancelable = true
+        clearSettingsEntry()
+        profilePickerSelectionID = nil
+        isProfileSelectionCancelable = !isForegroundLocked
         isChoosingProfile = true
     }
 
     /// Dismisses the profile picker without changing the active profile (only
     /// allowed when a profile is already active behind it).
     public func cancelProfileSelection() {
+        guard isProfileSelectionCancelable, !isForegroundLocked else { return }
+        clearSettingsEntry()
         isChoosingProfile = false
+        profilePickerSelectionID = nil
+    }
+
+    public func selectProfileFromPicker(to id: String) {
+        cancelProfileLockPrompt()
+        cancelParentalSwitch()
+        switchProfile(to: id)
+        profilePickerSelectionID = id
+    }
+
+    public func cancelPickerAuthorization() {
+        if isForegroundLocked {
+            cancelForegroundProfileSelection()
+        } else if pendingParentalSwitch != nil {
+            cancelParentalSwitch()
+        } else if pendingLockedProfile != nil {
+            cancelProfileLockPrompt()
+        } else {
+            plexHomeUsers.cancelPlexPIN()
+        }
+        // A cancelled Plex activation can leave a guarded fallback pending.
+        // Keep selection above that gate until the next explicit choice.
+        isChoosingProfile = true
+    }
+
+    public func finishProfilePickerPresentation() {
+        profilePickerSelectionID = nil
+    }
+
+    /// Called only by the tvOS browsing lifecycle, never by an inactive-only interruption.
+    public func lockForForegroundIfNeeded() {
+        if isForegroundLocked {
+            cancelForegroundProfileSelection()
+            return
+        }
+        guard !isChoosingProfile || isProfileSelectionCancelable,
+              pendingSetupProfile == nil, !hasResumableSetup,
+              foregroundReturnDelay != nil else { return }
+        foregroundLockedProfileID = profilesModel.activeProfileID
+        cancelForegroundProfileSelection()
+    }
+
+    public var canFinishForegroundUnlock: Bool {
+        isForegroundLocked && !isChoosingProfile
+            && pendingLockedProfile == nil && pendingParentalSwitch == nil
+            && plexHomeUsers.pendingPlexPINRequest == nil
+            && !activeProfileAwaitsUnlock
+    }
+
+    public func finishForegroundUnlockIfReady() {
+        guard canFinishForegroundUnlock else { return }
+        foregroundLockedProfileID = nil
+    }
+
+    public func cancelForegroundProfileSelection() {
+        guard isForegroundLocked else { return }
+        profilePickerSelectionID = nil
+        profilesModel.forgetProfileUnlock(profilesModel.activeProfileID)
+        cancelProfileLockPrompt()
+        cancelParentalSwitch()
+        plexHomeUsers.suspendProfileAccessForForeground()
+        isChoosingProfile = true
+        isProfileSelectionCancelable = false
+    }
+
+    public func requestSettingsFromProfileSelection() {
+        guard isChoosingProfile else {
+            PlozzLog.app.error("Ignoring Settings entry outside the profile picker")
+            return
+        }
+        clearSettingsEntry()
+        profilePickerSelectionID = nil
+        let id = profilesModel.activeProfileID
+        if isProfileSelectionCancelable, !isForegroundLocked, !activeProfileAwaitsUnlock, parentalFallThrough == nil {
+            pendingSettingsProfileID = id
+            isChoosingProfile = false
+        } else {
+            settingsSelectionProfileID = id
+            requestProfileSwitch(to: id)
+        }
+    }
+
+    public func consumeSettingsEntry(for profileID: String) {
+        guard pendingSettingsProfileID == profileID, profilesModel.activeProfileID == profileID else {
+            PlozzLog.app.error("Ignoring Settings entry for a superseded profile")
+            return
+        }
+        pendingSettingsProfileID = nil
+    }
+
+    private func clearSettingsEntry() {
+        settingsSelectionProfileID = nil
+        pendingSettingsProfileID = nil
     }
 
     /// A profile waiting on its PIN before it can be opened.
@@ -156,7 +277,10 @@ public final class ProfileFlowModel {
     /// Set when `switchProfile(to:)` is asked for a locked profile and cleared on
     /// success or cancel. `RootView` presents the PIN screen off this, exactly
     /// like the Plex Home PIN prompt it sits in front of.
-    public private(set) var pendingLockedProfile: Profile?
+    public private(set) var pendingLockedProfile: Profile? {
+        didSet { profileLockRequestID = UUID() }
+    }
+    @ObservationIgnored private var profileLockRequestID = UUID()
     /// Message from the last failed unlock attempt, or `nil`.
     public private(set) var profileLockError: LocalizedStringResource?
 
@@ -191,13 +315,6 @@ public final class ProfileFlowModel {
         profilesModel.managementRequiresParentalPIN || parentalFallThrough != nil
     }
 
-    /// Profiles unlocked during this app run, so a person who has already proved
-    /// they know the PIN isn't asked again every time they hop between profiles.
-    ///
-    /// Deliberately in-memory: it dies with the process, so a cold launch always
-    /// re-asks. Persisting it would quietly turn "locked" into "locked once".
-    @ObservationIgnored private var unlockedProfileIDs: Set<String> = []
-
     /// Switches to `id`, re-scoping settings + the active account set, then
     /// dismisses the picker. Fast: a few `UserDefaults` reads plus an in-memory
     /// account recompute; content reloads async via the rebuilt view subtree.
@@ -212,7 +329,22 @@ public final class ProfileFlowModel {
     /// Nothing is switched until both are satisfied: no settings rebuild, no
     /// account reload, and above all no Plex identity apply for a profile the
     /// person hasn't proved they can open.
+    @ObservationIgnored
+    private var plexOnboardingSelection: (id: String, onActivated: @MainActor () -> Void)?
+
+    public func switchProfileForPlexOnboarding(to id: String, onActivated: @escaping @MainActor () -> Void) {
+        clearSettingsEntry()
+        plexOnboardingSelection = (id, onActivated)
+        requestProfileSwitch(to: id)
+    }
+
     public func switchProfile(to id: String) {
+        clearSettingsEntry()
+        plexOnboardingSelection = nil
+        requestProfileSwitch(to: id)
+    }
+
+    private func requestProfileSwitch(to id: String) {
         guard let target = profilesModel.profiles.first(where: { $0.id == id }) else {
             performSwitch(to: id, reason: "switchProfile-unknown")
             return
@@ -233,7 +365,8 @@ public final class ProfileFlowModel {
 
     /// The switch past the parental gate, still subject to the target's own lock.
     private func continueSwitch(to target: Profile) {
-        if target.isLocked, !unlockedProfileIDs.contains(target.id) {
+        if target.isLocked,
+           target.id != profilesModel.activeProfileID || !profilesModel.isProfileUnlocked(target.id) {
             profileLockError = nil
             pendingLockedProfile = target
             return
@@ -244,7 +377,7 @@ public final class ProfileFlowModel {
     /// Checks `pin` against the household's Parental PIN and, on a match, lets
     /// the held switch continue.
     ///
-    /// Deliberately **not** remembered for the run, unlike `unlockedProfileIDs`.
+    /// Deliberately **not** remembered across switches.
     /// Remembering it would mean that once a grown-up stepped out of the child's
     /// profile, the child could too until the next cold launch — which is the
     /// whole thing this gate exists to prevent. Leaving a Kids Profile is rare
@@ -266,6 +399,8 @@ public final class ProfileFlowModel {
 
     /// Abandons a held switch, leaving the child where they were.
     public func cancelParentalSwitch() {
+        clearSettingsEntry()
+        plexOnboardingSelection = nil
         pendingParentalSwitch = nil
         parentalPINError = nil
     }
@@ -284,7 +419,18 @@ public final class ProfileFlowModel {
     ///   during profile setup sends every later setup step to the wrong
     ///   profile's settings — a reported bug that has not yet been reproduced on
     ///   demand. The emit is a no-op outside debug builds.
-    private func performSwitch(to id: String, reason: String) {
+    private func performSwitch(to id: String, reason: String, unlocking lock: ProfileLock? = nil) {
+        let opensSettings = settingsSelectionProfileID == id
+        clearSettingsEntry()
+        let onboarding = plexOnboardingSelection?.id == id ? plexOnboardingSelection : nil
+        plexOnboardingSelection = nil
+        if foregroundLockedProfileID == id, profilesModel.activeProfileID == id, onboarding == nil {
+            if let lock, profilesModel.activeProfile.lock == lock { profilesModel.noteProfileUnlocked(id) }
+            plexHomeUsers.resumeProfileAccessAfterForegroundSelection()
+            isChoosingProfile = false
+            if opensSettings { pendingSettingsProfileID = id }
+            return
+        }
         let before = profilesModel.activeProfileID
         profilesModel.select(id)
         HandoffDiagnostics.emit(
@@ -297,6 +443,17 @@ public final class ProfileFlowModel {
         // picker on a switch that never happened would strand the child in the
         // grown-up profile the gate exists to withhold.
         guard profilesModel.activeProfileID == id else { return }
+        if onboarding != nil {
+            if pendingSetupProfile != nil {
+                pendingSetupProfile = profilesModel.activeProfile.needsSetup ? profilesModel.activeProfile : nil
+            }
+            if profilesModel.activeProfile.needsSetup { appearanceSetupStore.markPending(profileID: id) }
+            profileAwaitingAppearancePick = nil
+            profileAwaitingLockOffer = nil
+            pendingLockOfferProfile = nil
+            isPickingAppearanceForNewProfile = false
+        }
+        if let lock, profilesModel.activeProfile.lock == lock { profilesModel.noteProfileUnlocked(id) }
         plexHomeUsers.beginExplicitProfileActivation()
         audioController.stop()
         // Past both gates, so the hold has done its job — released here rather
@@ -306,12 +463,15 @@ public final class ProfileFlowModel {
         rebuildSettingsModels()
         accountsProviders.reloadAccounts()
         isChoosingProfile = false
+        if opensSettings { pendingSettingsProfileID = id }
         // Verify current Plex protection before opening the selected identity.
-        plexHomeUsers.ensurePlexIdentityForActiveProfile()
+        if onboarding == nil || lock?.matchesPlexPIN == true {
+            plexHomeUsers.ensurePlexIdentityForActiveProfile()
+        }
         // Switching INTO a profile that never finished setup — abandoned here, or
         // created on another device and synced across — asks the question again
         // rather than leaving it permanently unable to import.
-        resumeSetupIfNeeded()
+        if onboarding == nil { resumeSetupIfNeeded() }
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.updateTrackersForActiveProfile()
@@ -320,6 +480,7 @@ public final class ProfileFlowModel {
             guard self.profilesModel.activeProfileID == id else { return }
             self.activateUniversalWatchlist()
         }
+        onboarding?.onActivated()
     }
 
     /// Checks `pin` against the pending profile's lock and, on a match, completes
@@ -327,13 +488,21 @@ public final class ProfileFlowModel {
     ///
     /// - Returns: `true` when the PIN was accepted.
     @discardableResult
-    public func submitProfileLockPIN(_ pin: String) -> Bool {
+    public func submitProfileLockPIN(_ pin: String) async -> Bool {
         guard let profile = pendingLockedProfile, let lock = profile.lock else { return false }
-        guard lock.matches(pin: pin) else {
+        let requestID = profileLockRequestID
+        let selection = profilesModel.selectionGeneration
+        let matches = await lock.matchesOffMainActor(pin: pin)
+        guard !Task.isCancelled, profileLockRequestID == requestID,
+              profilesModel.selectionGeneration == selection else { return false }
+        guard profilesModel.profiles.first(where: { $0.id == profile.id })?.lock == lock else {
+            profileLockError = ProfileLockCopy.profileChanged
+            return false
+        }
+        guard matches else {
             profileLockError = ProfileLockCopy.incorrectPIN
             return false
         }
-        unlockedProfileIDs.insert(profile.id)
         pendingLockedProfile = nil
         profileLockError = nil
 
@@ -345,41 +514,40 @@ public final class ProfileFlowModel {
         if lock.matchesPlexPIN {
             plexHomeUsers.prefillPlexPIN(pin, forProfile: profile.id)
         }
-        performSwitch(to: profile.id, reason: "lockPIN")
+        performSwitch(to: profile.id, reason: "lockPIN", unlocking: lock)
         return true
     }
 
     /// Abandons a pending unlock, leaving the active profile untouched.
     public func cancelProfileLockPrompt() {
+        clearSettingsEntry()
+        plexOnboardingSelection = nil
         pendingLockedProfile = nil
         profileLockError = nil
+        if isForegroundLocked { isChoosingProfile = true }
     }
 
-    /// Whether `id` has already been proved this run, so a second gate (editing
-    /// it from the picker) doesn't ask for the same PIN again.
-    /// Whether the ACTIVE profile is locked and unproven this run.
+    /// Whether the active profile is locked and unproven for this activation.
     /// See `UniversalWatchlistHost.activeProfileAwaitsUnlock`.
     public var activeProfileAwaitsUnlock: Bool {
         let active = profilesModel.activeProfile
-        return active.isLocked && !unlockedProfileIDs.contains(active.id)
+        return active.isLocked && !profilesModel.isProfileUnlocked(active.id)
             && !plexHomeUsers.isAutomaticallySignedIn(active)
     }
 
     public func isUnlockedThisRun(_ id: String) -> Bool {
-        unlockedProfileIDs.contains(id)
+        profilesModel.isProfileUnlocked(id)
     }
 
-    /// Records that `id`'s PIN was proved outside `submitProfileLockPIN` — e.g.
-    /// to edit it from the picker. Knowing the PIN is knowing the PIN, so it
-    /// counts for opening the profile too.
+    /// Records proof for profile settings until the next active-profile change.
     public func noteUnlocked(_ id: String) {
-        unlockedProfileIDs.insert(id)
+        profilesModel.noteProfileUnlocked(id)
     }
 
     /// Forgets that `id` was unlocked this run — called when its PIN changes or
     /// is removed, so a stale unlock can't outlive the lock that granted it.
     public func forgetUnlock(for id: String) {
-        unlockedProfileIDs.remove(id)
+        profilesModel.forgetProfileUnlock(id)
     }
 
     /// Creates or updates a profile from an editor draft. Updating the active
@@ -522,9 +690,10 @@ public final class ProfileFlowModel {
     /// answer that's both safe and correct: importing anyway is the leak the gate
     /// exists to prevent, and clearing it without asking is the same thing.
     public func resumeSetupIfNeeded() {
-        guard pendingSetupProfile == nil else { return }
+        guard pendingSetupProfile == nil, plexHomeUsers.pendingPlexUserSelection == nil else { return }
         let active = profilesModel.activeProfile
         if active.needsSetup {
+            appearanceSetupStore.markPending(profileID: active.id)
             pendingSetupProfile = active
         } else if appearanceSetupStore.isPending(profileID: active.id) {
             isPickingAppearanceForNewProfile = true
@@ -550,6 +719,10 @@ public final class ProfileFlowModel {
     /// Releases the watchlist import after Libraries while keeping the full setup
     /// cover alive for Seerr, Theme and Lock.
     public func completeLibrariesInsideSetup(for id: String) {
+        guard profilesModel.activeProfileID == id, pendingSetupProfile?.id == id else {
+            PlozzLog.app.error("Ignoring library completion for a superseded profile setup")
+            return
+        }
         guard profilesModel.finishSetup(for: id) else { return }
         activateUniversalWatchlist()
     }
@@ -642,6 +815,7 @@ public final class ProfileFlowModel {
         let active = profilesModel.activeProfile
         if let outgoing,
            profilesModel.requiresParentalPIN(switchingFrom: outgoing, to: active) {
+            clearSettingsEntry()
             // Hold the child's profile as the gate's authority. `activeProfile`
             // is ALREADY the grown-up by now, so every predicate that derives
             // the answer from it — `switchProfile`'s `from`, the picker's
@@ -654,6 +828,7 @@ public final class ProfileFlowModel {
             return true
         }
         guard activeProfileAwaitsUnlock else { return false }
+        clearSettingsEntry()
         isProfileSelectionCancelable = false
         isChoosingProfile = true
         return true
@@ -671,12 +846,8 @@ public final class ProfileFlowModel {
     /// ("Use this server" toggle on Settings → Servers & Libraries → server).
     public func setAccount(_ accountID: String, includedInActiveProfile included: Bool) {
         let profileID = profilesModel.activeProfileID
-        // Mutate the resolved set that the UI is actually showing, not the raw
-        // stored set. The latter can contain only stale account ids after a
-        // server is removed/re-added; reloadAccounts() intentionally resolves
-        // that situation to the current household set. Starting from the stale
-        // stored value would make removing a visible account a no-op, then the
-        // next reload would fall back to every account and leave the switch On.
+        // An explicit edit starts from the locally available selection shown by
+        // the UI, not absent accounts retained for sync or later reconnection.
         let current = accountsProviders.activeAccountIDs
         var next = current
         if included { next.insert(accountID) } else { next.remove(accountID) }

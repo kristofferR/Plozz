@@ -9,8 +9,8 @@ import Foundation
 /// - `mergeLibrariesOnHome` — the all-or-nothing "merge every library's content
 ///   into unified cross-server rows" switch. `true` (the default) is the classic
 ///   behaviour; `false` lets each library contribute its own opt-in rows.
-/// - `disabledKeys` — libraries turned **off** (hidden everywhere: Home, Search,
-///   Music, browse). A library is either on or off; a video library that's on
+/// - `disabledKeys` — libraries turned **off** for discovery (Home, Search,
+///   Music, browse), not account-wide viewing history. A video library that's on
 ///   shows on Home + search, a music library that's on shows in the Music tab.
 /// - `disabledGlobalHomeRows` — the global Home rows (Continue Watching / Watchlist
 ///   / Recently Added) the user has turned **off** (opt-out; default all on). The
@@ -27,9 +27,12 @@ import Foundation
 ///   for ``isEnabled(_:)`` (an enabled video library is on Home; there is no
 ///   separate Home-only opt-out). ``isVisible(_:)`` is a further alias, kept so
 ///   existing Home rendering / aggregation callers stay unchanged.
+/// Collection tiles also consult live library metadata: confirmed-empty directories
+/// are automatically hidden unless the profile explicitly enables their library.
 public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
     /// Nil preserves an existing profile's legacy combined/grouped choices.
     public var rowCustomization: HomeRowCustomization?
+    public var collectionSections: [CollectionSection]
 
     public var intent: Self {
         var copy = self
@@ -54,6 +57,7 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
 
     /// On by default for every layout, independently of the saved row arrangement.
     public var mergeNextUpIntoContinueWatching: Bool
+    public var hideWatchedRecentlyAdded: Bool
 
     public var mergesNextUpRows: Bool {
         mergeNextUpIntoContinueWatching && isGlobalRowEnabled(.continueWatching)
@@ -69,9 +73,12 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
     /// opt-in rows (`false`).
     public var mergeLibrariesOnHome: Bool
 
-    /// Keys of libraries turned **off** — hidden from Home, Search, Music and
+    /// Keys of libraries turned **off** — hidden from discovery on Home, Search, Music and
     /// browse alike.
     public var disabledKeys: Set<String>
+
+    /// Explicit on choices override automatic hiding of empty collection directories.
+    public var explicitlyEnabledKeys: Set<String>
 
     /// Raw values of the global Home rows the user has turned **off** (opt-out, so
     /// the default empty set = every global row on). See ``HomeGlobalRow``.
@@ -99,28 +106,47 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
     /// spoiler-safe by construction — there is no episode frame on the card to
     /// hide — so with this on the row never masks and never blurs.
     ///
-    /// Turning it **off** restores the episode thumbnail and hands the row back to
+    /// In Landscape, turning it **off** restores the episode thumbnail and hands the row back to
     /// the spoiler settings, which blur or replace it as configured.
     public var continueWatchingShowsSeriesArtwork: Bool
+    public var continueWatchingLayout: ContinueWatchingCardLayout
+    public var continueWatchingPlaybackDetails: ContinueWatchingPlaybackDetails
+    public var continueWatchingAction: ContinueWatchingAction
+
+    public var continueWatchingUsesSeriesArtwork: Bool {
+        continueWatchingLayout == .portrait || continueWatchingShowsSeriesArtwork
+    }
 
     public init(
         mergeLibrariesOnHome: Bool = true,
         disabledKeys: Set<String> = [],
+        explicitlyEnabledKeys: Set<String> = [],
         disabledGlobalHomeRows: Set<String> = [],
         enabledLibraryHomeRows: Set<String> = [],
         hasSeededLibraryRows: Bool = false,
         continueWatchingShowsSeriesArtwork: Bool = true,
+        continueWatchingLayout: ContinueWatchingCardLayout = .landscape,
+        continueWatchingPlaybackDetails: ContinueWatchingPlaybackDetails = .default,
+        continueWatchingAction: ContinueWatchingAction = .default,
         rowCustomization: HomeRowCustomization? = nil,
-        mergeNextUpIntoContinueWatching: Bool = true
+        mergeNextUpIntoContinueWatching: Bool = true,
+        collectionSections: [CollectionSection] = [],
+        hideWatchedRecentlyAdded: Bool = false
     ) {
         self.mergeLibrariesOnHome = mergeLibrariesOnHome
         self.disabledKeys = disabledKeys
+        self.explicitlyEnabledKeys = explicitlyEnabledKeys
         self.disabledGlobalHomeRows = disabledGlobalHomeRows
         self.enabledLibraryHomeRows = enabledLibraryHomeRows
         self.hasSeededLibraryRows = hasSeededLibraryRows
         self.continueWatchingShowsSeriesArtwork = continueWatchingShowsSeriesArtwork
+        self.continueWatchingLayout = continueWatchingLayout
+        self.continueWatchingPlaybackDetails = continueWatchingPlaybackDetails
+        self.continueWatchingAction = continueWatchingAction
         self.rowCustomization = rowCustomization
         self.mergeNextUpIntoContinueWatching = mergeNextUpIntoContinueWatching
+        self.collectionSections = collectionSections
+        self.hideWatchedRecentlyAdded = hideWatchedRecentlyAdded
     }
 
     /// Fresh profiles match their server; existing blobs retain legacy behavior.
@@ -143,6 +169,15 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
         isEnabled(key)
     }
 
+    public func isVisibleOnHome(_ key: String, library: MediaLibrary) -> Bool {
+        isEnabled(key) && (library.kind != .collection || library.hasCollections != false
+            || explicitlyEnabledKeys.contains(key))
+    }
+
+    public func isVisibleOnHome(_ library: AggregatedLibrary) -> Bool {
+        isVisibleOnHome(library.key, library: library.library)
+    }
+
     /// Compatibility alias for ``isVisibleOnHome(_:)``.
     public func isVisible(_ key: String) -> Bool {
         isVisibleOnHome(key)
@@ -154,8 +189,10 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
     public mutating func setEnabled(_ enabled: Bool, for key: String) {
         if enabled {
             disabledKeys.remove(key)
+            explicitlyEnabledKeys.insert(key)
         } else {
             disabledKeys.insert(key)
+            explicitlyEnabledKeys.remove(key)
         }
     }
 
@@ -207,7 +244,7 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
         switch id {
         case let .global(row): return isGlobalRowEnabled(row)
         case .libraries: return true
-        case .server, .liveTV: return false
+        case .server, .liveTV, .section: return false
         case let .library(key, _):
             return !mergeLibrariesOnHome
                 && id.libraryKind.map { isLibraryRowEnabled(key, kind: $0) } == true
@@ -288,7 +325,7 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
                 library: $0.library,
                 isProviderDefault: rowCustomization?.defaults == .legacy
                     ? (isLegacyRowVisible($0.id) && $0.isLegacyDefault) : $0.isProviderDefault,
-                serverRow: $0.serverRow
+                serverRow: $0.serverRow, collectionSection: $0.collectionSection
             )
         }
         rowCustomization?.apply(sections, choices: resolvedChoices)
@@ -332,12 +369,19 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case mergeLibrariesOnHome
         case disabledKeys
+        case explicitlyEnabledKeys
         case disabledGlobalHomeRows
         case enabledLibraryHomeRows
         case hasSeededLibraryRows
         case continueWatchingShowsSeriesArtwork
+        case continueWatchingLayout
+        // Preserve the stored preference introduced with portrait cards.
+        case continueWatchingPlaybackDetails = "continueWatchingPortraitDetails"
+        case continueWatchingAction
         case rowCustomization
+        case collectionSections
         case mergeNextUpIntoContinueWatching
+        case hideWatchedRecentlyAdded
     }
 
     /// Decodes leniently so a pre-existing blob still loads: missing fields fall
@@ -351,6 +395,7 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.mergeLibrariesOnHome = try container.decodeIfPresent(Bool.self, forKey: .mergeLibrariesOnHome) ?? true
         self.disabledKeys = try container.decodeIfPresent(Set<String>.self, forKey: .disabledKeys) ?? []
+        self.explicitlyEnabledKeys = try container.decodeIfPresent(Set<String>.self, forKey: .explicitlyEnabledKeys) ?? []
         self.disabledGlobalHomeRows = try container.decodeIfPresent(Set<String>.self, forKey: .disabledGlobalHomeRows) ?? []
         self.enabledLibraryHomeRows = try container.decodeIfPresent(Set<String>.self, forKey: .enabledLibraryHomeRows) ?? []
         // Migration: a blob predating this flag that already has opted-in rows was
@@ -367,23 +412,58 @@ public struct HomeLibraryVisibility: Codable, Equatable, Sendable {
             Bool.self,
             forKey: .continueWatchingShowsSeriesArtwork
         ) ?? true
+        self.continueWatchingLayout = try container.decodeIfPresent(
+            ContinueWatchingCardLayout.self, forKey: .continueWatchingLayout
+        ) ?? .landscape
+        self.continueWatchingPlaybackDetails = try container.decodeIfPresent(
+            ContinueWatchingPlaybackDetails.self, forKey: .continueWatchingPlaybackDetails
+        ) ?? .default
+        self.continueWatchingAction = try container.decodeIfPresent(
+            ContinueWatchingAction.self, forKey: .continueWatchingAction
+        ) ?? .default
         self.rowCustomization = try container.decodeIfPresent(HomeRowCustomization.self, forKey: .rowCustomization)
+        self.collectionSections = try container.decodeIfPresent([CollectionSection].self, forKey: .collectionSections) ?? []
         self.mergeNextUpIntoContinueWatching = try container.decodeIfPresent(
             Bool.self, forKey: .mergeNextUpIntoContinueWatching
         ) ?? true
+        self.hideWatchedRecentlyAdded = try container.decodeIfPresent(
+            Bool.self, forKey: .hideWatchedRecentlyAdded
+        ) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(mergeLibrariesOnHome, forKey: .mergeLibrariesOnHome)
         try container.encode(disabledKeys.sorted(), forKey: .disabledKeys)
+        try container.encode(explicitlyEnabledKeys.sorted(), forKey: .explicitlyEnabledKeys)
         try container.encode(disabledGlobalHomeRows.sorted(), forKey: .disabledGlobalHomeRows)
         try container.encode(enabledLibraryHomeRows.sorted(), forKey: .enabledLibraryHomeRows)
         try container.encode(hasSeededLibraryRows, forKey: .hasSeededLibraryRows)
         try container.encode(continueWatchingShowsSeriesArtwork, forKey: .continueWatchingShowsSeriesArtwork)
+        try container.encode(continueWatchingLayout, forKey: .continueWatchingLayout)
+        try container.encode(continueWatchingPlaybackDetails, forKey: .continueWatchingPlaybackDetails)
+        try container.encode(continueWatchingAction, forKey: .continueWatchingAction)
         try container.encodeIfPresent(rowCustomization, forKey: .rowCustomization)
+        if !collectionSections.isEmpty { try container.encode(collectionSections, forKey: .collectionSections) }
         try container.encode(mergeNextUpIntoContinueWatching, forKey: .mergeNextUpIntoContinueWatching)
+        try container.encode(hideWatchedRecentlyAdded, forKey: .hideWatchedRecentlyAdded)
     }
+}
+
+public enum ContinueWatchingCardLayout: String, CaseIterable, Codable, Sendable {
+    case landscape, portrait
+}
+
+public enum ContinueWatchingPlaybackDetails: String, CaseIterable, Codable, Sendable {
+    case detailed, progressOnly
+
+    public static let `default`: Self = .detailed
+}
+
+public enum ContinueWatchingAction: String, CaseIterable, Codable, Sendable {
+    case play, openDetails
+
+    public static let `default`: Self = .openDetails
 }
 
 /// A global (cross-server, cross-library) row on Home. The hero is handled
@@ -429,7 +509,8 @@ public enum LibraryHomeRowKind: String, CaseIterable, Sendable {
     case hubs
 
     public static func available(for library: AggregatedLibrary) -> [Self] {
-        guard !library.library.isMusic, !library.isRetiredCollectionShortcut else { return [] }
+        guard !library.library.isMusic, !library.library.isServerCollectionDirectory,
+              !library.isRetiredCollectionShortcut else { return [] }
         var kinds: [Self] = []
         if library.providerKind.usesMediaBrowserAPI, library.library.kind == .series {
             kinds.append(.nextUp)

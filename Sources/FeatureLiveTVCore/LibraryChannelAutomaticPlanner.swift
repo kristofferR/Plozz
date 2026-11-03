@@ -1,4 +1,5 @@
 import CoreModels
+import CoreNetworking
 import Foundation
 
 public struct LibraryChannelAutomaticGenerationSummary: Equatable, Sendable {
@@ -20,13 +21,14 @@ public struct LibraryChannelAutomaticGenerationSummary: Equatable, Sendable {
 
 public struct LibraryChannelSourceFailure: Equatable, Identifiable, Sendable {
     public enum Reason: String, Sendable {
-        case unreachable, authorization, invalidResponse, unknown
+        case unreachable, authorization, invalidResponse, unsupported, unknown
 
         public var message: LocalizedStringResource {
             switch self {
             case .unreachable: "This server couldn't be reached. Check its address and connection, then retry."
             case .authorization: "This server rejected library access. Check the account's sign-in and permissions."
             case .invalidResponse: "This server's library response couldn't be read. Retry when the server is ready."
+            case .unsupported: "This source doesn't support Plozz channels."
             case .unknown: "This server's libraries couldn't be loaded. Retry to include them."
             }
         }
@@ -43,7 +45,9 @@ public struct LibraryChannelSourceFailure: Equatable, Identifiable, Sendable {
         switch error {
         case AppError.serverUnreachable, is URLError: reason = .unreachable
         case AppError.unauthorized, AppError.invalidCredentials: reason = .authorization
-        case AppError.decoding, AppError.invalidResponse: reason = .invalidResponse
+        case AppError.decoding, AppError.invalidResponse,
+             LibraryChannelError.invalidSnapshot, LibraryChannelError.catalogChanged: reason = .invalidResponse
+        case LibraryChannelError.sourceUnsupported: reason = .unsupported
         default: reason = .unknown
         }
     }
@@ -59,6 +63,7 @@ struct LibraryChannelAutomaticCatalog: Sendable {
     }
     var entries: [Entry] = []
     var skippedItemCount = 0
+    var invalidMetadataItemCount = 0
     var queriedItemCount = 0
     var libraries: [LibraryChannelLibraryChoice] = []
     var accessibleLibraries: Set<LibraryChannelLibrary> = []
@@ -101,6 +106,10 @@ struct LibraryChannelAutomaticCatalog: Sendable {
                     continue
                 }
                 let reference = LibraryChannelLibrary(accountID: context.accountID, libraryID: library.id)
+                try LibraryChannelItem.validateSource(
+                    library: reference, serverID: context.provider.session.server.id,
+                    userID: context.provider.session.userID
+                )
                 catalog.libraries.append(LibraryChannelLibraryChoice(
                     reference: reference, name: library.title, serverName: context.provider.session.server.name
                 ))
@@ -136,13 +145,27 @@ struct LibraryChannelAutomaticCatalog: Sendable {
                         }
                         queriedCount += response.items.count
                         catalog.queriedItemCount = queriedCount
+                        var invalidDurations = 0
+                        var invalidMetadata = 0
+                        defer {
+                            catalog.skippedItemCount += invalidDurations + invalidMetadata
+                            catalog.invalidMetadataItemCount += invalidMetadata
+                            if invalidDurations + invalidMetadata > 0 {
+                                PlozzLog.app.info(
+                                    "Automatic Plozz channel page skipped duration=\(invalidDurations) metadata=\(invalidMetadata) kind=\(kind.rawValue) offset=\(response.startIndex)")
+                            }
+                        }
                         for var media in response.items {
                             try Task.checkCancellation()
-                            guard media.kind == kind, media.libraryID == library.id else {
+                            guard media.libraryID == library.id else {
                                 throw LibraryChannelError.invalidSnapshot
                             }
-                            guard seen.insert(media.id).inserted else { throw LibraryChannelError.catalogChanged }
+                            guard media.kind == kind else {
+                                invalidMetadata += 1
+                                continue
+                            }
                             if kind == .series {
+                                guard seen.insert(media.id).inserted else { throw LibraryChannelError.catalogChanged }
                                 parents[media.id] = Parent(
                                     title: media.title,
                                     genres: LibraryChannelAutomaticPlanner.labels(media.genres, policy: policy),
@@ -162,13 +185,20 @@ struct LibraryChannelAutomaticCatalog: Sendable {
                                 // A series' director is not necessarily the episode's director.
                             }
                             guard let runtime = media.runtime, runtime.isFinite, (1...604_800).contains(runtime) else {
-                                catalog.skippedItemCount += 1
+                                invalidDurations += 1
                                 continue
                             }
-                            let item = try LibraryChannelItem(
-                                item: media, library: reference, serverID: context.provider.session.server.id,
-                                userID: context.provider.session.userID
-                            )
+                            let item: LibraryChannelItem
+                            do {
+                                item = try LibraryChannelItem(
+                                    item: media, library: reference, serverID: context.provider.session.server.id,
+                                    userID: context.provider.session.userID
+                                )
+                            } catch LibraryChannelError.invalidSnapshot {
+                                invalidMetadata += 1
+                                continue
+                            }
+                            guard seen.insert(media.id).inserted else { throw LibraryChannelError.catalogChanged }
                             if kind == .movie { movieCount += 1 }
                             else { episodeCount += 1 }
                             guard max(movieCount, episodeCount) <= LibraryChannelSnapshot.maximumItems else {

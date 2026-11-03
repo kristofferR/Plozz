@@ -42,6 +42,7 @@ struct PrototypeBrowser: View {
     var openLibraryItem: ((LibraryChannelItem) -> Void)?
     var leadingExit: (() -> Void)?
     var isEmbeddedInPlayer = false
+    var previewChannel: ((LiveTVGuideRowID) -> Void)?
     @State private var scrollID: LiveTVGuideRowID?
     @State private var pendingFocus: PrototypeBrowseFocus?
     @State private var restorationFallback: PrototypeBrowseFocus?
@@ -54,6 +55,8 @@ struct PrototypeBrowser: View {
     @State private var guideHours = Self.initialGuideHours
     @State private var guideWidth: CGFloat = 0
     @State private var timeline = PrototypeTimelineScroll()
+    @State private var appliedPreparationRevision = 0
+    @Environment(LiveTVGuidePreparationModel.self) private var guidePreparation: LiveTVGuidePreparationModel?
     #if os(tvOS)
     @State private var nativeScroll = PrototypeGuideScrollController()
     @ScaledMetric(relativeTo: .subheadline) private var nativeRowHeight = PrototypeLayout.rowHeight
@@ -66,10 +69,16 @@ struct PrototypeBrowser: View {
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @Environment(\.layoutDirection) private var layoutDirection
 
+    private struct GuideWorkRequest: Equatable {
+        let window: PrototypeServerGuideRequest?
+        let preparationRevision: Int
+    }
+
     var body: some View {
         let guideRequest = serverGuideRequest
         let cachedWindowRequest = cachedGuideRequest
         let generatedWindowRequest = libraryGuideRequest
+        let preparationRevision = guidePreparation?.completionRevision ?? 0
         GeometryReader { geometry in
             let focusReturnTarget = returnTarget
             VStack(spacing: PrototypeLayout.rulerGap) {
@@ -94,21 +103,23 @@ struct PrototypeBrowser: View {
                     ContentUnavailableView {
                         Label("Channels unavailable", systemImage: "wifi.exclamationmark")
                     } description: {
-                        Text("Check your connection or open Sources to review what needs attention.")
+                        Text("Check your connection or open TV Sources to review what needs attention.")
                     } actions: {
                         Button("Retry", action: reload).buttonStyle(PrototypeButtonStyle())
                             .focused($recoveryFocused)
-                        Button("Sources", action: openSources).buttonStyle(PrototypeButtonStyle())
+                        Button(action: openSources) { Text(SettingsCopy.tvSources) }
+                            .buttonStyle(PrototypeButtonStyle())
                     }
                 } else if model.channels.isEmpty {
                     ContentUnavailableView {
                         Label("No channels available", systemImage: "antenna.radiowaves.left.and.right")
                     } description: {
-                        Text("Your enabled sources haven't provided any channels. Open Sources to check their status or add another source.")
+                        Text("Your enabled sources haven't provided any channels. Open TV Sources to check their status or add another source.")
                     } actions: {
                         Button("Refresh channels", action: reload).buttonStyle(PrototypeButtonStyle())
                             .focused($recoveryFocused)
-                        Button("Sources", action: openSources).buttonStyle(PrototypeButtonStyle())
+                        Button(action: openSources) { Text(SettingsCopy.tvSources) }
+                            .buttonStyle(PrototypeButtonStyle())
                     }
                 } else if allChannelsHidden {
                     ContentUnavailableView {
@@ -275,7 +286,13 @@ struct PrototypeBrowser: View {
         .padding(.top, PrototypeLayout.guideInset)
         #endif
         .padding(.trailing, PrototypeLayout.guideTrailingInset)
-        .background { PrototypeGuideSurface() }
+        .background {
+            #if os(iOS)
+            if !isEmbeddedInPlayer { PrototypeGuideSurface() }
+            #else
+            PrototypeGuideSurface()
+            #endif
+        }
         .clipShape(PrototypeLayout.guideShape)
         #if os(tvOS)
         .focusSection()
@@ -349,21 +366,23 @@ struct PrototypeBrowser: View {
             pendingFocus = target
             focused = target
         }
-        .task(id: guideRequest) {
+        .task(id: GuideWorkRequest(window: guideRequest, preparationRevision: preparationRevision)) {
             guard let guideRequest else { return }
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
             // Block by block, so extending the guide fetches only the new hours
             // instead of re-requesting the whole span as one partly loaded chunk.
             var blockStart = guideRequest.from
+            let force = appliedPreparationRevision != preparationRevision
             while blockStart < guideRequest.to, !Task.isCancelled {
                 let blockEnd = min(guideRequest.to, blockStart.addingTimeInterval(Self.guideStepSeconds))
                 await imports.reloadServerGuides(
                     channelIDs: guideRequest.channels.map(\.id),
-                    from: blockStart, to: blockEnd, into: model
+                    from: blockStart, to: blockEnd, into: model, force: force
                 )
                 blockStart = blockEnd
             }
+            if !Task.isCancelled { appliedPreparationRevision = preparationRevision }
         }
         .task(id: cachedWindowRequest) {
             guard let cachedWindowRequest else { return }
@@ -473,7 +492,8 @@ struct PrototypeBrowser: View {
                 openLibraryItem: openLibraryItem,
                 focusPolicy: rowFocusPolicy(for: entry.id),
                 horizontalNavigation: useNativeNavigation,
-                selectedTarget: touchSelection
+                selectedTarget: touchSelection,
+                selectForPreview: previewChannel.map { action in { action(entry.id) } }
             )
         }
         .id(entry.id)
@@ -947,6 +967,7 @@ struct PrototypeGuideRow: View {
     var horizontalNavigation: () -> Void = {}
     /// What the viewer picked by touch, which has no focus to show it with.
     var selectedTarget: PrototypeBrowseFocus?
+    var selectForPreview: (() -> Void)?
     @ScaledMetric(relativeTo: .subheadline) private var scaledRowHeight: CGFloat = PrototypeLayout.rowHeight
 
     private var rowHeight: CGFloat {
@@ -981,7 +1002,8 @@ struct PrototypeGuideRow: View {
                 focusChanged: { focusChanged(channelFocus, $0) },
                 sources: sources, guideTime: programs.isEmpty ? nil : guideTime, hide: hide,
                 selectionAction: selectionAction, selectionMarked: selectionMarked,
-                libraryItem: currentLibraryItem, openLibraryItem: openLibraryItem
+                libraryItem: currentLibraryItem, openLibraryItem: openLibraryItem,
+                selectForPreview: selectForPreview
             )
                 .frame(width: PrototypeLayout.stationWidth(for: width))
                 .focused(focus, equals: channelFocus)
@@ -1044,7 +1066,13 @@ struct PrototypeGuideRow: View {
                                             libraryItem: channel.source == .plozz ? program.libraryItem : nil,
                                             openLibraryItem: openLibraryItem)
                                         Button("Search channels", systemImage: "magnifyingglass", action: controls)
-                                        Button("Sources", systemImage: "antenna.radiowaves.left.and.right", action: sources)
+                                        Button(action: sources) {
+                                            Label {
+                                                Text(SettingsCopy.tvSources)
+                                            } icon: {
+                                                Image(systemName: "antenna.radiowaves.left.and.right")
+                                            }
+                                        }
                                         Button("Guide time", systemImage: "calendar", action: guideTime)
                                         Button("Back to top", systemImage: "arrow.up.to.line", action: top)
                                         Button("Now", systemImage: "clock", action: goToNow)
@@ -1123,6 +1151,8 @@ struct PrototypeGuideRow: View {
         return Button {
             #if os(iOS)
             focusChanged(target, true)
+            if selectionAction != nil { tune() }
+            else { selectForPreview?() }
             #else
             tune()
             #endif
@@ -1161,7 +1191,13 @@ struct PrototypeGuideRow: View {
                 primaryTitle: selectionAction ?? "Play channel", isSelection: selectionAction != nil,
                 libraryItem: currentLibraryItem, openLibraryItem: openLibraryItem)
             Button("Search channels", systemImage: "magnifyingglass", action: controls)
-            Button("Sources", systemImage: "antenna.radiowaves.left.and.right", action: sources)
+            Button(action: sources) {
+                Label {
+                    Text(SettingsCopy.tvSources)
+                } icon: {
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                }
+            }
             Button("Back to top", systemImage: "arrow.up.to.line", action: top)
         }
     }
@@ -1179,12 +1215,13 @@ struct PrototypeGuideRow: View {
         PrototypeLayout.timelineWidth(for: width)
     }
 
-    /// Touch picks a programme into the info bar, whose Watch button tunes;
-    /// the remote's Select keeps tuning directly.
+    /// Touch selects the info bar and starts the channel's inline preview.
+    /// Explicit Watch and the remote's Select still open fullscreen.
     private func activate(_ program: LiveTVPrototypeProgram) {
         #if os(iOS)
         if selectionAction == nil {
             focusChanged(programFocus(program.id), true)
+            selectForPreview?()
             return
         }
         #endif
@@ -1216,6 +1253,7 @@ struct PrototypeGuideStation: View {
     var selectionMarked = false
     var libraryItem: LibraryChannelItem?
     var openLibraryItem: ((LibraryChannelItem) -> Void)?
+    var selectForPreview: (() -> Void)?
 
     var body: some View {
         Group {
@@ -1226,19 +1264,17 @@ struct PrototypeGuideStation: View {
                             favorite: favorite, play: tune, toggleFavorite: toggleFavorite, hide: hide,
                             primaryTitle: selectionAction ?? "Play channel", isSelection: true)
                     }
+            } else if let selectForPreview {
+                Button {
+                    focusChanged?(true)
+                    selectForPreview()
+                } label: {
+                    stationMark
+                }
+                .contextMenu { channelActions }
             } else {
                 Menu {
-                    PrototypeChannelActions(
-                        favorite: favorite, play: tune, toggleFavorite: toggleFavorite, hide: hide,
-                        libraryItem: libraryItem, openLibraryItem: openLibraryItem
-                    )
-                    Divider()
-                    Button("Search channels", systemImage: "magnifyingglass", action: controls)
-                    Button("Sources", systemImage: "antenna.radiowaves.left.and.right", action: sources)
-                    if let guideTime {
-                        Button("Guide time", systemImage: "calendar", action: guideTime)
-                    }
-                    Button("Back to top", systemImage: "arrow.up.to.line", action: top)
+                    channelActions
                 } label: {
                     stationMark
                 }
@@ -1248,9 +1284,31 @@ struct PrototypeGuideStation: View {
         .focusEffectDisabled()
         .accessibilityLabel(Text(channel.name))
         .accessibilityValue(Text("Channel \(channel.number)"))
-        .accessibilityHint(Text(selectionAction ?? "Channel actions"))
+        .accessibilityHint(Text(selectionAction ?? (selectForPreview == nil ? "Channel actions" : "Play channel")))
         .accessibilityAddTraits(playing || selectionMarked ? .isSelected : [])
         .accessibilityIdentifier("live-tv-channel-\(section.rawValue)-\(channel.number)")
+    }
+
+    private var channelActions: some View {
+        Group {
+            PrototypeChannelActions(
+                favorite: favorite, play: tune, toggleFavorite: toggleFavorite, hide: hide,
+                libraryItem: libraryItem, openLibraryItem: openLibraryItem
+            )
+            Divider()
+            Button("Search channels", systemImage: "magnifyingglass", action: controls)
+            Button(action: sources) {
+                Label {
+                    Text(SettingsCopy.tvSources)
+                } icon: {
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                }
+            }
+            if let guideTime {
+                Button("Guide time", systemImage: "calendar", action: guideTime)
+            }
+            Button("Back to top", systemImage: "arrow.up.to.line", action: top)
+        }
     }
 
     private var stationMark: some View {

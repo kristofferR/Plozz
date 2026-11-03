@@ -6,6 +6,76 @@ import FoundationNetworking
 #endif
 
 final class ServerURLNormalizerTests: XCTestCase {
+    func testManualConnectionCandidatesPreserveAddressIntent() throws {
+        for (raw, expected) in [
+            ("media.example/jf", ["https://media.example/jf", "http://media.example:8096/jf", "http://media.example/jf"]),
+            ("http://media.example/jf", ["https://media.example/jf", "http://media.example/jf", "http://media.example:8096/jf"]),
+            ("192.168.1.5", ["https://192.168.1.5", "http://192.168.1.5:8096", "http://192.168.1.5"]),
+            ("media.example:8443/jf/", ["https://media.example:8443/jf", "http://media.example:8443/jf"]),
+            ("http://media.example:80/jf", ["https://media.example:80/jf", "http://media.example:80/jf"]),
+            ("[::1]:8096", ["https://[::1]:8096", "http://[::1]:8096"]),
+            (" HTTPS://media.example/jf/ \n", ["https://media.example/jf"]),
+            ("https://media.example:8920/jf", ["https://media.example:8920/jf"]),
+            ("media.example/a%2Fb/", ["https://media.example/a%2Fb", "http://media.example:8096/a%2Fb", "http://media.example/a%2Fb"])
+        ] {
+            XCTAssertEqual(try ServerURLNormalizer.manualConnectionCandidates(raw).map(\.absoluteString), expected, raw)
+        }
+    }
+
+    func testManualConnectionCandidatesRejectUnsafeOrInvalidInput() {
+        for raw in [
+            "", "   ", "ftp://media.example", "http://", "bad host",
+            "https://user:password@media.example", "media.example?api_key=secret",
+            "media.example#fragment", "media.example:0", "media.example:65536",
+            "media.example/a/../b", "media.example/%2e%2e/b"
+        ] {
+            XCTAssertThrowsError(try ServerURLNormalizer.manualConnectionCandidates(raw), raw)
+        }
+    }
+
+    func testDiscoveryRetainsResolvedHTTPSAndReverseProxyPrefix() throws {
+        let requested = URL(string: "http://media.example/old")!
+        let resolved = try ServerURLNormalizer.resolvedBaseURL(
+            requested: requested,
+            responseURL: URL(string: "https://media.example:8443/new/System/Info/Public"),
+            endpointPath: "/System/Info/Public"
+        )
+        XCTAssertEqual(resolved.absoluteString, "https://media.example:8443/new")
+        XCTAssertEqual(try ServerURLNormalizer.resolvedBaseURL(
+            requested: requested,
+            responseURL: URL(string: "http://media.example/old/System/Info/Public"),
+            endpointPath: "/System/Info/Public"
+        ), requested)
+    }
+
+    func testDiscoveryRejectsUnapprovedOriginsAndNonAPIResponses() {
+        for (requested, response) in [
+            ("http://media.example", "https://other.example/System/Info/Public"),
+            ("https://media.example", "http://media.example/System/Info/Public"),
+            ("http://media.example", "http://media.example:8096/System/Info/Public"),
+            ("https://media.example", "https://media.example/login"),
+            ("https://media.example", "https://media.example"),
+            ("https://media.example", "https://viewer@media.example/System/Info/Public"),
+            ("https://media.example", "https://media.example/System/Info/Public?token=fixture"),
+            ("https://media.example", "https://media.example/System/Info/Public#fragment")
+        ] {
+            XCTAssertThrowsError(try ServerURLNormalizer.resolvedBaseURL(
+                requested: URL(string: requested)!,
+                responseURL: URL(string: response),
+                endpointPath: "/System/Info/Public"
+            ), response)
+        }
+    }
+
+    func testDiscoveryPreservesEncodedReverseProxyPrefixes() throws {
+        let resolved = try ServerURLNormalizer.resolvedBaseURL(
+            requested: URL(string: "https://media.example/media%2Fhome")!,
+            responseURL: URL(string: "https://media.example/media%2Fhome/System/Info/Public"),
+            endpointPath: "/System/Info/Public"
+        )
+        XCTAssertEqual(resolved.absoluteString, "https://media.example/media%2Fhome")
+    }
+
     func testBareIPGetsHttpAndDefaultPort() {
         let url = ServerURLNormalizer.normalize("192.168.1.5")
         XCTAssertEqual(url?.absoluteString, "http://192.168.1.5:8096")

@@ -76,7 +76,13 @@ struct PlozziOSLibrariesView: View {
         .toolbarTitleDisplayMode(.large)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button("Add Server", systemImage: "plus", action: onAddServer)
+                Button(action: onAddServer) {
+                    Label {
+                        Text(SettingsCopy.addSource)
+                    } icon: {
+                        Image(systemName: "plus")
+                    }
+                }
             }
         }
         .task(id: appModel.accounts.map(\.connectionScopeKey)) {
@@ -119,23 +125,27 @@ private struct PlozziOSLibraryList: View {
     }
 }
 
-private struct PlozziOSLibraryCard: View {
+struct PlozziOSLibraryCard: View {
     @Environment(\.plozzCardStyle) private var cardStyle
     @Environment(\.plozzMetrics) private var metrics
     @Environment(\.themePalette) private var palette
+    @Environment(\.plozzCardCaptionSettings) private var captions
     let library: MediaLibrary
 
-    @ViewBuilder
     var body: some View {
-        if cardStyle == .framed {
-            content
-                .plozzFramedMediaCard(
-                    innerCornerRadius: metrics.landscapeArtworkCornerRadius
-                )
-                .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
-        } else {
-            content
+        Group {
+            if cardStyle == .framed {
+                content
+                    .plozzFramedMediaCard(
+                        innerCornerRadius: metrics.landscapeArtworkCornerRadius
+                    )
+                    .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
+            } else {
+                content
+            }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(library.displayName)
     }
 
     private var content: some View {
@@ -151,7 +161,7 @@ private struct PlozziOSLibraryCard: View {
                 Rectangle()
                     .fill(palette.fill)
                     .overlay {
-                        Image(systemName: library.kind == .series ? "tv" : "film")
+                        Image(systemName: librarySymbol)
                             .font(.largeTitle)
                             .plozzForeground(.secondary)
                     }
@@ -168,16 +178,26 @@ private struct PlozziOSLibraryCard: View {
                 cornerRadius: metrics.landscapeArtworkCornerRadius
             )
 
-            library.displayName
-                .font(.headline)
-                .lineLimit(2)
-                .padding(.horizontal, metrics.landscapeCaptionHorizontalInset)
-                .padding(
-                    .bottom,
-                    cardStyle == .framed ? metrics.landscapeCaptionInset : 0
-                )
+            if captions.showsLabels {
+                library.displayName
+                    .font(.headline)
+                    .lineLimit(2)
+                    .padding(.horizontal, metrics.landscapeCaptionHorizontalInset)
+                    .padding(
+                        .bottom,
+                        cardStyle == .framed ? metrics.landscapeCaptionInset : 0
+                    )
+            }
         }
         .contentShape(Rectangle())
+    }
+
+    private var librarySymbol: String {
+        switch library.kind {
+        case .series: "tv"
+        case .collection: "rectangle.stack"
+        default: "film"
+        }
     }
 }
 
@@ -192,7 +212,7 @@ struct PlozziOSLibraryGridView: View {
     /// artwork, which is what the banner's edges have to match.
     @Environment(\.plozzCardStyle) private var cardStyle
     @State private var viewModel: LibraryBrowseViewModel
-    @State private var selectedRecommendedItem: MediaItem?
+    @State private var selectedRecommendedItem: PlozziOSArtworkItemRoute?
     private let title: String   // l10n:content — library name from the server
     private let provider: any MediaProvider
     private let settings: PlozziOSSettingsModel
@@ -200,19 +220,22 @@ struct PlozziOSLibraryGridView: View {
     /// Passed rather than read from the environment so the pushed destination
     /// carries it explicitly, like every other dependency on this route.
     private let scanStatus: ShareScanStatusModel?
+    private let isCombinedLibrary: Bool
 
     init(
         viewModel: LibraryBrowseViewModel,
         title: String,   // l10n:content — library name from the server
         provider: any MediaProvider,
         settings: PlozziOSSettingsModel,
-        scanStatus: ShareScanStatusModel? = nil
+        scanStatus: ShareScanStatusModel? = nil,
+        isCombinedLibrary: Bool = false
     ) {
         _viewModel = State(initialValue: viewModel)
         self.title = title
         self.provider = provider
         self.settings = settings
         self.scanStatus = scanStatus
+        self.isCombinedLibrary = isCombinedLibrary
     }
 
     var body: some View {
@@ -220,10 +243,12 @@ struct PlozziOSLibraryGridView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    browseControls
+                    if viewModel.availableContentModes.count > 1 {
+                        PlozziOSLibraryContentModeControl(viewModel: viewModel)
+                    }
                     Group {
                         if viewModel.contentMode == .recommended {
-                            recommendedContent
+                            recommendedContent.plozzDesktopMediaRailLayout()
                         } else {
                             browseContent(generation: generation)
                         }
@@ -248,29 +273,44 @@ struct PlozziOSLibraryGridView: View {
         .environment(\.plozzCardCaptionView, viewModel.browseScope.cardCaptionView(for: viewModel.contentMode))
         .environment(\.plozzArtworkArea, nil)
         .navigationBarTitleDisplayMode(.inline)
-        .navigationDestination(item: $selectedRecommendedItem) { item in
+        .navigationDestination(item: $selectedRecommendedItem) { route in
             PlozziOSItemDetailView(
                 appModel: appModel,
                 provider: provider,
-                item: item,
-                originSourceAccountID: item.sourceAccountID
+                item: route.item,
+                originSourceAccountID: route.item.sourceAccountID
             )
+            .mediaArtworkZoomDestination(route.source)
         }
         .safeAreaInset(edge: .bottom) {
+            if viewModel.collectionScanIncomplete, viewModel.state.value != nil, viewModel.pageError == nil,
+               viewModel.contentMode == .collections {
+                LibraryCollectionLoadingView(progress: viewModel.collectionProgress) {
+                    Task { await viewModel.loadFirstPage() }
+                }
+                .padding()
+                .frame(maxWidth: .infinity)
+                .background(.regularMaterial)
+            }
             if viewModel.contentMode == .recommended, let error = viewModel.recommendationError,
                viewModel.recommendationState.value != nil {
-                HStack {
-                    Text(error.userMessage).plozzForeground(.secondary)
-                    Button("Try Again") { Task { await viewModel.loadRecommendations() } }
+                VStack(alignment: .leading, spacing: 12) {
+                    InlineErrorMessage(Text(error.userMessage))
+                    ContentFailureActions(report: viewModel.recommendationDiagnostic.map(PlaybackDiagnosticReport.library)) {
+                        Task { await viewModel.loadRecommendations() }
+                    }
                 }
                 .padding()
                 .background(.regularMaterial)
             }
             if viewModel.contentMode != .recommended, let error = viewModel.pageError {
-                HStack {
-                    Text(error.userMessage)
+                VStack(alignment: .leading, spacing: 12) {
+                    if viewModel.collectionScanIncomplete {
+                        Text("Some collections haven't been checked yet. The list is incomplete.")
+                    }
+                    Text(viewModel.queryMessage ?? error.userMessage)
                         .plozzForeground(.secondary)
-                    Button("Try Again") {
+                    ContentFailureActions(report: viewModel.browseDiagnostic.map(PlaybackDiagnosticReport.library)) {
                         Task { await viewModel.retryFailedPages() }
                     }
                 }
@@ -279,6 +319,9 @@ struct PlozziOSLibraryGridView: View {
             }
         }
         .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                queryControls.labelStyle(.iconOnly)
+            }
             if let library = viewModel.fileBrowserLibrary {
                 ToolbarItem(placement: .primaryAction) {
                     NavigationLink(
@@ -293,6 +336,7 @@ struct PlozziOSLibraryGridView: View {
             }
         }
         .task { await viewModel.loadFirstPageIfNeeded() }
+        .task(id: viewModel.availableContentModes) { await viewModel.reconcileContentMode() }
         .background {
             LibraryAlphabetFeedback(letter: viewModel.alphabet.jumpingTo, message: viewModel.alphabet.message)
         }
@@ -323,15 +367,23 @@ struct PlozziOSLibraryGridView: View {
                 .frame(maxWidth: .infinity, minHeight: 220)
         case .empty:
             ContentUnavailableView("No recommendations in this library", systemImage: "sparkles")
-        case .loaded(let sections):
-            VStack(alignment: .leading, spacing: PlozziOSMediaRailLayout.sectionSpacing) {
+        case .loaded(let loaded):
+            let sections = viewModel.visibleRecommendedRows(loaded)
+            if sections.isEmpty {
+                ContentUnavailableView(
+                    "No visible rows", systemImage: "rectangle.grid.1x2",
+                    description: Text("Show rows in Settings > Screens & Navigation > Customize Libraries.")
+                )
+            }
+            VStack(alignment: .leading, spacing: PlozziOSMediaRailLayout.sectionGap(metrics: metrics)) {
                 ForEach(sections) { section in
                     PlozziOSLibraryRecommendationRow(
                         section: section,
                         spoilerSettings: settings.spoilers.settings,
                         showsSeriesArtwork: section.id == "continueWatching"
-                            && settings.homeVisibility.continueWatchingShowsSeriesArtwork,
-                        onSelect: { selectedRecommendedItem = $0 }
+                            && settings.homeVisibility.continueWatchingUsesSeriesArtwork,
+                        continueWatchingLayout: settings.homeVisibility.continueWatchingLayout,
+                        onSelect: { selectedRecommendedItem = .init(item: $0, source: $1) }
                     )
                     .environment(\.plozzArtworkArea, section.id == "continueWatching" ? .continueWatching : .recommended)
                 }
@@ -345,7 +397,9 @@ struct PlozziOSLibraryGridView: View {
                 }
                 Text(error.userMessage)
             } actions: {
-                Button("Try Again") { Task { await viewModel.loadRecommendations() } }
+                ContentFailureActions(report: viewModel.recommendationDiagnostic.map(PlaybackDiagnosticReport.library)) {
+                    Task { await viewModel.loadRecommendations() }
+                }
             }
         }
     }
@@ -354,7 +408,13 @@ struct PlozziOSLibraryGridView: View {
     private func browseContent(generation: Int) -> some View {
         switch viewModel.state {
         case .idle, .loading:
-            if let progress = viewModel.queryProgress {
+            if let progress = viewModel.collectionProgress {
+                LibraryCollectionLoadingView(progress: progress) {
+                    Task { await viewModel.loadFirstPage() }
+                }
+                .frame(maxWidth: .infinity, minHeight: 220)
+                .padding(.horizontal)
+            } else if let progress = viewModel.queryProgress {
                 LibraryQueryPreparationView(progress: progress) { Task { await viewModel.cancelIndex() } }
                     .frame(height: 320)
             } else {
@@ -389,7 +449,9 @@ struct PlozziOSLibraryGridView: View {
                             slot: viewModel.slot(at: index),
                             index: index,
                             generation: generation,
+                            style: viewModel.gridStyle == .landscape ? .landscape : .poster,
                             provider: provider,
+                            isCombinedLibrary: isCombinedLibrary,
                             playlistOrigin: { viewModel.playlistOrigin(at: index) },
                             onAppear: { await viewModel.itemAppeared(at: index, generation: generation) },
                             onDisappear: { viewModel.itemDisappeared(at: index, generation: generation) }
@@ -409,32 +471,9 @@ struct PlozziOSLibraryGridView: View {
                 }
                 Text(viewModel.queryMessage ?? error.userMessage)
             } actions: {
-                Button("Try Again") {
+                ContentFailureActions(report: viewModel.browseDiagnostic.map(PlaybackDiagnosticReport.library)) {
                     Task { await viewModel.loadFirstPage() }
                 }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var browseControls: some View {
-        VStack(spacing: 8) {
-            if viewModel.availableContentModes.count > 1 {
-                PlozziOSLibraryContentModeControl(viewModel: viewModel)
-            }
-            if viewModel.showsFilterMenu || !viewModel.availableSortFields.isEmpty {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 24) {
-                        queryControls.fixedSize()
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        queryControls
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .font(.subheadline)
-                .tint(palette.primaryText)
-                .padding(.horizontal, horizontalInset)
             }
         }
     }
@@ -458,12 +497,25 @@ struct PlozziOSLibraryGridView: View {
 
     private var gridColumns: [GridItem] {
         guard dynamicTypeSize.isAccessibilitySize else {
-            return settings.density.density.iOSPosterGridColumns(horizontalSizeClass: horizontalSizeClass)
+            if viewModel.gridStyle == .landscape {
+                if metrics.usesDesktopSizing {
+                    return [GridItem(
+                        .adaptive(minimum: metrics.landscapeWidth, maximum: metrics.landscapeWidth * 1.18),
+                        spacing: metrics.gridSpacing
+                    )]
+                }
+                return [GridItem(.adaptive(minimum: horizontalSizeClass == .regular ? 240 : 160), spacing: 12)]
+            }
+            return settings.density.density.iOSPosterGridColumns(
+                horizontalSizeClass: horizontalSizeClass, isRunningOnMac: metrics.usesDesktopSizing
+            )
         }
         if horizontalSizeClass == .compact {
             return [GridItem(.flexible(), spacing: 16)]
         }
-        return [GridItem(.adaptive(minimum: accessiblePosterWidth * settings.density.density.scale), spacing: 16)]
+        let minimum = accessiblePosterWidth * settings.density.density.scale
+        let desktopMinimum = viewModel.gridStyle == .landscape ? metrics.landscapeWidth : metrics.posterWidth
+        return [GridItem(.adaptive(minimum: metrics.usesDesktopSizing ? max(minimum, desktopMinimum) : minimum), spacing: 16)]
     }
 
     /// Live scan/enrich progress for the media share backing THIS library, above
@@ -496,58 +548,12 @@ struct PlozziOSLibraryGridView: View {
     }
 
     private var sortControl: some View {
-        Menu {
-            Picker("Sort By", selection: sortFieldBinding) {
-                ForEach(viewModel.availableSortFields, id: \.self) { field in
-                    Text(field.displayName).tag(field)
-                }
-            }
-            Picker("Order", selection: sortDirectionBinding) {
-                ForEach(SortDirection.allCases, id: \.self) { direction in
-                    Text(direction.displayName).tag(direction)
-                }
-            }
-        } label: {
-            Label(
-                "Sort: \(viewModel.sort.field.displayName)",
-                systemImage: "arrow.up.arrow.down"
-            )
-            .frame(minWidth: 44, minHeight: 44)
+        BrowseSortMenu(sort: viewModel.sort, fields: viewModel.availableSortFields) { sort in
+            Task { await viewModel.setSort(sort) }
         }
         .accessibilityIdentifier("library-sort")
     }
 
-    private var sortFieldBinding: Binding<SortField> {
-        Binding(
-            get: { viewModel.sort.field },
-            set: { field in
-                Task {
-                    await viewModel.setSort(
-                        CoreModels.SortDescriptor(
-                            field: field,
-                            direction: field.defaultDirection
-                        )
-                    )
-                }
-            }
-        )
-    }
-
-    private var sortDirectionBinding: Binding<SortDirection> {
-        Binding(
-            get: { viewModel.sort.direction },
-            set: { direction in
-                Task {
-                    await viewModel.setSort(
-                        CoreModels.SortDescriptor(
-                            field: viewModel.sort.field,
-                            direction: direction
-                        )
-                    )
-                }
-            }
-        )
-    }
 }
 
 private struct PlozziOSLibraryContentModeControl: View {
@@ -578,11 +584,16 @@ struct PlozziOSLibraryRecommendationRow: View {
     let section: LibrarySection
     let spoilerSettings: SpoilerSettings
     let showsSeriesArtwork: Bool
-    let onSelect: (MediaItem) -> Void
+    var continueWatchingLayout: ContinueWatchingCardLayout = .landscape
+    let onSelect: (MediaItem, MediaArtworkZoomSource) -> Void
 
     var body: some View {
-        let inset = PlozziOSPageLayout.horizontalInset(for: horizontalSizeClass)
-        let style: PosterCardView.Style = section.style == .poster ? .poster : .landscape
+        let inset = PlozziOSPageLayout.horizontalInset(
+            for: horizontalSizeClass, usesDesktopSizing: metrics.usesDesktopSizing
+        )
+        let style: PosterCardView.Style = section.id == "continueWatching"
+            ? continueWatchingLayout.cardStyle
+            : (section.style == .poster ? .poster : .landscape)
         PlozziOSMediaSection(
             title: section.displayName,
             artworkInset: cardStyle == .framed ? metrics.cardInset : 0
@@ -593,7 +604,9 @@ struct PlozziOSLibraryRecommendationRow: View {
                     spacing: PlozziOSMediaRailLayout.stackSpacing(metrics: metrics, cardStyle: cardStyle)
                 ) {
                     ForEach(MediaRowView.uniqued(section.items), id: \.stablePresentationID) { item in
-                        Button { onSelect(item) } label: {
+                        MediaArtworkZoomButton(id: item.stablePresentationID) { source in
+                            onSelect(item, source)
+                        } label: {
                             PlozziOSPosterCard(
                                 item: item, style: style,
                                 showsSeriesArtwork: showsSeriesArtwork,
@@ -626,7 +639,9 @@ private struct PlozziOSLibraryItemCell: View {
     let slot: LibrarySlot?
     let index: Int
     let generation: Int
+    var style: PosterCardView.Style = .poster
     let provider: any MediaProvider
+    var isCombinedLibrary = false
     let playlistOrigin: () -> VideoPlaylistPlaybackOrigin?
     let onAppear: () async -> Void
     let onDisappear: () -> Void
@@ -637,7 +652,9 @@ private struct PlozziOSLibraryItemCell: View {
                 if let route = CollectionBrowseRoute(
                     item: item, fallbackAccountID: provider.session.server.id
                 ) {
-                    NavigationLink(value: PlozziOSLibraryRoute(collection: route)) {
+                    MediaArtworkZoomValueLink(
+                        id: item.stablePresentationID, value: PlozziOSLibraryRoute(collection: route)
+                    ) {
                         card
                     }
                     .buttonStyle(.plain)
@@ -654,8 +671,15 @@ private struct PlozziOSLibraryItemCell: View {
                         card
                     }
                     .buttonStyle(.plain)
+                } else if isCombinedLibrary {
+                    MediaArtworkZoomLink(id: item.stablePresentationID) {
+                        PlozziOSItemPage(appModel: appModel, item: item)
+                    } label: {
+                        card
+                    }
+                    .buttonStyle(.plain)
                 } else {
-                    NavigationLink {
+                    MediaArtworkZoomLink(id: item.stablePresentationID) {
                         PlozziOSItemDetailView(
                             appModel: appModel,
                             provider: provider,
@@ -683,6 +707,7 @@ private struct PlozziOSLibraryItemCell: View {
             } else {
                 PlozziOSPosterCard(
                     item: slot?.item,
+                    style: style,
                     reservesSubtitleSpace: true
                 )
             }

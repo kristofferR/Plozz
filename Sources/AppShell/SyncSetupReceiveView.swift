@@ -122,6 +122,7 @@ struct SyncSetupReceiveView: View {
                 guard !didApply else { return }
                 didApply = true
                 let outcome = appState.applyReceivedSetup(received)
+                model.recordApplication(outcome)
                 if outcome.isTotalCredentialFailure {
                     didApply = false   // allow a retry
                     applyError = "Couldn’t finish signing in on this Apple TV. Check both devices are on the same Wi-Fi and try again."

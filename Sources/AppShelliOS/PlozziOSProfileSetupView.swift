@@ -2,6 +2,7 @@
 import AppRuntime
 import CoreModels
 import CoreUI
+import FeatureLiveTV
 import FeatureProfiles
 import FeatureSettings
 import SwiftUI
@@ -20,6 +21,7 @@ import SwiftUI
 struct PlozziOSProfileSetupView: View {
     let appModel: PlozziOSAppModel
     let onDone: () -> Void
+    @Environment(\.themePalette) private var palette
 
     @State private var showingAddServer = false
     @State private var addUserServer: MediaServer?
@@ -51,6 +53,10 @@ struct PlozziOSProfileSetupView: View {
                 .padding(.bottom, 8)
             }
         }
+        .guidePreparationOverlay(
+            model: appModel.guidePreparation, presenter: appModel.transientStatusPresenter,
+            palette: palette
+        )
         // Setup has to finish deliberately: the model releases the watchlist
         // import when it does, so a swipe-away is handled as an explicit cancel
         // rather than being allowed to strand the profile mid-flow.
@@ -64,7 +70,7 @@ struct PlozziOSProfileSetupView: View {
         ) {
             AddServerView(
                 appModel: appModel,
-                initialProvider: addUserServer?.provider ?? .jellyfin,
+                initialProvider: addUserServer?.provider,
                 initialAddress: addUserServer?.baseURL.absoluteString ?? ""
             )
             .presentationSizing(.page)
@@ -74,7 +80,9 @@ struct PlozziOSProfileSetupView: View {
         // the libraries step.
         .plozzSheet(item: plexUserSelectionBinding) { selection in
             PlozziOSPlexUserSelectionView(
+                appModel: appModel,
                 selection: selection,
+                onImportAll: appModel.importPlexHomeProfilesDuringOnboarding,
                 onSelect: appModel.selectPlexUserDuringOnboarding
             )
         }
@@ -86,11 +94,7 @@ struct PlozziOSProfileSetupView: View {
         }
         .plozzSheet(item: librarySelectionBinding) { selection in
             PlozziOSLibrarySelectionView(
-                accounts: appModel.accountsProviders.resolvedAccounts(
-                    withIDs: selection.accountIDs
-                ),
-                visibility: appModel.settings.homeVisibility,
-                onContinue: appModel.completeLibrarySelection
+                appModel: appModel, accountIDs: selection.accountIDs
             )
         }
     }
@@ -117,7 +121,7 @@ struct PlozziOSProfileSetupView: View {
 
     private var plexPINBinding: Binding<PlexHomeUsersModel.PlexPINRequest?> {
         Binding(
-            get: { appModel.plexHomeUsers.pendingPlexPINRequest },
+            get: { appModel.plexPINRequestForAppPresentation },
             set: { if $0 == nil { appModel.plexHomeUsers.dismissPlexPINIfPresented() } }
         )
     }
@@ -150,23 +154,13 @@ struct PlozziOSServerIdentityPromptView: View {
 
     var body: some View {
         NavigationStack {
-            PlozziOSPlexHomeUserSettingsView(appModel: appModel, account: account)
-                .navigationTitle("Who are you on \(account.server.name)?")
-                .navigationBarTitleDisplayMode(.inline)
+            PlozziOSPlexHomeUserSettingsView(
+                appModel: appModel, account: account, onDecline: onDecline
+            )
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done", action: onFinish)
-                    }
-                    // Declining has to be sayable, not inferred. Closing the
-                    // sheet means "I'm done here"; only this says "don't read
-                    // this server's watchlist".
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button(action: onDecline) {
-                            Text(
-                                "Don't use this server's watchlist",
-                                comment: "Button declining to pick a user, which leaves the server's own watchlist out of this profile."
-                            )
-                        }
+                            .disabled(appModel.inlinePlexPINRequest != nil)
                     }
                 }
         }
@@ -245,6 +239,7 @@ struct PlozziOSProfileOnboardingCover: View {
                 EmptyView()
             }
         }
+        .id(appModel.profileOnboardingID)
         .transaction { $0.animation = nil }
     }
 }

@@ -49,6 +49,27 @@ public struct LiveTVPortableLibraryExport: Sendable {
 
     var residentRecordBytes: Int { recordStorage.residentBytes }
     var encodedRecordBytes: Int { recordStorage.storedBytes }
+
+    /// Revalidate changed definitions without re-encoding the same immutable inputs.
+    public func replacingDefinitions(_ definitions: [LibraryChannelDefinition]) throws -> Self {
+        try Task.checkCancellation()
+        guard definitions.first?.profileID == state.definitions.first?.profileID else {
+            throw LiveTVPortableStateError.wrongProfile
+        }
+        return Self(
+            state: try LibraryChannelPortableState(definitions: definitions, snapshots: state.snapshots),
+            snapshotRecords: snapshotRecords, recordStorage: recordStorage
+        )
+    }
+
+    private init(
+        state: LibraryChannelPortableState, snapshotRecords: [String: SnapshotRecord],
+        recordStorage: LiveTVPortableRecordStorage
+    ) {
+        self.state = state
+        self.snapshotRecords = snapshotRecords
+        self.recordStorage = recordStorage
+    }
 }
 
 public struct LiveTVPortableImport: Sendable {

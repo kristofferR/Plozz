@@ -91,6 +91,7 @@ public struct HomeRow: Identifiable, Equatable, Sendable {
     public var libraries: [AggregatedLibrary]
     public var loadingPlaceholderCount: Int
     public var failure: AppError?
+    public var hasMore = false
 
     /// True when this row would draw nothing on Home. A row survives the
     /// visibility filter as an empty shell, so "are there any rows" is not the
@@ -106,6 +107,10 @@ public struct HomeRow: Identifiable, Equatable, Sendable {
     /// Continue Watching shows wide landscape stills (resume artwork); every other
     /// media row shows portrait posters.
     public var style: HomeRowStyle { kind == .continueWatching ? .landscape : .poster }
+
+    public func playsOnSelect(continueWatchingAction: ContinueWatchingAction) -> Bool {
+        kind == .continueWatching && continueWatchingAction == .play
+    }
 
     /// The number of cards this row renders — its media `items` for a media row,
     /// or its `libraries` tiles for the Libraries row (exactly one is populated).
@@ -127,7 +132,22 @@ public struct HomeRow: Identifiable, Equatable, Sendable {
     }
 }
 
+struct HomeRowPreview: Sendable {
+    var items: [MediaItem]
+    let hasMore: Bool
+    var browseID: String?
+
+    init(_ candidates: [MediaItem], limit: Int, retainsCandidates: Bool = false) {
+        var seen = Set<String>()
+        let unique = candidates.filter { seen.insert($0.stablePresentationID).inserted }
+        items = retainsCandidates ? unique : Array(unique.prefix(limit))
+        hasMore = unique.count > limit
+    }
+}
+
 public extension HomeRow {
+    static let watchlistPreviewLimit = 20
+
     /// Resolves the ordered, visible Home rows from loaded content.
     ///
     /// This makes explicit (and testable) the visibility rules the view used to
@@ -142,19 +162,14 @@ public extension HomeRow {
     /// caller can consult the shared, reactive visibility model; recomputing this
     /// on each render keeps visibility toggles taking effect without a reload.
     ///
-    /// Crucially, the same `isLibraryVisible` predicate is applied to the
-    /// Continue Watching and Recently Added rows' items via
-    /// `MediaItem.isVisibleOnHome(isLibraryVisible:)`, so a hidden library's
-    /// movies/episodes are suppressed from those rows too — not just the Libraries
-    /// tiles. Items that can't be attributed to a library stay visible
-    /// (fail-open), and a merged cross-server card shows if *any* of its
-    /// contributing libraries is visible. The **Watchlist** row is intentionally
-    /// exempt (see inline note): it's an explicit user save and the Plex watchlist
-    /// isn't a per-library list, so hiding a library never drops a watchlisted
-    /// title.
+    /// Library visibility filters discovery, not account-wide viewing history.
+    /// Recently Added keeps unattributed items and merged cards with any visible
+    /// contributing library. Watchlist retains its explicit-save policy below.
     static func rows(
         for content: HomeViewModel.Content,
+        libraryOrder: [String] = [],
         isLibraryVisible: (String) -> Bool,
+        isLibraryTileVisible: (AggregatedLibrary) -> Bool = { HomeLibraryVisibility.default.isVisibleOnHome($0) },
         isGlobalRowEnabled: (HomeGlobalRow) -> Bool = { _ in true },
         includesEmptyWatchlist: Bool = false,
         loadingRows: Set<HomeRowKind> = [],
@@ -178,7 +193,7 @@ public extension HomeRow {
         }
 
         if isGlobalRowEnabled(.continueWatching) {
-            let continueWatching = content.continueWatching.filter { $0.isVisibleOnHome(isLibraryVisible: isLibraryVisible) }
+            let continueWatching = content.continueWatching
             if !continueWatching.isEmpty || isPending(.continueWatching) {
                 rows.append(makeRow(.continueWatching, items: continueWatching))
             }
@@ -191,18 +206,28 @@ public extension HomeRow {
         // libraryID) so the guarantee survives even if provenance is added later.
         if isGlobalRowEnabled(.watchlist),
            !content.watchlist.isEmpty || includesEmptyWatchlist || isPending(.watchlist) {
-            rows.append(makeRow(.watchlist, items: content.watchlist))
+            let preview = HomeRowPreview(content.watchlist, limit: watchlistPreviewLimit)
+            var row = makeRow(.watchlist, items: preview.items)
+            row.hasMore = preview.hasMore
+            rows.append(row)
         }
         if isGlobalRowEnabled(.recentlyAdded) {
             let latest = content.latest.filter { $0.isVisibleOnHome(isLibraryVisible: isLibraryVisible) }
-            if !latest.isEmpty || isPending(.recentlyAdded) {
+            let hasCandidates = content.recentlyAddedCandidates?.contains {
+                $0.isVisibleOnHome(isLibraryVisible: isLibraryVisible)
+            } == true
+            if !latest.isEmpty || hasCandidates || isPending(.recentlyAdded) {
                 rows.append(makeRow(.recentlyAdded, items: latest))
             }
         }
 
-        let visibleLibraries = content.libraries.filter { isLibraryVisible($0.key) }
+        let visibleLibraries = content.libraries.filter { isLibraryVisible($0.key) && isLibraryTileVisible($0) }
         if !visibleLibraries.isEmpty || isPending(.libraries) {
-            rows.append(makeRow(.libraries, libraries: visibleLibraries))
+            let byKey = Dictionary(visibleLibraries.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+            let keys = OrderedVisibilityList.resolving(
+                available: visibleLibraries.map(\.key), order: libraryOrder, hidden: []
+            ).enabled
+            rows.append(makeRow(.libraries, libraries: keys.compactMap { byKey[$0] }))
         }
 
         return rows

@@ -10,6 +10,7 @@ public struct PlayerTouchGestureSurface: UIViewRepresentable {
     let state: PlayerTouchGestureState
     let shortcutsEnabled: Bool
     let levelsEnabled: Bool
+    // Playback lifetime only: temporary gesture suppression must not restore brightness.
     let isActive: Bool
     let canSeek: Bool
     let canBoost: Bool
@@ -365,6 +366,7 @@ public struct PlayerTouchGestureFeedbackView: View {
 
     public var body: some View {
         PlayerTouchGestureFeedbackContent(state: state, reduceMotion: reduceMotion)
+            .modifier(WindowSafeAreaPadding())
     }
 }
 
@@ -465,10 +467,8 @@ private struct PlayerTouchLevelMeter: View {
         let height = 156 + abs(stretch)
         let width: Double = isDirectInteraction ? 44 : 32
         ZStack(alignment: .bottom) {
-            Color.clear
-                .modifier(PanelGlassBackground(cornerRadius: 999))
-            Rectangle()
-                .fill(.white)
+            PlayerScrubTrackSurface(height: height)
+            PlayerTouchProgressFill(isActive: isDragging)
                 .frame(height: height * value)
             icon.foregroundStyle(.white)
             icon.foregroundStyle(.black)
@@ -487,7 +487,6 @@ private struct PlayerTouchLevelMeter: View {
         )
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { onFrameChange($0) }
         .contentShape(Rectangle())
-        .environment(\.colorScheme, .dark)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(kind == .brightness ? "Brightness" : "Volume")
         .accessibilityValue(Text(value, format: .percent.precision(.fractionLength(0))))
@@ -510,13 +509,15 @@ private struct PlayerTouchLevelMeter: View {
 }
 
 private struct PlayerTouchFeedbackPill: ViewModifier {
+    @Environment(\.playerControlForeground) private var foreground
+
     func body(content: Content) -> some View {
         content
             .font(.callout.weight(.semibold))
+            .foregroundStyle(foreground)
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
-            .modifier(PanelGlassBackground(cornerRadius: 999))
-            .environment(\.colorScheme, .dark)
+            .modifier(PanelGlassBackground(cornerRadius: 999, mediaGlass: true))
     }
 }
 

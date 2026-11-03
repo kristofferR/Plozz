@@ -2,7 +2,7 @@ import CoreModels
 import CoreNetworking
 import CryptoKit
 import Darwin
-import FeatureLiveTVCore
+@testable import FeatureLiveTVCore
 import Foundation
 @testable import ProviderIPTV
 @testable import TestSupportPerformance
@@ -10,6 +10,124 @@ import XCTest
 
 @MainActor
 final class IPTVPerformanceProbeTests: XCTestCase {
+    private final class GuidePerformanceSecureStore: SecureStoring, @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [String: String] = [:]
+        func string(for key: String) -> String? { lock.withLock { values[key] } }
+        func readString(for key: String) throws -> String? { string(for: key) }
+        func setString(_ value: String, for key: String) throws { lock.withLock { values[key] = value } }
+        func removeValue(for key: String) throws { _ = lock.withLock { values.removeValue(forKey: key) } }
+    }
+
+    func testPerformanceLargeGuideBatches() async throws {
+        try PerformanceProbe.requireEnabled()
+        let channelCount = 6_000
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMddHHmmss Z"
+        let times = (0...8).map { formatter.string(from: now.addingTimeInterval(Double($0) * 3_600)) }
+        let description = String(repeating: "Generated guide description. ", count: 12)
+        var body = Data("<tv>".utf8)
+        for channel in 0..<channelCount {
+            body.append(Data("<channel id=\"c\(channel)\"><display-name>Channel \(channel)</display-name></channel>".utf8))
+        }
+        for channel in 0..<channelCount {
+            for hour in 0..<8 {
+                body.append(Data("""
+                <programme channel="c\(channel)" start="\(times[hour])" stop="\(times[hour + 1])">\
+                <title>Programme \(channel)-\(hour)</title><desc>\(description)</desc></programme>
+                """.utf8))
+            }
+        }
+        body.append(Data("</tv>".utf8))
+        let payload = body
+        XCTAssertGreaterThan(payload.count, 16 * 1_024 * 1_024)
+        let batches = (0..<2).map { batch in
+            (batch * 2_000..<(batch + 1) * 2_000).map { channel in
+                LiveTVPrototypeChannel(
+                    id: "channel-\(channel)", number: channel, name: "Channel \(channel)",
+                    category: "Live TV", symbol: "tv", accent: 0, source: .iptv, tagline: "",
+                    guideID: "c\(channel)"
+                )
+            }
+        }
+        let catalog = (0..<channelCount).map { channel in
+            LiveTVPrototypeChannel(
+                id: "channel-\(channel)", number: channel, name: "Channel \(channel)",
+                category: "Live TV", symbol: "tv", accent: 0, source: .iptv, tagline: "",
+                guideID: "c\(channel)"
+            )
+        }
+        try await PerformanceProbe.measure(self, scenario: "guide-large-batches") {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer {
+                do { try FileManager.default.removeItem(at: root) }
+                catch { XCTFail("Could not remove the owned guide fixture.") }
+            }
+            let server = try IPTVTestHTTPServer { _ in
+                .init(data: payload, headers: ["Cache-Control": "max-age=60"])
+            }
+            let base: URL
+            do { base = try await server.start() }
+            catch { await server.stop(); throw error }
+            let client: IPTVClient
+            do {
+                client = try IPTVClient(
+                    credential: IPTVCredential(mode: .playlist, address: base.appendingPathComponent("playlist.m3u")),
+                    directory: root
+                )
+            } catch { await server.stop(); throw error }
+            do {
+                let cache = LiveTVIndexedCache(
+                    url: root.appendingPathComponent("guide.sqlite"), namespace: "performance",
+                    authorizationScope: "fixture", secureStore: GuidePerformanceSecureStore()
+                )
+                let index = LiveTVGuideIndex(cache: cache)
+                let guideURL = base.appendingPathComponent("guide.xml")
+                var rows = 0
+                var generations = Set<UUID>()
+                var batchNanoseconds: [Int] = []
+                for channels in batches {
+                    let start = DispatchTime.now().uptimeNanoseconds
+                    let programs = try await index.programs(
+                        from: guideURL, catalog: catalog, channels: channels,
+                        range: DateInterval(start: now, duration: 8 * 3_600),
+                        download: { try await client.guideDocument(from: guideURL) }
+                    )
+                    batchNanoseconds.append(Int(DispatchTime.now().uptimeNanoseconds - start))
+                    XCTAssertEqual(programs.count, 16_000)
+                    XCTAssertEqual(Set(programs.map(\.channelID)), Set(channels.map(\.id)))
+                    let state = try await cache.guideIndexState(
+                        sourceID: LiveTVGuideIndex.sourceID(guideURL), sourceURL: guideURL
+                    )
+                    generations.insert(try XCTUnwrap(state).generation)
+                    rows += programs.count
+                }
+                let requests = await server.requestCount
+                XCTAssertEqual(generations.count, 1)
+                XCTAssertEqual(requests, 1)
+                await index.cancel()
+                await client.cancel()
+                await server.stop()
+                return [
+                    "guideBytes": payload.count, "httpRequests": requests,
+                    "downloadedBytes": requests * payload.count, "parseInvocations": generations.count,
+                    "retainedRows": rows, "requestedChannels": batches.reduce(0) { $0 + $1.count },
+                    "coldBatchNanoseconds": batchNanoseconds[0], "warmBatchNanoseconds": batchNanoseconds[1],
+                    "indexedChannels": catalog.count
+                ]
+            } catch {
+                await client.cancel()
+                await server.stop()
+                throw error
+            }
+
+        }
+    }
+
     func testPerformanceCachedPlaylistRefresh() async throws {
         try PerformanceProbe.requireEnabled()
         let count = 1_000
@@ -75,7 +193,7 @@ final class IPTVPerformanceProbeTests: XCTestCase {
                         key: credential.catalogKey
                     )
                     try catalog.setState(
-                        "playlist-v4", String(Date().addingTimeInterval(-3_600).timeIntervalSince1970)
+                        "playlist-v5", String(Date().addingTimeInterval(-3_600).timeIntervalSince1970)
                     )
                 }
                 let foreground = Task { @MainActor in

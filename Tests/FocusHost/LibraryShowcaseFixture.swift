@@ -27,6 +27,12 @@ struct LibraryShowcaseFixture: View {
             }
         }
         .environment(\.plozzNavigationStyle, .rail)
+        .environment(\.plozzNavigationContentInset,
+                     ProcessInfo.processInfo.arguments.contains("--library-showcase-pinned-sidebar") ? 64 : 0)
+        .environment(\.plozzPinnedSidebarActive,
+                     ProcessInfo.processInfo.arguments.contains("--library-showcase-pinned-sidebar"))
+        .environment(\.plozzReduceTransparency,
+                     ProcessInfo.processInfo.arguments.contains("--library-showcase-opaque-controls"))
         .environment(\.plozzCardFocusStyle, .system)
         .environment(\.plozzCardStyle, .borderless)
         .environment(\.themePalette, .dark)

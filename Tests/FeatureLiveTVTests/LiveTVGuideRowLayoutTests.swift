@@ -103,13 +103,16 @@ final class LiveTVGuideRowLayoutTests: XCTestCase {
         )
         XCTAssertEqual(layout.bounds, CGRect(x: -90, y: -60, width: 1_920, height: 1_080))
         XCTAssertEqual(layout.videoFrame.maxX, layout.bounds.maxX, accuracy: 0.5)
+        #if os(tvOS)
         XCTAssertEqual(layout.videoFrame.minX, layout.bounds.minX, accuracy: 0.5)
         XCTAssertEqual(layout.videoFrame.minY, layout.bounds.minY, accuracy: 0.5)
         XCTAssertEqual(layout.videoFrame.width / layout.videoFrame.height, 16.0 / 9.0, accuracy: 0.001)
-        #if os(tvOS)
         XCTAssertEqual(layout.contentFrame.minX - layout.bounds.minX, 32, accuracy: 0.5)
         XCTAssertEqual(layout.bounds.maxX - layout.contentFrame.maxX, 32, accuracy: 0.5)
         XCTAssertEqual(layout.bounds.maxY - layout.contentFrame.maxY, 20, accuracy: 0.5)
+        #else
+        XCTAssertGreaterThan(layout.videoFrame.minX, layout.contentFrame.minX + layout.sidebarWidth)
+        XCTAssertEqual(layout.videoFrame.minY, layout.contentFrame.minY + 8, accuracy: 0.5)
         #endif
     }
 
@@ -165,6 +168,68 @@ final class LiveTVGuideRowLayoutTests: XCTestCase {
             XCTAssertLessThan(end, layout.bounds.maxY - 16)
         }
     }
+
+    #if os(iOS)
+    func testMobileSearchPlaceholderUpdatesWithTheAppLocale() async throws {
+        let header = NavigationStack {
+            Color.clear.modifier(PrototypeToolbarSearch(
+                query: .constant("Arena"), isPresented: .constant(true),
+                focusRequest: 0, submit: {}, focusChanged: { _ in }
+            ))
+        }
+        let host = UIHostingController(rootView: header.environment(\.locale, Locale(identifier: "en")))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKeyAndVisible()
+        }
+        func searchField(in controller: UIViewController) -> UISearchTextField? {
+            controller.navigationItem.searchController?.searchBar.searchTextField
+                ?? controller.children.lazy.compactMap { searchField(in: $0) }.first
+        }
+        func waitForPlaceholder(_ expected: String) async throws -> UISearchTextField {
+            for _ in 0..<100 {
+                window.layoutIfNeeded()
+                if let field = searchField(in: host), field.placeholder == expected { return field }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            let field = try XCTUnwrap(searchField(in: host))
+            XCTAssertEqual(field.placeholder, expected)
+            return field
+        }
+        let field = try await waitForPlaceholder("Search")
+        host.rootView = header.environment(\.locale, Locale(identifier: "nl"))
+        let translated = try await waitForPlaceholder("Zoeken")
+        XCTAssertTrue(translated === field, "Changing language must update the existing native field")
+        XCTAssertEqual(translated.text, "Arena")
+        host.rootView = header.environment(\.locale, Locale(identifier: "en"))
+        let restored = try await waitForPlaceholder("Search")
+        XCTAssertTrue(restored === field)
+    }
+
+    func testCategoriesUseAvailableSpaceInsteadOfDeviceFamily() {
+        for size in [CGSize(width: 732, height: 600), CGSize(width: 820, height: 1_180)] {
+            let layout = PrototypePreviewLayout(size: size, showsCategories: true, showsVideoPreview: true)
+            XCTAssertEqual(layout.sidebarWidth, 200)
+            XCTAssertGreaterThan(layout.guideWidth, 450)
+            XCTAssertGreaterThan(layout.heroHeight, 0)
+        }
+        for size in [
+            CGSize(width: 731, height: 600), CGSize(width: 430, height: 932),
+            CGSize(width: 932, height: 430), CGSize(width: 640, height: 1_000)
+        ] {
+            let layout = PrototypePreviewLayout(size: size, showsCategories: true)
+            XCTAssertEqual(layout.sidebarWidth, 0)
+            XCTAssertEqual(layout.heroHeight, 0)
+            XCTAssertEqual(layout.sectionGap, PrototypeLayout.smallGap)
+        }
+    }
+    #endif
 
     func testGuideReachesTVBottomWithoutMovingSidebarControlsIntoOverscan() {
         let layout = PrototypePreviewLayout(
@@ -676,7 +741,13 @@ final class LiveTVGuideRowLayoutTests: XCTestCase {
                 layout.contentFrame.width, accuracy: 0.01
             )
             XCTAssertGreaterThanOrEqual(layout.guideWidth - PrototypeLayout.guideInset * 2, 650)
+            #if os(tvOS)
             XCTAssertEqual(layout.videoFrame.width, layout.bounds.width)
+            #else
+            XCTAssertLessThan(layout.videoFrame.width, layout.bounds.width)
+            XCTAssertGreaterThan(layout.videoFrame.minX, layout.contentFrame.minX + layout.sidebarWidth)
+            XCTAssertEqual(layout.videoFrame.maxX, layout.bounds.maxX)
+            #endif
         }
     }
 
@@ -700,7 +771,15 @@ final class LiveTVGuideRowLayoutTests: XCTestCase {
             XCTAssertEqual(searching.contentFrame, browsing.contentFrame)
             XCTAssertEqual(searching.fadeEnd, browsing.fadeEnd)
             XCTAssertLessThanOrEqual(searching.heroHeight, browsing.heroHeight)
+            #if os(tvOS)
             XCTAssertGreaterThan(searching.heroHeight, 0)
+            #else
+            XCTAssertEqual(searching.heroHeight, 0)
+            XCTAssertEqual(searching.heroArtworkSize, .zero)
+            XCTAssertEqual(searching.sectionGap, PrototypeLayout.smallGap)
+            XCTAssertEqual(searching.sidebarWidth, 0)
+            XCTAssertEqual(searching.guideWidth, searching.contentFrame.width)
+            #endif
         }
     }
 

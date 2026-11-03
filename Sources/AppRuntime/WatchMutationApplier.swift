@@ -1,5 +1,6 @@
 import Foundation
 import CoreModels
+import TraktService
 
 /// Concrete ``WatchMutationApplying`` for either app: resolves an `accountID` to its
 /// live `MediaProvider` (on the main actor) and performs the played / resume write,
@@ -210,6 +211,48 @@ public struct AppShellWatchMutationApplier: WatchMutationAuthorizationEnforcing 
         guard await isActive() else { throw AppError.serverUnreachable }
         try await WatchMutationDeliveryAuthorization.check()
         try await applyTrakt(intent)
+    }
+
+    public func scrobbleTrakt(_ intent: TraktScrobbleIntent, source: WatchMutationTarget?) async throws {
+        do {
+            try await scrobbleTrakt(intent)
+        } catch TraktScrobbleError.unidentifiableItem {
+            guard let source else { throw TraktScrobbleError.unidentifiableItem }
+            guard await isActive() else { throw AppError.serverUnreachable }
+            try await WatchMutationDeliveryAuthorization.check()
+            guard let provider = await scopedProvider(for: source.accountID) else {
+                throw AppError.serverUnreachable
+            }
+            guard await isActive() else { throw AppError.serverUnreachable }
+            try await WatchMutationDeliveryAuthorization.check()
+            let item = try await provider.item(id: source.itemID)
+            guard await isActive() else { throw AppError.serverUnreachable }
+            try await WatchMutationDeliveryAuthorization.check()
+            guard item.id == source.itemID, item.kind == intent.kind,
+                  item.sourceAccountID == nil || item.sourceAccountID == source.accountID,
+                  intent.seasonNumber == nil || intent.seasonNumber == item.seasonNumber,
+                  intent.episodeNumber == nil || intent.episodeNumber == item.episodeNumber else {
+                throw TraktScrobbleError.unidentifiableItem
+            }
+            var recovered = intent
+            recovered.seasonNumber = item.seasonNumber
+            recovered.episodeNumber = item.episodeNumber
+            let refreshedKeys = Set(item.providerIDs.keys.map { $0.lowercased() })
+            recovered.providerIDs = intent.providerIDs.filter { !refreshedKeys.contains($0.key.lowercased()) }
+                .merging(item.providerIDs) { _, refreshed in refreshed }
+            if !TraktScrobbler.canIdentify(recovered.makeScrobbleItem()),
+               item.kind == .episode, let seriesID = item.seriesID {
+                let series = try await provider.item(id: seriesID)
+                guard await isActive() else { throw AppError.serverUnreachable }
+                try await WatchMutationDeliveryAuthorization.check()
+                guard series.id == seriesID, series.kind == .series,
+                      series.sourceAccountID == nil || series.sourceAccountID == source.accountID else {
+                    throw TraktScrobbleError.unidentifiableItem
+                }
+                recovered.providerIDs.mergeSeriesProviderIDs(from: series.providerIDs)
+            }
+            try await scrobbleTrakt(recovered)
+        }
     }
 
     public func scrobbleSimkl(_ intent: TraktScrobbleIntent) async throws {
@@ -432,6 +475,8 @@ public struct AppShellWatchMutationApplier: WatchMutationAuthorizationEnforcing 
 }
 
 extension TraktScrobbleIntent {
+    public var playbackEvent: PlaybackEvent { progress < 100 ? .pause : .stop }
+
     /// Rebuilds a minimal `MediaItem` carrying just the fields a Trakt scrobble body
     /// needs (kind, ids, season/episode, title/year), so the durable intent can be
     /// replayed without retaining the original item.

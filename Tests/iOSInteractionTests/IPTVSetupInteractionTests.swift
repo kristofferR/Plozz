@@ -29,7 +29,9 @@ final class IPTVSetupInteractionTests: XCTestCase {
         XCTAssertTrue(app.textFields["Playlist URL"].exists)
         XCTAssertTrue(app.textFields["Name (optional)"].exists)
         XCTAssertFalse(authentication.exists)
-        XCTAssertFalse(app.textFields["Guide URL (optional)"].exists)
+        XCTAssertTrue(app.textFields["EPG URL (optional)"].exists)
+        XCTAssertFalse(app.staticTexts["Leave blank to use your provider's guide."].exists)
+        XCTAssertFalse(app.switches["Find guides in playlist"].exists)
         XCTAssertFalse(app.switches["Advanced options"].exists)
         XCTAssertFalse(app.staticTexts[httpWarning].exists)
         XCTAssertFalse(app.staticTexts["Add a playlist or sign in."].exists)
@@ -37,7 +39,8 @@ final class IPTVSetupInteractionTests: XCTestCase {
         XCTAssertEqual(advanced.value as? String, "Collapsed")
         advanced.tap()
         XCTAssertTrue(authentication.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.textFields["Guide URL (optional)"].exists)
+        XCTAssertTrue(app.textFields["EPG URL (optional)"].exists)
+        XCTAssertFalse(app.switches["Find guides in playlist"].exists)
         XCTAssertFalse(app.staticTexts["Your link may already include a login."].exists)
         XCTAssertFalse(app.staticTexts[
             "Only add headers requested by your provider. Credentials are never forwarded to a different server."
@@ -45,8 +48,23 @@ final class IPTVSetupInteractionTests: XCTestCase {
         XCTAssertEqual(advanced.value as? String, "Expanded")
         advanced.tap()
         XCTAssertFalse(authentication.exists)
-        XCTAssertFalse(app.textFields["Guide URL (optional)"].exists)
+        XCTAssertTrue(app.textFields["EPG URL (optional)"].exists)
         XCTAssertEqual(advanced.value as? String, "Collapsed")
+    }
+
+    func testCustomEPGStaysVisibleAndSurvivesAdvancedDisclosure() {
+        launch()
+        let guide = app.textFields["EPG URL (optional)"]
+        reveal(guide)
+        guide.tap()
+        guide.typeText("https://guide.example.test/custom.xml\n")
+        reveal(advanced)
+        advanced.tap()
+        XCTAssertEqual(guide.value as? String, "https://guide.example.test/custom.xml")
+        reveal(advanced)
+        advanced.tap()
+        XCTAssertEqual(guide.value as? String, "https://guide.example.test/custom.xml")
+        XCTAssertFalse(app.switches["Find guides in playlist"].exists)
     }
 
     func testPlaylistAuthenticationSurvivesCollapseAndModeChanges() {

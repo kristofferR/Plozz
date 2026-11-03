@@ -6,7 +6,7 @@ import CoreModels
 @MainActor
 final class SubtitleMenuAvailabilityTests: XCTestCase {
     func testDownloadsKeepEmptySubtitleMenuReachableWithoutInventingTracks() {
-        let model = PlayerControlsModel()
+        let model = controlsWithoutSystemAudio()
         model.engineCapabilities = []
         model.subtitleDownload.canSearch = true
 
@@ -17,7 +17,7 @@ final class SubtitleMenuAvailabilityTests: XCTestCase {
     }
 
     func testEmptyUnsupportedSourceHasNoSubtitleControl() {
-        let model = PlayerControlsModel()
+        let model = controlsWithoutSystemAudio()
         model.engineCapabilities = []
 
         XCTAssertFalse(model.subtitleDownload.canSearch)
@@ -27,7 +27,7 @@ final class SubtitleMenuAvailabilityTests: XCTestCase {
 
     func testExistingTracksKeepTheirSelectedFocusWithOrWithoutDownloads() {
         for canSearch in [false, true] {
-            let model = PlayerControlsModel()
+            let model = controlsWithoutSystemAudio()
             model.engineCapabilities = []
             model.subtitleDownload.canSearch = canSearch
             model.subtitleOptions = [
@@ -44,7 +44,7 @@ final class SubtitleMenuAvailabilityTests: XCTestCase {
     }
 
     func testUnselectedTracksFocusTheFirstRealRow() {
-        let model = PlayerControlsModel()
+        let model = controlsWithoutSystemAudio()
         model.subtitleDownload.canSearch = true
         model.subtitleOptions = [
             PlayerTrackOption(id: 7, title: Text("English"), isSelected: false)
@@ -54,7 +54,7 @@ final class SubtitleMenuAvailabilityTests: XCTestCase {
     }
 
     func testTrackRefreshKeepsDownloadsAvailableAndUsesAnExistingFocusTarget() {
-        let model = PlayerControlsModel()
+        let model = controlsWithoutSystemAudio()
         model.engineCapabilities = []
         model.subtitleDownload.canSearch = true
         XCTAssertEqual(model.subtitleTrackListFocus, .download)
@@ -71,7 +71,7 @@ final class SubtitleMenuAvailabilityTests: XCTestCase {
     }
 
     func testDownloadOnlySubtitleControlPreservesOtherControlsAndTheirOrder() {
-        let model = PlayerControlsModel()
+        let model = controlsWithoutSystemAudio()
         model.engineCapabilities = [.playbackSpeed]
         model.audioOptions = [
             PlayerTrackOption(id: 1, title: Text("English"), isSelected: true),
@@ -88,7 +88,7 @@ final class SubtitleMenuAvailabilityTests: XCTestCase {
 @MainActor
 final class AudioMenuAvailabilityTests: XCTestCase {
     func testSingleTrackIsReadOnlyAndAbsentFromTVFocusCategories() {
-        let model = PlayerControlsModel()
+        let model = controlsWithoutSystemAudio()
         model.engineCapabilities = [.playbackSpeed]
         XCTAssertFalse(model.hasAudioControls)
         model.audioOptions = [.init(id: 1, title: Text("Dolby Digital 5.1"), isSelected: true)]
@@ -99,7 +99,7 @@ final class AudioMenuAvailabilityTests: XCTestCase {
     }
 
     func testAlternateTrackAndDialogEnhanceEachKeepAudioReachable() {
-        let model = PlayerControlsModel()
+        let model = controlsWithoutSystemAudio()
         model.audioOptions = [
             .init(id: 1, title: Text("English"), isSelected: true),
             .init(id: 2, title: Text("French"), isSelected: false)
@@ -127,6 +127,68 @@ final class AudioMenuAvailabilityTests: XCTestCase {
 /// exclusion, engine-dual vs sidecar sourcing) that used to be buried in
 /// `PlayerViewModel.loadTrackOptions`.
 final class TrackMenuBuilderTests: XCTestCase {
+    func testFrenchVersionsHaveMatchingNativeAndTVLabelsAndStableSelection() {
+        let versions = ["VFQ", "VFF", "VFI"]
+        let tracks = versions.enumerated().map { index, version in
+            MediaTrack(id: index + 10, kind: .audio, displayTitle: version,
+                       language: "fr", codec: "dts", channels: 6)
+        }
+        for localeID in ["en", "fr", "es"] {
+            let locale = Locale(identifier: localeID)
+            let language = TrackLabeling.languageName(forCode: "fr", in: locale)!
+            let options = TrackMenuBuilder.audioOptions(
+                tracks: tracks, selectedID: 11, preferred: ["fr-CA"], locale: locale
+            )
+            XCTAssertEqual(options.map(\.id), [10, 11, 12])
+            XCTAssertEqual(options.filter(\.isSelected).map(\.id), [11])
+            XCTAssertEqual(options.map(\.nativeTitle), versions.map { "\(language) (\($0), DTS 5.1)" })
+            for (option, version) in zip(options, versions) {
+                XCTAssertEqual(
+                    option.title,
+                    Text(verbatim: language) + Text(verbatim: " (")
+                        + (Text(verbatim: version) + Text(verbatim: ", ") + Text(verbatim: "DTS 5.1"))
+                        + Text(verbatim: ")")
+                )
+            }
+        }
+    }
+
+    func testNativeAndTVAudioLabelsRetainDetailedSourceProfiles() {
+        let tracks = [
+            MediaTrack(id: 1, kind: .audio, displayTitle: "English", language: "en", codec: "truehd",
+                       profile: "Dolby TrueHD + Dolby Atmos", channels: 8),
+            MediaTrack(id: 2, kind: .audio, displayTitle: "English", language: "en", codec: "dca",
+                       profile: "MA + DTS:X IMAX", channels: 8),
+            MediaTrack(id: 3, kind: .audio, displayTitle: "English", language: "en", codec: "eac3",
+                       channels: 6, isAtmos: true),
+            MediaTrack(id: 4, kind: .audio, displayTitle: "English", language: "en", codec: "dca",
+                       profile: "DTS-HD MA", channels: 8, isDTSX: true)
+        ]
+        let formats = ["Dolby TrueHD Atmos", "DTS-HD MA + DTS:X IMAX", "Dolby Digital+ Atmos", "DTS-HD MA + DTS:X"]
+        for selectedID in [1, 2, 4] {
+            let options = TrackMenuBuilder.audioOptions(
+                tracks: tracks, selectedID: selectedID, preferred: [], locale: .init(identifier: "en")
+            )
+            XCTAssertEqual(options.map(\.nativeTitle), formats.map { "English (\($0))" })
+            XCTAssertEqual(options.filter(\.isSelected).map(\.id), [selectedID])
+            for (option, format) in zip(options, formats) {
+                XCTAssertEqual(option.title,
+                               Text(verbatim: "English") + Text(verbatim: " (") + Text(verbatim: format) + Text(verbatim: ")"))
+            }
+        }
+    }
+
+    func testNativeSubtitleLabelsIncludeOffLanguageAndAccessibilityFacts() {
+        let options = TrackMenuBuilder.subtitleOptions(
+            tracks: [.init(id: 9, kind: .subtitle, displayTitle: "English", language: "en",
+                           codec: "subrip", isHearingImpaired: true)],
+            selectedID: 9, preferred: [], detectedLanguages: [:], locale: Locale(identifier: "en")
+        )
+        XCTAssertEqual(options.map(\.nativeTitle), ["Off", "English (SDH)"])
+        XCTAssertEqual(options.map(\.id), [-1, 9])
+        XCTAssertEqual(options.map(\.isSelected), [false, true])
+    }
+
     func testBothPresentationsUseNormalizedSourceTrackAndActualSelection() {
         let options = TrackMenuBuilder.audioOptions(tracks: [
             MediaTrack(id: 1, kind: .audio, displayTitle: "AC3 5.1 (Default)", codec: "ac3", isDefault: true, channels: 6),
@@ -146,6 +208,18 @@ final class TrackMenuBuilderTests: XCTestCase {
         )]
         let options = TrackMenuBuilder.audioOptions(tracks: tracks, selectedID: 1, preferred: [], locale: .init(identifier: "en_US"))
         XCTAssertEqual(options.first?.nativeTitle, "English (Dolby Digital 5.1, Commentary)")
+        XCTAssertEqual(options.first?.isSelected, true)
+    }
+
+    func testBareLanguageProducesSameRichLabelForNativeAndTVMenus() {
+        let options = TrackMenuBuilder.audioOptions(
+            tracks: [.init(id: 4, kind: .audio, displayTitle: "English", language: "en", codec: "opus", channels: 6)],
+            selectedID: 4, preferred: [], locale: .init(identifier: "en")
+        )
+        XCTAssertEqual(options.first?.nativeTitle, "English (Opus 5.1)")
+        XCTAssertEqual(options.first?.title,
+                       Text(verbatim: "English") + Text(verbatim: " (") + Text(verbatim: "Opus 5.1") + Text(verbatim: ")"))
+        XCTAssertEqual(options.first?.id, 4)
         XCTAssertEqual(options.first?.isSelected, true)
     }
 

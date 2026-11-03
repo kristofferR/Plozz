@@ -38,8 +38,9 @@ final class PlaybackDiagnosticsHostedTests: XCTestCase {
     #if os(tvOS)
     func testFullDiagnosticsClearRealTransportAndInfoCardWithoutShrinkingText() async throws {
         try await assertControlClearance(diagnostics: fixture, expectedTokens: [
-            "APAC", "7.1.4", "HDMI", "Thermal", "engines 2", "Stalls", "Dropped",
-            "33.2", "82.0", "45.0", "10.0", "24.00", "23 fps live", "P8", "10-bit", "DOVIWITHHDR10"
+            "AetherEngine", "v7.44.0", "APAC", "7.1.4", "HDMI", "Thermal", "engines 2", "Stalls", "Dropped",
+            "33.2", "82.0", "45.0", "10.0", "24.00", "23 fps live", "P8", "10-bit", "DOVIWITHHDR10",
+            "Playback cache", "512 MB", "Encoding", "Lossy encoding"
         ])
     }
 
@@ -83,6 +84,7 @@ final class PlaybackDiagnosticsHostedTests: XCTestCase {
             TelevisionDiagnosticsPlacement(controlsLayout: model.subtitleLayout) { width in
                 diagnostics.televisionPanel(width: width)
                     .environment(\.themePalette, .dark)
+                    .environment(\.locale, Locale(identifier: "en_US"))
                     .reportSubtitleControlsFrame { measurement.frame = $0 }
             }
         )
@@ -121,7 +123,7 @@ final class PlaybackDiagnosticsHostedTests: XCTestCase {
             }
             let text = try recognizedPanelText(image, frame: frame)
             for token in expectedTokens {
-                XCTAssertTrue(text.contains(token), "The complete panel must be visible, including its last row: \(text)")
+                XCTAssertTrue(text.contains(token), "Missing '\(token)' from the complete panel: \(text)")
             }
             let attachment = XCTAttachment(image: image)
             attachment.name = info ? "Diagnostics above Info card" : "Diagnostics above transport"
@@ -145,6 +147,18 @@ final class PlaybackDiagnosticsHostedTests: XCTestCase {
             width: frame.width * image.scale, height: frame.height * image.scale
         )))
         var lines: [String] = []
+        // Full columns keep wrapped values together when overlapping tiles split a line.
+        for column in 0..<3 {
+            let x = panel.width * column / 3
+            let end = panel.width * (column + 1) / 3
+            let image = try XCTUnwrap(panel.cropping(to: CGRect(
+                x: x, y: 0, width: end - x, height: panel.height
+            )))
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            try VNImageRequestHandler(cgImage: image).perform([request])
+            lines += (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+        }
         for y in stride(from: 0, to: panel.height, by: 1000) {
             for x in stride(from: 0, to: panel.width, by: 1200) {
                 let tile = try XCTUnwrap(panel.cropping(to: CGRect(
@@ -167,7 +181,8 @@ final class PlaybackDiagnosticsHostedTests: XCTestCase {
             audioPipelineDescription: "TRUEHD Atmos → APAC 7.1.4",
             audioOutput: .init(renderingMode: .format("Dolby Atmos"), connections: [.format("HDMI")]),
             subtitleDescription: "SubRip · English", container: "mkv", mode: .plozzigen,
-            hdr: .dolbyVision, engineName: "Plozzigen", bufferedSecondsAhead: 10, engineBufferedSecondsAhead: 45,
+            hdr: .dolbyVision, engineName: "AetherEngine v7.44.0", bufferedSecondsAhead: 10, engineBufferedSecondsAhead: 45,
+            sessionCache: .init(residentBytes: 536_870_912, effectiveBudgetBytes: 2_147_483_648),
             stallCount: 0, droppedVideoFrames: 0, frameRate: 24, observedFps: 23,
             deviceModel: "Apple TV 4K (2nd gen)", deviceMemoryBytes: 3_000_000_000,
             freeDiskBytes: 600_000_000, totalDiskBytes: 32_000_000_000,

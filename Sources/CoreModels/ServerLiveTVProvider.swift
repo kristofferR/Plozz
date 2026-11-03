@@ -8,6 +8,9 @@ public protocol ServerLiveTVProviding: Sendable {
     func liveTVAvailability() async throws -> ServerLiveTVAvailability
     /// Explicit source refreshes must not reuse an adapter's still-fresh channel catalog.
     func refreshLiveTVAvailability() async throws -> ServerLiveTVAvailability
+    /// Complete already-started startup guide discovery after publishing saved channels.
+    /// Returns nil when no capability update is needed; must not start another catalog download.
+    func completeLiveTVGuideDiscovery() async throws -> Bool?
     func liveTVChannels() async throws -> [ServerLiveTVChannel]
     /// A window of at most 48 hours and 2,000 provider-local channel IDs.
     /// Prefer visible channels: some servers expose only per-channel/day EPG
@@ -17,14 +20,62 @@ public protocol ServerLiveTVProviding: Sendable {
         from: Date,
         to: Date
     ) async throws -> [ServerLiveTVProgramme]
+    /// Require revalidation on the next guide request, retaining usable saved listings.
+    func invalidateLiveTVGuideCache() async
     func openLiveTVChannel(id: String) async throws -> any LiveTVStreamLease
 }
 
 public extension ServerLiveTVProviding {
     func cachedLiveTVCatalog() async throws -> ServerLiveTVCatalogSnapshot? { nil }
+    func completeLiveTVGuideDiscovery() async throws -> Bool? { nil }
+    func invalidateLiveTVGuideCache() async {}
 
     func refreshLiveTVAvailability() async throws -> ServerLiveTVAvailability {
         try await liveTVAvailability()
+    }
+}
+
+/// Identifies one refresh across channel/window batches without sharing failures
+/// with another refresh, account, or authorization. Providers own any scoped state.
+public final class ServerLiveTVGuideRefreshScope: Sendable {
+    @TaskLocal public static var current: ServerLiveTVGuideRefreshScope?
+
+    public init() {}
+}
+
+/// Progress for the current stage, never an estimate of the entire guide job.
+public struct ServerLiveTVGuideProgress: Equatable, Sendable {
+    public enum Stage: Sendable {
+        case downloading, readingGuide, preparingListings, saving, matching
+    }
+
+    public typealias Handler = @Sendable (ServerLiveTVGuideProgress) -> Void
+    @TaskLocal public static var report: Handler?
+
+    public let stage: Stage
+    public let completed: Int
+    public let total: Int?
+
+    public init(stage: Stage, completed: Int = 0, total: Int? = nil) {
+        self.stage = stage
+        self.completed = max(0, completed)
+        self.total = total.flatMap { $0 > 0 && $0 >= completed ? $0 : nil }
+    }
+
+    public var fractionCompleted: Double? {
+        total.map { Double(completed) / Double($0) }
+    }
+}
+
+/// Usable listings from an incomplete request. Consumers must retain the failure
+/// and must not interpret omitted channels as successfully empty coverage.
+public struct ServerLiveTVPartialGuideError: Error, Sendable {
+    public let programmes: [ServerLiveTVProgramme]
+    public let failure: any Error
+
+    public init(programmes: [ServerLiveTVProgramme], failure: any Error) {
+        self.programmes = programmes
+        self.failure = failure
     }
 }
 

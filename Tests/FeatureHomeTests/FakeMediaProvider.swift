@@ -15,10 +15,12 @@ import CoreModels
 /// `stateLock`. (Production resolves a *distinct* provider per account, so this
 /// sharing — and the race it exposes — is unique to the tests.) The lock is
 /// never held across an `await`.
-final class FakeMediaProvider: MediaProvider, InteractiveBrowseActivityReporting,
+class FakeMediaProvider: MediaProvider, InteractiveBrowseActivityReporting,
     SupplementalStreamFactsProviding, @unchecked Sendable {
     let kind: ProviderKind
     let session: UserSession
+    var playbackInventoryRequiresEnrichment = false
+    var playbackItemHandler: (@Sendable (String) async throws -> MediaItem)?
 
     /// Serializes mutation/reads of the call-counter state touched concurrently by
     /// `item(id:)`, `children(of:)`, `libraries()`, and `items(in:page:)`.
@@ -121,18 +123,20 @@ final class FakeMediaProvider: MediaProvider, InteractiveBrowseActivityReporting
     init(
         allItems: [MediaItem],
         kind: ProviderKind = .jellyfin,
-        accountID: String = "s"
+        accountID: String = "s",
+        serverName: String = "Home",
+        userName: String = "Alice"
     ) {
         self.allItems = allItems
         self.kind = kind
         self.session = UserSession(
             server: MediaServer(
                 id: accountID,
-                name: "Home",
+                name: serverName,
                 baseURL: URL(string: "http://host:8096")!,
                 provider: kind
             ),
-            userID: "u1", userName: "Alice", deviceID: "d1", accessToken: "TOKEN"
+            userID: "u1", userName: userName, deviceID: "d1", accessToken: "TOKEN"
         )
     }
 
@@ -185,6 +189,10 @@ final class FakeMediaProvider: MediaProvider, InteractiveBrowseActivityReporting
         }
         guard let item = allItems.first(where: { $0.id == id }) else { throw AppError.notFound }
         return item
+    }
+    func playbackItem(id: String) async throws -> MediaItem {
+        if let playbackItemHandler { return try await playbackItemHandler(id) }
+        return try await item(id: id)
     }
     /// Optional gate that, when present for a given parent id, suspends the
     /// `children(of:)` call until released. Lets tests observe state published

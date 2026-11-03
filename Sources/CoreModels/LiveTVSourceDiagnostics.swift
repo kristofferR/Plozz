@@ -90,6 +90,10 @@ public final class LiveTVSourceDiagnostics: @unchecked Sendable {
         var entries: [Entry] = []
     }
 
+    enum StorageIssue: String, Encodable, Sendable {
+        case locationUnavailable, oversized, invalidJournal, readFailed, writeFailed, encodeFailed
+    }
+
     public static let shared = LiveTVSourceDiagnostics(
         url: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
             .appendingPathComponent("Plozz/Diagnostics/live-tv-sources.json")
@@ -115,7 +119,7 @@ public final class LiveTVSourceDiagnostics: @unchecked Sendable {
     private var drainScheduled = false
     private var journal = Journal()
     private var writeScheduled = false
-    private var storageIssue: String?
+    private var storageIssue: StorageIssue?
     #if canImport(OSLog)
     private static let logger = Logger(subsystem: "com.plozz.app", category: "sourceDiagnostics")
     #endif
@@ -179,11 +183,83 @@ public final class LiveTVSourceDiagnostics: @unchecked Sendable {
             persist()
             do {
                 let data = try encodedJournal()
-                return "storage=\(storageIssue ?? "ok")\n" + String(decoding: data, as: UTF8.self)
+                return "storage=\(storageIssue?.rawValue ?? "ok")\n" + String(decoding: data, as: UTF8.self)
             } catch {
-                storageFailed("encodeFailed")
+                storageFailed(.encodeFailed)
                 return "storage=encodeFailed"
             }
+        }
+    }
+
+    public struct Export: Encodable, Sendable {
+        private let schema = 2
+        private let storageAvailable: Bool
+        private let storageIssue: StorageIssue?
+        private let discarded: Int
+        private let entries: [ExportEntry]
+
+        fileprivate init(journal: Journal, storage: StorageIssue?, scope: DiagnosticExportScope) {
+            storageAvailable = storage == nil
+            storageIssue = storage
+            discarded = journal.discarded
+            entries = journal.entries.map { ExportEntry($0, scope: scope) }
+        }
+    }
+
+    private struct ExportEntry: Encodable, Sendable {
+        let ageMilliseconds: Int?
+        let launch: String
+        let sequence: Int
+        let build: String
+        let event: Event
+        let identities: [String: String]
+        let counts: [String: Int]
+        let flags: [String: Bool]
+        let reason: Reason?
+        let stage: Stage?
+        let errorCode: Int?
+        let sources: [ExportSource]
+
+        init(_ entry: Entry, scope: DiagnosticExportScope) {
+            ageMilliseconds = scope.ageMilliseconds(for: entry.timestamp)
+            launch = scope.alias(for: entry.launch.uuidString)
+            sequence = entry.sequence
+            build = entry.build
+            event = entry.payload.event
+            identities = Dictionary(uniqueKeysWithValues: entry.payload.identities.map {
+                ($0.key.rawValue, scope.alias(forDigest: $0.value))
+            })
+            counts = Dictionary(uniqueKeysWithValues: entry.payload.counts.map { ($0.key.rawValue, $0.value) })
+            flags = Dictionary(uniqueKeysWithValues: entry.payload.flags.map { ($0.key.rawValue, $0.value) })
+            reason = entry.payload.reason
+            stage = entry.payload.stage
+            errorCode = entry.payload.errorCode
+            sources = entry.payload.sources.map {
+                ExportSource(id: scope.alias(forDigest: $0.id), account: $0.account.map { scope.alias(forDigest: $0) },
+                             enabled: $0.enabled)
+            }
+        }
+    }
+
+    private struct ExportSource: Encodable, Sendable {
+        let id: String
+        let account: String?
+        let enabled: Bool
+    }
+
+    @MainActor
+    public static func captureExport(scope: DiagnosticExportScope) -> Export {
+        shared.record(.reportRequested)
+        NotificationCenter.default.post(name: snapshotRequested, object: nil)
+        return shared.export(scope: scope)
+    }
+
+    public func export(scope: DiagnosticExportScope) -> Export {
+        queue.sync {
+            trim()
+            writeScheduled = false
+            persist()
+            return Export(journal: journal, storage: storageIssue, scope: scope)
         }
     }
 
@@ -210,11 +286,18 @@ public final class LiveTVSourceDiagnostics: @unchecked Sendable {
             if deduplicate {
                 let readEvents: Set<Event> = [.sourceRead, .sourceMissing, .sourceReadFailed]
                 let category = readEvents.contains(payload.event) ? "sourceReading" : payload.event.rawValue
-                let key = category + (payload.identities[.namespace] ?? "")
-                    + (payload.identities[.profile] ?? "") + (payload.identities[.account] ?? "")
-                    + (payload.identities[.catalog] ?? "")
-                    + (payload.identities[.source] ?? "") + (payload.flags[.sharedPartition].map(String.init) ?? "")
-                    + (payload.event == .keychainRead ? (payload.identities[.storageKey] ?? "") : "")
+                var key = category
+                key += payload.identities[.namespace] ?? ""
+                key += payload.identities[.profile] ?? ""
+                key += payload.identities[.account] ?? ""
+                key += payload.identities[.catalog] ?? ""
+                key += payload.identities[.source] ?? ""
+                if let sharedPartition = payload.flags[.sharedPartition] {
+                    key += String(sharedPartition)
+                }
+                if payload.event == .keychainRead {
+                    key += payload.identities[.storageKey] ?? ""
+                }
                 guard deduplicated[key] != payload else { return }
                 if deduplicated.count >= 128 { deduplicated.removeAll(keepingCapacity: true) }
                 deduplicated[key] = payload
@@ -263,7 +346,7 @@ public final class LiveTVSourceDiagnostics: @unchecked Sendable {
     }
 
     private func restore() {
-        guard let url else { storageFailed("locationUnavailable"); return }
+        guard let url else { storageFailed(.locationUnavailable); return }
         do {
             let handle = try FileHandle(forReadingFrom: url)
             let data: Data
@@ -274,7 +357,7 @@ public final class LiveTVSourceDiagnostics: @unchecked Sendable {
                 try? handle.close()
                 throw error
             }
-            guard data.count <= Self.maximumBytes else { storageFailed("oversized"); return }
+            guard data.count <= Self.maximumBytes else { storageFailed(.oversized); return }
             let decoded = try JSONDecoder().decode(Journal.self, from: data)
             guard decoded.schema == 1, (0...1_000_000_000_000).contains(decoded.discarded),
                   decoded.entries.count <= Self.maximumEntries,
@@ -282,20 +365,20 @@ public final class LiveTVSourceDiagnostics: @unchecked Sendable {
                       $0.payload.isValid && $0.sequence > 0
                           && Self.isBuild($0.build)
                           && $0.timestamp <= clock().addingTimeInterval(300)
-                  }) else { storageFailed("invalidJournal"); return }
+                  }) else { storageFailed(.invalidJournal); return }
             journal = decoded
             trim()
         } catch CocoaError.fileReadNoSuchFile {
             return
         } catch {
-            storageFailed("readFailed")
+            storageFailed(.readFailed)
         }
     }
 
     private func persist() {
         do {
             let data = try encodedJournal()
-            guard let url else { storageFailed("locationUnavailable"); return }
+            guard let url else { storageFailed(.locationUnavailable); return }
             let directory = url.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             var excluded = directory
@@ -304,7 +387,7 @@ public final class LiveTVSourceDiagnostics: @unchecked Sendable {
             try excluded.setResourceValues(values)
             try data.write(to: url, options: .atomic)
         } catch {
-            storageFailed("writeFailed")
+            storageFailed(.writeFailed)
         }
     }
 
@@ -324,10 +407,10 @@ public final class LiveTVSourceDiagnostics: @unchecked Sendable {
             && value.utf8.allSatisfy { (48...57).contains($0) || $0 == 46 })
     }
 
-    private func storageFailed(_ code: String) {
+    private func storageFailed(_ code: StorageIssue) {
         storageIssue = code
         #if canImport(OSLog)
-        Self.logger.error("Live TV diagnostic journal unavailable reason=\(code, privacy: .public)")
+        Self.logger.error("Live TV diagnostic journal unavailable reason=\(code.rawValue, privacy: .public)")
         #endif
     }
 

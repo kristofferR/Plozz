@@ -78,6 +78,11 @@ public struct MediaVersion: Codable, Hashable, Identifiable, Sendable {
     public var audioProfile: String?
     /// Original container, e.g. `mkv`, `mp4`.
     public var container: String?
+    public var externalLink: ExternalMediaLink?
+
+    public var isExternalSource: Bool {
+        container?.lowercased() == "strmlnk"
+    }
 
     /// When this version is backed by a **different** provider item than the one
     /// containing it (the same-account-duplicate case: two separate Jellyfin
@@ -124,7 +129,8 @@ public struct MediaVersion: Codable, Hashable, Identifiable, Sendable {
         sourceItemID: String? = nil,
         sourceAccountID: String? = nil,
         providerMediaSourceID: String? = nil,
-        sourceMetadata: MediaSourceMetadata? = nil
+        sourceMetadata: MediaSourceMetadata? = nil,
+        externalLink: ExternalMediaLink? = nil
     ) {
         self.id = id
         self.name = name
@@ -146,6 +152,7 @@ public struct MediaVersion: Codable, Hashable, Identifiable, Sendable {
         self.sourceAccountID = sourceAccountID
         self.providerMediaSourceID = providerMediaSourceID
         self.sourceMetadata = sourceMetadata
+        self.externalLink = externalLink
     }
 
     public var playbackMediaSourceID: String? {
@@ -229,50 +236,23 @@ public struct MediaVersion: Codable, Hashable, Identifiable, Sendable {
     /// effective lines from width too, so a letterboxed 1920×804 file reads
     /// 1080p rather than 720p).
     public var resolutionLabel: String? {  // l10n:content — technical resolution label, never translated
-        if let sourceMetadata, let badge = sourceMetadata.resolutionBadge { return badge.label }
-        guard let height else { return nil }
-        switch height {
-        case 4321...: return "8K"
-        case 1601...4320: return "4K"
-        case 1081...1600: return "1440p"
-        case 901...1080: return "1080p"
-        case 651...900: return "720p"
-        case 1...650: return "SD"
-        default: return nil
-        }
+        sourceMetadata?.resolutionBadge?.label ?? flattenedSourceMetadata.resolutionBadge?.label
     }
 
     /// Whether this version carries any HDR (non-SDR) video range. Prefers the
     /// authoritative `sourceMetadata` range classification when present.
     public var isHDR: Bool {
-        if let sourceMetadata {
-            return sourceMetadata.dynamicRangeBadges.contains { $0.style == .hdr || $0.style == .dolby }
+        (sourceMetadata ?? flattenedSourceMetadata).dynamicRangeBadges.contains {
+            $0.style == .hdr || $0.style == .dolby
         }
-        if normalizedVideoRange == "HDR10PLUS" { return true }
-        guard let token = videoRange, let range = HDRRange(rawValue: token) else { return false }
-        return range != .sdr
     }
 
     /// A compact HDR badge label, e.g. `Dolby Vision`, `HDR10`, `HDR10+`, `HLG`,
     /// or `nil` for SDR/unknown — used in the version diff row. Prefers the
     /// authoritative `sourceMetadata` classification (so HDR10+ is preserved).
     public var hdrLabel: String? {  // l10n:content — brand/format name (Dolby Vision, HDR10, HLG), never translated
-        if let sourceMetadata {
-            let range = sourceMetadata.dynamicRangeBadges
-            if range.contains(where: { $0.style == .dolby }) { return "Dolby Vision" }
-            if let hdr = range.first(where: { $0.style == .hdr }) { return hdr.label }
-            return nil
-        }
-        if normalizedVideoRange == "HDR10PLUS" { return "HDR10+" }
-        guard let token = videoRange, let range = HDRRange(rawValue: token) else { return nil }
-        switch range {
-        case .sdr: return nil
-        case .hlg: return "HLG"
-        case .hdr10: return "HDR10"
-        case .hdr10Plus: return "HDR10+"
-        case .dolbyVision, .dolbyVisionWithHDR10, .dolbyVisionWithHLG, .dolbyVisionWithSDR:
-            return "Dolby Vision"
-        }
+        let range = (sourceMetadata ?? flattenedSourceMetadata).dynamicRangeBadges
+        return range.first { $0.style == .dolby || $0.style == .hdr }?.label
     }
 
     private var normalizedVideoRange: String {
@@ -286,7 +266,9 @@ public struct MediaVersion: Codable, Hashable, Identifiable, Sendable {
     /// A compact audio badge label, e.g. `Atmos`, `7.1`, `5.1`, `Stereo`.
     /// Prefers the authoritative `sourceMetadata` audio classification.
     public var audioLabel: String? {  // l10n:content — brand/format name (Atmos, channel layout), never translated
-        if let sourceMetadata, let headline = sourceMetadata.audioBadges.first {
+        if let sourceMetadata, let headline = sourceMetadata.audioBadges.first(where: {
+            $0.label == "Dolby Atmos" || $0.label == "DTS:X"
+        }) ?? sourceMetadata.audioBadges.first {
             return headline.label
         }
         if let profile = audioProfile, profile.lowercased().contains("atmos") { return "Atmos" }
@@ -350,6 +332,7 @@ public struct MediaVersion: Codable, Hashable, Identifiable, Sendable {
     /// never baked in here where it would render as permanent English via
     /// `Text(String)`.
     public var displayLabel: String? {  // l10n:content — joined technical facts, or the provider's source name; nil means "no facts known", so the caller supplies the (copy) "Version" fallback itself
+        if isExternalSource { return externalLink?.service.name ?? fileName }
         var parts: [String] = []
         if let editionLabel { parts.append(editionLabel) }
         if let resolutionLabel { parts.append(resolutionLabel) }
@@ -365,6 +348,7 @@ public struct MediaVersion: Codable, Hashable, Identifiable, Sendable {
     /// as ``displayLabel``'s: no fact/name is known, so the caller shows its
     /// own "Version" fallback resource instead.
     public var menuTitle: String? {  // l10n:content — edition/resolution fact, or the provider's source name; nil means "no facts known", so the caller supplies the (copy) "Version" fallback itself
+        if isExternalSource { return displayLabel }
         if let editionLabel { return editionLabel }
         if let resolutionLabel { return resolutionLabel }
         return MediaSourceDisplayName.name(from: name)
@@ -390,24 +374,97 @@ public struct MediaVersion: Codable, Hashable, Identifiable, Sendable {
         public let title: String? // l10n:content — provider edition/name and technical facts
         public let supplementalFacts: [String]
         public let releaseName: String? // l10n:content — provider release name or file basename
+        public let formatBadges: [MediaBadge]
+        public let audioLanguages: [String]
+        public let supplementalFactsWithoutBadges: [String]
+
+        public var badges: [MediaBadge] {
+            formatBadges + audioLanguages.map { MediaBadge($0, style: .audio) }
+        }
+
+        public func prioritizedAudioLanguages(
+            preferredLanguage: String?, locale: Locale = .current
+        ) -> [String] {
+            guard let code = LanguageMatch.normalized(preferredLanguage),
+                  let name = TrackLabeling.languageName(forCode: code, in: locale),
+                  audioLanguages.contains(name) else { return audioLanguages }
+            return [name] + audioLanguages.filter { $0 != name }
+        }
+
+        public var titleWithoutBadges: String? {
+            guard let title else { return nil }
+            let facts = title.components(separatedBy: " · ").filter { !badgeLabels.contains($0) }
+            return facts.isEmpty ? nil : facts.joined(separator: " · ")
+        }
+
+        public var summaryWithoutBadges: String? {
+            let facts = [titleWithoutBadges].compactMap { $0 } + supplementalFactsWithoutBadges
+            return facts.isEmpty ? nil : facts.joined(separator: " · ")
+        }
+
+        private var badgeLabels: Set<String> {
+            Set(badges.flatMap { [$0.label, $0.accessibilityText] })
+        }
 
         public init(_ version: MediaVersion, locale: Locale = .current) {
+            if version.isExternalSource {
+                title = version.displayLabel
+                supplementalFacts = []
+                releaseName = version.externalLink == nil ? nil : version.fileName
+                formatBadges = []
+                audioLanguages = []
+                supplementalFactsWithoutBadges = []
+                return
+            }
             let fileName = MediaSourceDisplayName.fileName(from: version.fileName)
                 ?? MediaSourceDisplayName.fileName(from: version.sourceMetadata?.fileName)
             title = version.displayLabel
             let titleFacts = Set((title ?? "").components(separatedBy: " · "))
             let video = version.sourceMetadata?.video
+            let codec = PlaybackDiagnostics.friendlyCodecName(video?.codec ?? version.videoCodec)
+            var formats = version.technicalBadges
+            for fact in version.audioFormatLabel?.components(separatedBy: " + ") ?? [] {
+                guard !formats.contains(where: {
+                    $0.label == fact || $0.accessibilityText == fact || $0.detail == fact
+                }) else { continue }
+                if let index = formats.firstIndex(where: { fact.hasPrefix($0.label + " ") }) {
+                    formats[index].detail = String(fact.dropFirst(formats[index].label.count + 1))
+                } else {
+                    let style: MediaBadge.Style = fact.hasPrefix("Dolby ") ? .dolby
+                        : fact.hasPrefix("DTS") ? .dts : .audio
+                    var badge = MediaBadge(fact, style: style)
+                    if let channels = version.audioChannelLabel, fact.hasSuffix(" " + channels) {
+                        badge.label = String(fact.dropLast(channels.count + 1))
+                        badge.detail = channels
+                    }
+                    formats.removeAll { $0.style == .audio && fact.hasSuffix(" " + $0.label) }
+                    formats.append(badge)
+                }
+            }
+            if let codec, !formats.contains(where: { $0.label == codec }) {
+                let audioStart = formats.firstIndex(where: \.isAudio) ?? formats.endIndex
+                formats.insert(MediaBadge(codec), at: audioStart)
+            }
             let languages = version.audioLanguageNames(in: locale)
+            formatBadges = formats
+            audioLanguages = languages
             let rangeFacts = version.sourceMetadata?.dynamicRangeBadges.map(\.label) ?? []
             supplementalFacts = (rangeFacts + [
                 version.sourceQualityLabel ?? EditionParser.sourceQuality(from: fileName),
-                PlaybackDiagnostics.friendlyCodecName(video?.codec ?? version.videoCodec),
+                codec,
                 PlaybackDiagnostics.colorDescription(bitDepth: video?.bitDepth, transfer: nil, rangeType: nil),
                 languages.isEmpty ? nil : languages.joined(separator: ", "),
                 version.audioFormatLabel,
                 version.bitrateLabel,
                 version.durationLabel
             ].compactMap { $0 }).filter { !titleFacts.contains($0) }
+            let representedFacts = Set(formats.flatMap {
+                [$0.label, $0.accessibilityText] + [$0.detail].compactMap { $0 }
+            } + languages)
+            supplementalFactsWithoutBadges = supplementalFacts
+                .filter { $0 != languages.joined(separator: ", ") }
+                .flatMap { $0.components(separatedBy: " + ") }
+                .filter { !representedFacts.contains($0) }
             let release = fileName ?? MediaSourceDisplayName.name(from: version.name)
             releaseName = release == title ? nil : release
         }
@@ -430,16 +487,21 @@ public struct MediaVersion: Codable, Hashable, Identifiable, Sendable {
         let audio = sourceMetadata?.audio
         let codec = audio?.codec ?? audioCodec
         let format = PlaybackDiagnostics.friendlyAudioName(codec: codec, profile: audio?.profile ?? audioProfile)
+        let channels = audioChannelLabel
         if format == "Dolby Atmos" || format == "DTS:X" {
             let base = PlaybackDiagnostics.friendlyCodecName(codec)
-            return [base == format ? nil : base, format].compactMap { $0 }.joined(separator: " + ")
+            return [base == format ? nil : base, format, channels].compactMap { $0 }.joined(separator: " + ")
         }
-        let layout = audio?.channelLayout?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let channels = layout?.isEmpty == false ? layout : TrackLabeling.audioFormatHint(
-            codec: nil, channels: audio?.channels ?? audioChannels, isAtmos: false
-        )
         let parts = [format, channels].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
+    private var audioChannelLabel: String? {
+        let audio = sourceMetadata?.audio
+        let layout = audio?.channelLayout?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return layout?.isEmpty == false ? layout : TrackLabeling.audioFormatHint(
+            codec: nil, channels: audio?.channels ?? audioChannels, isAtmos: false
+        )
     }
 
     /// A coarse quality score used to order versions and pick a default. Driven
@@ -489,6 +551,9 @@ public extension MediaVersion {
         // non-DoVi display) forces a tone-mapped transcode.
         if let token = videoRange, let range = HDRRange(rawValue: token) {
             if !capabilities.allowedHDRRanges.contains(range) { return .transcode }
+        } else if normalizedVideoRange.hasPrefix("DOVI"),
+                  !capabilities.allowedHDRRanges.contains(.dolbyVision) {
+            return .transcode
         } else if normalizedVideoRange == "HDR10PLUS",
                   !capabilities.allowedHDRRanges.contains(.hdr10) {
             return .transcode
@@ -520,6 +585,10 @@ public extension Array where Element == MediaVersion {
     /// the user override to any other version.
     func recommendedSelection(for capabilities: MediaCapabilities) -> MediaVersion? {
         guard !isEmpty else { return nil }
+        let playable = filter { !$0.isExternalSource }
+        if playable.count != count {
+            return playable.isEmpty ? first : playable.recommendedSelection(for: capabilities)
+        }
         let nativeCompatible = filter { $0.compatibility(with: capabilities) == .directPlay }
         if let best = nativeCompatible.max(by: { $0.qualityScore < $1.qualityScore }) {
             return best
@@ -535,6 +604,7 @@ public extension Array where Element == MediaVersion {
     /// tiebreaks keep the order independent of insertion/arrival order.
     func sortedForPicker() -> [MediaVersion] {
         sorted { lhs, rhs in
+            if lhs.isExternalSource != rhs.isExternalSource { return !lhs.isExternalSource }
             let lhsSize = lhs.sizeBytes.flatMap { $0 > 0 ? $0 : nil }
             let rhsSize = rhs.sizeBytes.flatMap { $0 > 0 ? $0 : nil }
             if lhsSize != rhsSize {

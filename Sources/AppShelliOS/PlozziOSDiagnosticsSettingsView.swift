@@ -3,6 +3,7 @@ import CoreModels
 import CoreNetworking
 import CoreUI
 import CrashReporting
+import FeatureSettings
 import Foundation
 import SwiftUI
 import UIKit
@@ -12,7 +13,8 @@ struct PlozziOSDiagnosticsSettingsView: View {
     @Bindable var model: DiagnosticsSettingsModel
     @Bindable var crashReporting: CrashReportingSettingsModel
     @State private var diagnosticNote = ""
-    @State private var sendStatus: String?
+    @State private var sendStatus: LocalizedStringResource?
+    @State private var isSending = false
 
     private var report: DiagnosticsReport {
         let version = AppVersionIdentity.current
@@ -24,13 +26,9 @@ struct PlozziOSDiagnosticsSettingsView: View {
             appBuild: version.build,
             providers: providers.isEmpty ? "None" : providers,
             repoURL: AppLinks.repository.absoluteString,
-            recentLogTail: PlozzLog.recentLogText(limit: 8),
+            recentLogTail: PlozzLog.privacyFilteredLogText(entries: PlozzLog.recentEntries(limit: 8)),
             marketingVersion: version.marketingVersion
         )
-    }
-
-    private var crashReportingFooter: LocalizedStringResource {
-        "Anonymous crash, freeze, and IPTV setup failure reports. No servers, logins, credentials, or viewing activity."
     }
 
     var body: some View {
@@ -56,48 +54,52 @@ struct PlozziOSDiagnosticsSettingsView: View {
             }
 
             SettingsSectionGroup {
-                Toggle(
-                    "Share Crash Reports",
-                    isOn: $crashReporting.settings.isEnabled
-                )
-                .disabled(!appModel.crashReportingController.isConfigured)
-            } footer: {
-                if appModel.crashReportingController.isConfigured {
-                    Text(crashReportingFooter)
-                } else {
-                    Text("Crash reporting is unavailable in this build.")
-                }
+                Toggle(isOn: $crashReporting.isEnabled) { Text(SettingsCopy.shareDiagnostics) }
+                .accessibilityIdentifier("diagnostics-sharing-toggle")
+                .disabled(!appModel.crashReportingController.isConfigured).settingsSearchAnchor("diagnostic-sharing")
             }
 
-            SettingsSectionGroup("Send Diagnostics") {
-                TextField("Optional note", text: $diagnosticNote, axis: .vertical)
-                    .lineLimit(2...4)
-                Button {
-                    appModel.applyCrashReportingPreference()
-                    let sent = CrashDiagnostics.send(
-                        logText: PlozzLog.recentLogText(limit: 200),
-                        note: diagnosticNote.trimmingCharacters(in: .whitespacesAndNewlines)
-                    )
-                    sendStatus = sent
-                        ? "Diagnostics sent. Thank you."
-                        : "Diagnostics could not be sent. Enable crash reports and try again."
-                } label: {
-                    Label("Send to Developer", systemImage: "paperplane")
+            SettingsSectionGroup("Send Diagnostics", accessory: { DiagnosticsInfoButton() }) {
+                TextField(text: $diagnosticNote, axis: .vertical) {
+                    Text(SettingsCopy.diagnosticsMessage)
                 }
-                .disabled(
-                    !appModel.crashReportingController.isConfigured
-                        || !crashReporting.settings.isEnabled
-                )
+                .lineLimit(2...4)
+                .accessibilityIdentifier("diagnostics-message")
+                .disabled(!appModel.crashReportingController.isConfigured || isSending)
+                DiagnosticsSendButton(
+                    sharingEnabled: $crashReporting.isEnabled,
+                    isConfigured: appModel.crashReportingController.isConfigured,
+                    hasMessage: CrashDiagnostics.normalizedNote(diagnosticNote) != nil,
+                    isSending: isSending
+                ) {
+                    appModel.applyCrashReportingPreference()
+                    let note = diagnosticNote
+                    isSending = true
+                    Task {
+                        defer { isSending = false }
+                        let sent = await CrashDiagnostics.send(note: note)
+                        sendStatus = sent
+                            ? "Diagnostics submitted for delivery. Thank you."
+                            : SettingsCopy.diagnosticSubmissionFailed
+                    }
+                }
 
                 if let sendStatus {
                     Text(sendStatus)
                         .plozzForeground(.secondary)
                 }
+            } footer: {
+                if !appModel.crashReportingController.isConfigured {
+                    Text(SettingsCopy.diagnosticSharingUnavailable)
+                } else if !crashReporting.isEnabled {
+                    Text(SettingsCopy.diagnosticSharingRequired)
+                }
+                Text(SettingsCopy.diagnosticsMessagePrivacy)
             }
 
             SettingsSectionGroup {
                 VStack(alignment: .leading, spacing: 6) {
-                    Toggle("Playback Diagnostics Overlay", isOn: $model.settings.isEnabled)
+                    Toggle("Playback Diagnostics Overlay", isOn: $model.settings.isEnabled).settingsSearchAnchor("playback-diagnostics-overlay")
                     Text("Shows codec, bitrate, buffer, and memory during playback.")
                         .font(.footnote)
                         .plozzForeground(.secondary)
@@ -107,7 +109,7 @@ struct PlozziOSDiagnosticsSettingsView: View {
                     Toggle(
                         "Home Performance Overlay",
                         isOn: $model.settings.homePerformanceOverlayEnabled
-                    )
+                    ).settingsSearchAnchor("home-performance-overlay")
                     Text("Shows FPS, hitches, and thermal state on Home.")
                         .font(.footnote)
                         .plozzForeground(.secondary)
@@ -116,7 +118,7 @@ struct PlozziOSDiagnosticsSettingsView: View {
         }
         .settingsPageSurface()
         .navigationTitle("Help & Diagnostics")
-        .onChange(of: crashReporting.settings.isEnabled) {
+        .onChange(of: crashReporting.isEnabled) {
             appModel.applyCrashReportingPreference()
             sendStatus = nil
         }
@@ -146,11 +148,7 @@ private struct PlozziOSRecentActivityView: View {
     }
 
     private var shareText: String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        return filtered.reversed()
-            .map { "\(formatter.string(from: $0.date)) [\($0.level.rawValue)] \($0.category): \($0.message)" }
-            .joined(separator: "\n")
+        PlozzLog.privacyFilteredLogText(entries: Array(filtered.reversed()))
     }
 
     var body: some View {
@@ -195,15 +193,10 @@ private struct PlozziOSRecentActivityView: View {
                         }
                     }
                 } label: {
-                    Label {
-                        // The category is a log-subsystem name from our own
-                        // logging, so it stays verbatim; "Filter" is copy.
-                        selectedCategory.map { Text(verbatim: $0.capitalized) } ?? Text("Filter")
-                    } icon: {
-                        Image(systemName: selectedCategory == nil
-                              ? "line.3.horizontal.decrease.circle"
-                              : "line.3.horizontal.decrease.circle.fill")
-                    }
+                    BrowseFilterLabel(
+                        activeCount: selectedCategory == nil ? 0 : 1,
+                        summary: selectedCategory?.capitalized ?? ""
+                    )
                 }
                 Button("Refresh", systemImage: "arrow.clockwise") {
                     entries = PlozzLog.recentEntries(limit: 500)

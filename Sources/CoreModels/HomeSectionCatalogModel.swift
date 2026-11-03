@@ -30,6 +30,20 @@ public final class HomeSectionCatalogModel {
 
     public init() {}
 
+    public func currentCatalog(
+        libraries: [AggregatedLibrary], accounts: [ResolvedAccount], visibility: HomeLibraryVisibilityModel
+    ) -> HomeSectionCatalog {
+        if requestID == Self.requestID(libraries: libraries, accounts: accounts, visibility: visibility) {
+            return catalog
+        }
+        let accountIDs = Set(accounts.map(\.account.id))
+        return HomeSectionCatalog(
+            libraries: libraries.filter { accountIDs.contains($0.accountID) && visibility.isEnabled($0.key) },
+            serverRows: (visibility.visibility.rowCustomization?.availableServerRows ?? [])
+                .filter { accountIDs.contains($0.accountID) }
+        )
+    }
+
     public static func requestID(
         libraries: [AggregatedLibrary], accounts: [ResolvedAccount], visibility: HomeLibraryVisibilityModel
     ) -> RequestID {

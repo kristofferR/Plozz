@@ -60,25 +60,22 @@ public struct PlaybackVersionChoiceView: View {
 
     public var body: some View {
         if let prompt = model.prompt {
+            #if os(iOS)
+            NavigationStack {
+                PlaybackVersionChoiceContent(model: model, prompt: prompt)
+                    .navigationTitle("Choose a version")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Close", systemImage: "xmark") { model.cancel() }
+                                .labelStyle(.iconOnly)
+                                .accessibilityIdentifier("version-choice-cancel")
+                        }
+                    }
+            }
+            #else
             VStack(spacing: 0) {
-                if prompt.needsIntroduction {
-                    FirstUseChoiceView(
-                        symbol: "square.stack",
-                        title: "How would you like to choose versions?",
-                        message: "Some videos have more than one version. Choose each time, including the next episode, or remember your choice for this movie or series.",
-                        firstAction: "Ask every time",
-                        secondAction: "Remember my choice",
-                        footer: "If a remembered version isn't available, we'll ask again. Change this any time in Settings > Playback > Version selection.",
-                        firstIdentifier: "version-choice-ask",
-                        secondIdentifier: "version-choice-remember"
-                    ) { ask in
-                        model.chooseMode(ask ? .askEveryTime : .rememberChoice, promptID: prompt.id)
-                    }
-                } else {
-                    PlaybackVersionChoiceList(prompt: prompt) {
-                        model.chooseVersion($0, promptID: prompt.id)
-                    }
-                }
+                PlaybackVersionChoiceContent(model: model, prompt: prompt)
                 Button("Cancel") { model.cancel() }
                     .plozzActionButton(role: .secondary)
                     .accessibilityIdentifier("version-choice-cancel")
@@ -87,6 +84,33 @@ public struct PlaybackVersionChoiceView: View {
             #if os(tvOS)
             .onExitCommand { model.cancel() }
             #endif
+            #endif
+        }
+    }
+}
+
+private struct PlaybackVersionChoiceContent: View {
+    let model: PlaybackVersionChoiceModel
+    let prompt: PlaybackVersionChoiceModel.Prompt
+
+    var body: some View {
+        if prompt.needsIntroduction {
+            FirstUseChoiceView(
+                symbol: "square.stack",
+                title: "Do you want to choose a version every time?",
+                message: "Some videos have more than one version. Choose before each video, including the next episode, or let Plozz choose automatically.",
+                firstAction: "Ask every time",
+                secondAction: "Choose automatically",
+                footer: "Change this any time in Settings > Playback > Version selection.",
+                firstIdentifier: "version-choice-ask",
+                secondIdentifier: "version-choice-automatic"
+            ) { ask in
+                model.chooseMode(ask ? .askEveryTime : .automatic, promptID: prompt.id)
+            }
+        } else {
+            PlaybackVersionChoiceList(prompt: prompt) {
+                model.chooseVersion($0, promptID: prompt.id)
+            }
         }
     }
 }
@@ -97,22 +121,34 @@ private struct PlaybackVersionChoiceList: View {
     @Environment(\.locale) private var locale
     @Environment(\.themePalette) private var palette
     @FocusState private var focusedID: String?
+    #if os(tvOS)
+    @ScaledMetric(relativeTo: .headline) private var headingSize: CGFloat = 34
+    #endif
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                #if !os(iOS)
                 Text("Choose a version")
+                    #if os(tvOS)
+                    .font(.system(size: headingSize, weight: .semibold))
+                    #else
                     .font(.title.bold())
+                    #endif
                     .foregroundStyle(palette.primaryText)
                     .accessibilityAddTraits(.isHeader)
+                #endif
                 Text(verbatim: prompt.item.title)
                     .font(.headline)
                     .foregroundStyle(palette.secondaryText)
                 ForEach(prompt.versions) { version in
-                    Button { select(version.id) } label: {
-                        PlaybackVersionChoiceLabel(presentation: .init(version, locale: locale))
+                    MediaVersionChoiceButton(
+                        presentation: .init(version, locale: locale),
+                        isSelected: prompt.selectedVersionID == version.id,
+                        isFocused: focusedID == version.id
+                    ) {
+                        select(version.id)
                     }
-                    .plozzActionButton(role: .secondary)
                     .focused($focusedID, equals: version.id)
                     .accessibilityIdentifier("version-choice-\(version.id)")
                 }
@@ -122,34 +158,9 @@ private struct PlaybackVersionChoiceList: View {
             .frame(maxWidth: .infinity)
         }
         #if os(tvOS)
-        .defaultFocus($focusedID, prompt.versions.first?.id, priority: .userInitiated)
+        .defaultFocus($focusedID, prompt.selectedVersionID ?? prompt.versions.first?.id, priority: .userInitiated)
         #endif
     }
 }
 
-private struct PlaybackVersionChoiceLabel: View {
-    let presentation: MediaVersion.PickerPresentation
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let title = presentation.title { Text(verbatim: title) }
-            else { Text("Original") }
-            if !presentation.supplementalFacts.isEmpty {
-                Text(verbatim: presentation.supplementalFacts.joined(separator: " · "))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if let releaseName = presentation.releaseName {
-                Text(verbatim: releaseName)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-            }
-        }
-        .multilineTextAlignment(.leading)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
 #endif

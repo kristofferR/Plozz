@@ -4,7 +4,6 @@ import CoreModels
 import CoreNetworking
 import MetadataKit
 import RatingsService
-import ProviderTrailers
 
 /// How much a season's cached episode list can be trusted.
 ///
@@ -204,6 +203,38 @@ public final class ItemDetailViewModel {
     /// Full per-item episode facts used by the hero. Deliberately separate from
     /// `seasonEpisodes`: enriching a focused hero must not replace the visible rail.
     private let episodeBadgeEnrichment = EpisodeBadgeEnrichmentModel()
+    private let playbackInventoryState = DetailPlaybackInventoryState()
+    public var playbackInventoryRetryError: LocalizedStringResource? {
+        get { playbackInventoryState.retryError }
+        set { playbackInventoryState.retryError = newValue }
+    }
+
+    public func hasNoPlaybackStreams(for item: MediaItem) -> Bool {
+        (item.sourceAccountID == nil || item.sourceAccountID == activeSourceAccountID)
+            && playbackInventoryState.noStreamItemIDs.contains(item.id)
+    }
+
+    public func isRetryingPlaybackInventory(for item: MediaItem) -> Bool {
+        (item.sourceAccountID == nil || item.sourceAccountID == activeSourceAccountID)
+            && playbackInventoryState.retryingItemIDs.contains(item.id)
+    }
+
+    public func retryPlaybackInventory(for item: MediaItem) async {
+        guard hasNoPlaybackStreams(for: item),
+              playbackInventoryState.retryingItemIDs.insert(item.id).inserted else { return }
+        let generation = sourceGeneration
+        playbackInventoryRetryError = nil
+        defer {
+            if sourceGeneration == generation { playbackInventoryState.retryingItemIDs.remove(item.id) }
+        }
+        do {
+            _ = try await loadPlaybackVersions(for: item)
+        } catch {
+            guard sourceGeneration == generation, !Task.isCancelled,
+                  !(error is CancellationError), (error as? AppError) != .cancelled else { return }
+            playbackInventoryRetryError = PlaybackVersionChoiceModel.reportFailure(error, stage: "inventory-retry")
+        }
+    }
     /// When this detail is a series, context propagated onto its episodes so each
     /// episode resolves fallback artwork/routing with full series metadata.
     private var seriesEpisodeContext: SeriesEpisodeContext?
@@ -217,7 +248,7 @@ public final class ItemDetailViewModel {
     /// Stable identity for the active movie/series source. Includes the account so
     /// switching servers re-resolves even when two backends use the same item id.
     public var themeMusicPlaybackID: String? {
-        guard !isDiscoveryItem,
+        guard !isDiscoveryItem, let activeProvider,
               case let .loaded(detail) = state,
               detail.item.kind == .movie || detail.item.kind == .series else {
             return nil
@@ -233,7 +264,7 @@ public final class ItemDetailViewModel {
 
     /// Resolves theme audio as a best-effort decorative enhancement.
     public func resolveThemeMusic() async -> ThemeMusic? {
-        guard themeMusicPlaybackID != nil else { return nil }
+        guard themeMusicPlaybackID != nil, let activeProvider else { return nil }
         do {
             let theme = try await activeProvider.themeMusic(for: activeItemID)
             if let theme {
@@ -250,7 +281,7 @@ public final class ItemDetailViewModel {
         }
     }
 
-    private let provider: any MediaProvider
+    private let provider: (any MediaProvider)?
     private let itemID: String
     private let ratingsProvider: any ExternalRatingsProviding
     private let detailMetadataResolver: @Sendable (MediaItem) async -> MetadataEnrichment
@@ -262,7 +293,7 @@ public final class ItemDetailViewModel {
     /// title requested in an earlier visit reflects the real "Requested"/
     /// "Downloading" state instead of the stale "Request" seeded from the search
     /// result. `nil` (or a `nil` result) leaves the seeded state untouched.
-    private let discoveryStatusRefresh: (@Sendable (MediaItem) async -> (MediaAvailabilityStatus, Double?)?)?
+    private let discoveryStatusRefresh: (@Sendable (MediaItem) async -> MediaRequestAvailability?)?
     /// Loads a season's complete canonical metadata roster. Kept separate from
     /// ``seasonEpisodes`` because metadata-only rows are never playable library
     /// items and must not enter snapshots or download flows.
@@ -280,7 +311,7 @@ public final class ItemDetailViewModel {
     /// keying go through these, never the immutable base, so an in-place switch
     /// re-keys cleanly. The base lets are kept so the page's original identity is
     /// recoverable and the documented immutability of the opened source holds.
-    private var activeProvider: any MediaProvider
+    private var activeProvider: (any MediaProvider)?
     private var activeItemID: String
     private var activeSourceAccountID: String?
     private let editionOpeningSource: MediaItemSourceIdentity?
@@ -288,18 +319,14 @@ public final class ItemDetailViewModel {
     /// Invalidates every publication owned by an older active source, including
     /// the initial load and its snapshot restore.
     private var sourceGeneration: UInt64 = 0
-    /// Resolves a keyless online trailer (public YouTube front-ends), used only
+    /// Resolves a metadata-supplied YouTube link, used only
     /// when the provider surfaces no local or server trailer. Injectable so tests
     /// can avoid the network.
     private let onlineTrailerResolver: OnlineTrailerResolving
-    /// Verifies which (if any) of an ordered list of YouTube video ids actually
-    /// resolves to a playable **public** stream, returning the first that does.
-    /// Used to decide whether to show the Trailer button at all — a dead server
-    /// trailer link with no playable replacement yields no button. Injectable so
-    /// tests stay off the network.
+    /// Selects a valid external video id without probing YouTube playback.
     private let playableVideoIDResolver: PlayableTrailerResolving
     /// Memo of trailer-resolution outcomes so a revisited detail page surfaces its
-    /// Trailer button instantly instead of re-running extraction/search. Injected
+    /// Trailer button instantly instead of repeating metadata requests. Injected
     /// so tests can supply an isolated cache.
     private let trailerCache: TrailerResolutionCache
     /// The account this item belongs to, propagated so the detail item and its
@@ -356,14 +383,16 @@ public final class ItemDetailViewModel {
 
     /// The current server described as a ``MediaSourceRef`` **for display**, built
     /// from the active provider. Unlike ``sources`` (deliberately empty for a
-    /// single-server title so no picker shows), this is always populated, so the
+    /// single-server title so no picker shows), this is populated for library
+    /// details and nil for provider-free external details, so the
     /// detail "Playback" card can show the server + connection even for the common
     /// one-server case. Prefers the matching enriched source when the multi-server
     /// picker is populated so its richer metadata (e.g. resolved locality) wins.
-    public var currentSourceForDisplay: MediaSourceRef {
+    public var currentSourceForDisplay: MediaSourceRef? {
+        guard let activeProvider else { return nil }
         if let match = sources.first(where: { $0.accountID == activeSourceAccountID && $0.itemID == activeItemID })
             ?? sources.first(where: { $0.accountID == activeSourceAccountID }) {
-            return match
+            return Self.fillingSourceDisplayMetadata(in: match, provider: activeProvider)
         }
         return MediaSourceRef(
             accountID: activeSourceAccountID ?? activeProvider.session.server.id,
@@ -413,6 +442,7 @@ public final class ItemDetailViewModel {
     /// disk-contended) snapshot read — it only paints/enriches if it wins and
     /// never downgrades a fresher render. Cancelled on each new load.
     private nonisolated(unsafe) var snapshotRestoreTask: Task<Void, Never>?
+    private nonisolated(unsafe) var serverRatingsTask: Task<Void, Never>?
     /// Set once the live fetch publishes fresh detail, so a late snapshot restore
     /// never clobbers a fresher hero.
     @ObservationIgnored private var hasPaintedFreshDetail = false
@@ -437,8 +467,8 @@ public final class ItemDetailViewModel {
 
     /// Dwell before any speculative discovery fan-out (cross-server discovery,
     /// alternate-source fetch) fires. A page tapped through in under this window
-    /// pays zero speculative cost. Zero under tests. (Trailer extraction has its
-    /// own dwell on the awaited path — see ``trailerExtractionDwellNanos``.)
+    /// pays zero speculative cost. Zero under tests. Trailer metadata has its
+    /// own dwell on the awaited path.
     private static var enrichmentDwellNanos: UInt64 { isRunningUnderTests ? 0 : 800_000_000 }
     /// Settle time before a bounded one-frame stream probe. This task is separate
     /// from cross-server discovery so an explicit source switch restarts it for
@@ -447,10 +477,8 @@ public final class ItemDetailViewModel {
         isRunningUnderTests ? 0 : 2_300_000_000
     }
 
-    /// Further dwell before the authoritative YouTubeKit/JavaScriptCore trailer
-    /// extraction (the single biggest CPU consumer during browsing) runs, so only
-    /// a page genuinely settled on pays it. Zero under tests.
-    private static var trailerExtractionDwellNanos: UInt64 { isRunningUnderTests ? 0 : 1_700_000_000 }
+    /// Avoid speculative trailer metadata requests while navigating quickly.
+    private static var trailerMetadataDwellNanos: UInt64 { isRunningUnderTests ? 0 : 1_700_000_000 }
 
     /// In-flight SPECULATIVE discovery (cross-server picker + alternate-source
     /// watch-state), owned as a cancellable task that `load()` does NOT await.
@@ -492,12 +520,12 @@ public final class ItemDetailViewModel {
     private var snapshotKey: String { "\(activeSourceAccountID ?? "_")|\(activeItemID)" }
 
     public init(
-        provider: any MediaProvider,
+        provider: (any MediaProvider)?,
         itemID: String,
         initialItem: MediaItem? = nil,
         initialResumeEpisode: MediaItem? = nil,
         isDiscoveryItem: Bool = false,
-        discoveryStatusRefresh: (@Sendable (MediaItem) async -> (MediaAvailabilityStatus, Double?)?)? = nil,
+        discoveryStatusRefresh: (@Sendable (MediaItem) async -> MediaRequestAvailability?)? = nil,
         loadSeasonEpisodeRoster:
             (@Sendable (MediaItem, Int) async -> SeasonEpisodeRosterResult)? = nil,
         externalMetadataResolver: @escaping @Sendable (MediaItem, String) async -> ExternalTitleMetadata = {
@@ -571,23 +599,14 @@ public final class ItemDetailViewModel {
         }
     }
 
-    /// Production online-trailer resolver: a keyless YouTube search (no API key,
-    /// no TMDb) that surfaces ranked official-trailer candidates for the title.
+    /// Metadata-only trailer links. No scraping, extraction, or YouTube probes.
     public static let defaultOnlineTrailerResolver: OnlineTrailerResolving = { item in
         await OnlineTrailerSource.trailers(for: item)
     }
 
-    /// Production trailer-existence check: a keyless YouTube oEmbed probe (cheap
-    /// HTTP, **no JavaScriptCore**) that returns the first candidate id which
-    /// exists and is embeddable, skipping any private/removed video. This decides
-    /// whether to surface the Trailer button. Full stream extraction (the ~512MB
-    /// JSContext) is deferred to tap-time playback, where the player already
-    /// re-extracts with a primary→alternatives→replacement-search fallback. This
-    /// removes trailer JavaScriptCore from the browse path — the dominant
-    /// detail-page memory cost — while keeping the "only show a button when a real
-    /// trailer exists" accuracy guarantee.
+    /// Playback availability belongs to YouTube after the external handoff.
     public static let defaultPlayableVideoIDResolver: PlayableTrailerResolving = { candidates in
-        await YouTubeTrailerProvider.firstEmbeddableVideoID(in: candidates)
+        candidates.first { MediaItem.youTubeVideoID(fromURL: $0) == $0 }
     }
 
     /// Env-gated (`SCRUB_DIAG=1`) stdout tracer for trailer-source resolution,
@@ -616,6 +635,7 @@ public final class ItemDetailViewModel {
         crossServerDiscoveryTask?.cancel()
         alternateSourceEnrichmentTask?.cancel()
         snapshotRestoreTask?.cancel()
+        serverRatingsTask?.cancel()
         pendingSnapshotWrite?.cancel()
         seasonLoads.values.forEach { $0.task?.cancel() }
     }
@@ -650,7 +670,11 @@ public final class ItemDetailViewModel {
         // children). Handles the single-library-copy case that the multi-source
         // locality retarget below doesn't.
         adoptLibraryItemIDForActiveAccountIfNeeded()
-        let loadProvider = activeProvider
+        guard let loadProvider = activeProvider else {
+            PlozzLog.app.error("Library detail has no active media source")
+            state = .failed(.unauthorized)
+            return
+        }
         let loadItemID = activeItemID
         let loadAccountID = activeSourceAccountID
         let loadSourceGeneration = sourceGeneration
@@ -767,15 +791,14 @@ public final class ItemDetailViewModel {
                 // await — so navigating away cancels it instead of letting the
                 // multi-server search fan-out starve the next page's `provider.item`.
                 startSpeculativeEnrichment(for: item)
-                // Play can use the resume answer before the season list arrives.
-                // Keep season selection gated on that answer so it never settles
-                // on Season 1 while the real resume target is still pending.
+                // Publish seasons and resume independently. Explicit episode/season
+                // entries can browse immediately; SeriesEpisodeEntry owns the
+                // resume gate for entries without an explicit selection.
                 async let resumeTask: Void = publishServerResumeEpisode(
                     for: item, provider: loadProvider,
                     sourceGeneration: loadSourceGeneration
                 )
                 let fetchedChildren = await fetchChildren(loadProvider, of: item.id)
-                await resumeTask
                 guard !Task.isCancelled, isCurrent() else { return }
                 state = .loaded(Detail(
                     item: tagged(state.value?.item ?? taggedItem),
@@ -790,9 +813,10 @@ public final class ItemDetailViewModel {
                 loadUpcomingSchedule(for: taggedItem)
                 loadRelatedTitles(for: taggedItem)
                 persistSnapshot()
-                // Trailers + ratings ARE awaited: opening a detail deterministically
-                // populates its Trailer button and rating badges. Cancelled with
-                // load() on navigate-away; heavy trailer extraction is dwell-gated.
+                await resumeTask
+                guard !Task.isCancelled, isCurrent() else { return }
+                // Trailers and ordinary enrichment remain on the existing load
+                // path. Optional server ratings run independently of completion.
                 await runTrailersAndRatings(
                     for: item,
                     children: fetchedChildren,
@@ -818,9 +842,8 @@ public final class ItemDetailViewModel {
                 )
                 persistSnapshot()
                 // See container branch: speculative discovery is cancellable and
-                // NOT awaited (a navigate-away drops it), while trailers + ratings
-                // ARE awaited so the Trailer button / rating badges populate
-                // deterministically before load() returns.
+                // NOT awaited (a navigate-away drops it). Trailers retain their
+                // existing load path; optional server ratings never hold it open.
                 startSpeculativeEnrichment(for: item)
                 // A film has related titles too. This sat only in the container
                 // branch above, so the row simply never loaded on a movie page —
@@ -838,19 +861,25 @@ public final class ItemDetailViewModel {
             // (seeded hero, full hero, or .loading) — never flash a failure for a
             // clean cancel.
             return
-        } catch let error as AppError {
-            // Don't bury an already-painted hero under a full-screen error just
-            // because the detail re-fetch failed; the seeded hero stays usable.
-            if isCurrent(), state.value == nil { state = .failed(error) }
-            if isCurrent(), error != .cancelled,
-               case var .loaded(detail) = state, detail.item.kind == .collection {
-                detail.collectionMembersState = .failed(error)
-                state = .loaded(detail)
-            }
         } catch {
-            if isCurrent(), state.value == nil { state = .failed(.unknown("")) }
-            if isCurrent(), case var .loaded(detail) = state, detail.item.kind == .collection {
-                detail.collectionMembersState = .failed(.unknown(""))
+            guard !Task.isCancelled, isCurrent() else { return }
+            let failure = error as? AppError ?? .unknown("")
+            guard failure != .cancelled else { return }
+            PlozzLog.app.error("Library detail request failed")
+            guard var detail = state.value else {
+                state = .failed(failure)
+                return
+            }
+            let isSeriesEntry = detail.item.kind == .series
+                || detail.item.kind == .season
+                || (detail.item.kind == .episode && detail.item.id != loadItemID)
+            if isSeriesEntry, !detail.childrenLoaded {
+                // A show/episode seed without its season list is not a usable
+                // detail page: keeping it loaded leaves the browser spinning.
+                snapshotRestoreTask?.cancel()
+                state = .failed(failure)
+            } else if detail.item.kind == .collection {
+                detail.collectionMembersState = .failed(failure)
                 state = .loaded(detail)
             }
         }
@@ -898,6 +927,7 @@ public final class ItemDetailViewModel {
         owned.rejectedSourceIDs = rejectedSourceIDs
         owned.availability = nil
         owned.downloadProgress = nil
+        owned.hasRequestDownloadActivity = nil
         state = .loaded(Detail(item: owned, children: []))
         isDiscoveryItem = false
         PlozzLog.app.info(
@@ -939,8 +969,9 @@ public final class ItemDetailViewModel {
             to: detail.item
         )
         if let status {
-            detail.item.availability = status.availability
+            detail.item.availability = status.status
             detail.item.downloadProgress = status.downloadProgress
+            detail.item.hasRequestDownloadActivity = status.hasDownloadActivity
         }
         detail.externalAvailability =
             resolved.availability.isEmpty ? nil : resolved.availability
@@ -1032,9 +1063,9 @@ public final class ItemDetailViewModel {
             }
             return
         }
-        if Self.trailerExtractionDwellNanos > 0 {
+        if Self.trailerMetadataDwellNanos > 0 {
             try? await Task.sleep(
-                nanoseconds: Self.trailerExtractionDwellNanos
+                nanoseconds: Self.trailerMetadataDwellNanos
             )
         }
         guard isStillLoaded(item, sourceGeneration: sourceGeneration) else {
@@ -1070,11 +1101,8 @@ public final class ItemDetailViewModel {
     /// by then the page is settled and a change really is news.
     private func discoveryStatus(
         for item: MediaItem
-    ) async -> (availability: MediaAvailabilityStatus, downloadProgress: Double?)? {
-        guard let discoveryStatusRefresh,
-              let (availability, downloadProgress) = await discoveryStatusRefresh(item)
-        else { return nil }
-        return (availability, downloadProgress)
+    ) async -> MediaRequestAvailability? {
+        await discoveryStatusRefresh?(item)
     }
 
     private func refreshDiscoveryStatus() async {
@@ -1083,8 +1111,7 @@ public final class ItemDetailViewModel {
             return
         }
         guard let discoveryStatusRefresh,
-              let (availability, downloadProgress) =
-                  await discoveryStatusRefresh(requestedItem),
+              let status = await discoveryStatusRefresh(requestedItem),
               !Task.isCancelled
         else { return }
         // Re-read after the await. Rich metadata, cast, ratings and release facts
@@ -1092,12 +1119,14 @@ public final class ItemDetailViewModel {
         // would erase all of them.
         guard case var .loaded(latest) = state,
               latest.item.id == requestedItem.id,
-              latest.item.availability != availability
-                  || latest.item.downloadProgress != downloadProgress else {
+              latest.item.availability != status.status
+                  || latest.item.downloadProgress != status.downloadProgress
+                  || latest.item.hasRequestDownloadActivity != status.hasDownloadActivity else {
             return
         }
-        latest.item.availability = availability
-        latest.item.downloadProgress = downloadProgress
+        latest.item.availability = status.status
+        latest.item.downloadProgress = status.downloadProgress
+        latest.item.hasRequestDownloadActivity = status.hasDownloadActivity
         state = .loaded(latest)
     }
 
@@ -1207,11 +1236,118 @@ public final class ItemDetailViewModel {
         }
     }
 
-    /// Resolves trailers and external ratings concurrently on the awaited `load()`
-    /// path, so opening a detail deterministically populates its Trailer button
-    /// and rating badges before `load()` returns. Cancellable via the awaiting
+    @ObservationIgnored private let inventoryOwnerID = UUID()
+
+    public func playbackVersionsLoader(for item: MediaItem) -> MediaVersionInventoryLoader? {
+        guard activeProvider?.playbackInventoryRequiresEnrichment == true,
+              item.kind == .movie || item.kind == .episode,
+              item.sourceAccountID == nil || item.sourceAccountID == activeSourceAccountID else { return nil }
+        let generation = sourceGeneration
+        let id = "\(inventoryOwnerID):\(generation):\(item.id)"
+        return MediaVersionInventoryLoader(id: id) { [weak self] in
+            guard let self, self.sourceGeneration == generation else { throw CancellationError() }
+            return try await self.loadPlaybackVersions(for: item)
+        }
+    }
+
+    /// Called only by explicit version selection or inventory retry, never by
+    /// detail/episode presentation or its speculative enrichment.
+    public func loadPlaybackVersions(for item: MediaItem) async throws -> [MediaVersion] {
+        guard let provider = activeProvider,
+              item.kind == .movie || item.kind == .episode,
+              item.sourceAccountID == nil || item.sourceAccountID == activeSourceAccountID else {
+            throw CancellationError()
+        }
+        let generation = sourceGeneration
+        let rootID = activeItemID
+        let accountID = activeSourceAccountID
+        func isCurrent() -> Bool {
+            !Task.isCancelled && isCurrentSource(generation: generation, itemID: rootID, accountID: accountID)
+        }
+        do {
+            try Task.checkCancellation()
+            let resolved = try await PlaybackPreparationDiagnostics.capture(
+                provider: provider.kind, operation: .detailVersions
+            ) {
+                try await provider.playbackItem(id: item.id)
+            }
+            guard isCurrent(), state.value != nil else { throw CancellationError() }
+            guard resolved.id == item.id, resolved.kind == item.kind,
+                  resolved.sourceAccountID == nil || resolved.sourceAccountID == accountID else {
+                PlaybackPreparationDiagnostics.identityFailure(
+                    provider: provider.kind, operation: .detailVersions, expectedID: item.id,
+                    expectedKind: item.kind, expectedAccountID: accountID, resolved: resolved
+                )
+                PlozzLog.playback.error("Detail version inventory did not match the requested source.")
+                throw StreamingQualityError.sourceUnavailable
+            }
+            var inventory = resolved
+            inventory.sourceAccountID = accountID
+            inventory.sources = item.id == rootID ? sources : item.sources
+            let discoveredSourceIDs = Set(inventory.sources.map(\.id))
+            inventory = try await PlaybackVersionChoiceModel.resolvingAlternateInventories(
+                in: inventory, provider: provider, isCurrent: isCurrent
+            )
+            guard isCurrent(), var detail = state.value else { throw CancellationError() }
+            func updatingInventories(in references: [MediaSourceRef]) -> [MediaSourceRef] {
+                references.compactMap { reference in
+                    guard discoveredSourceIDs.contains(reference.id) else { return reference }
+                    guard let updated = inventory.sources.first(where: { $0.id == reference.id }) else { return nil }
+                    var reference = reference
+                    reference.versions = updated.versions
+                    reference.edition = updated.edition
+                    return reference
+                }
+            }
+            playbackInventoryState.noStreamItemIDs.remove(item.id)
+            playbackInventoryState.authoritativeSourceIDs.subtract(discoveredSourceIDs)
+            playbackInventoryState.authoritativeSourceIDs.formUnion(
+                inventory.sources.filter {
+                    $0.accountID == accountID && ($0.kind == nil || $0.kind == item.kind)
+                }.map(\.id)
+            )
+            if item.id == rootID {
+                detail.item.versions = resolved.versions
+                detail.item.sources = updatingInventories(in: detail.item.sources).map {
+                    stampedPrimarySource($0, from: detail.item, preservingWatchState: true)
+                }
+                state = .loaded(detail)
+                sources = updatingInventories(in: sources).map {
+                    stampedPrimarySource($0, from: detail.item, preservingWatchState: true)
+                }
+                persistSnapshot()
+                return DetailPlaybackSelection.versions(
+                    for: detail.item, sources: sources, activeAccountID: accountID
+                )
+            }
+            episodeBadgeEnrichment.store(inventory, authoritativeVersions: true)
+            return DetailPlaybackSelection.versions(
+                for: episodeWithEnrichedBadges(item), sources: inventory.sources, activeAccountID: accountID
+            )
+        } catch {
+            guard isCurrent() else { throw CancellationError() }
+            if (error as? StreamingQualityError) == .noStreams {
+                playbackInventoryState.noStreamItemIDs.insert(item.id)
+                if item.id == rootID, var detail = state.value {
+                    detail.item.versions = []
+                    detail.item.sources = detail.item.sources.map {
+                        stampedPrimarySource($0, from: detail.item, preservingWatchState: true)
+                    }
+                    state = .loaded(detail)
+                    sources = sources.map {
+                        stampedPrimarySource($0, from: detail.item, preservingWatchState: true)
+                    }
+                }
+            }
+            throw error
+        }
+    }
+
+    /// Resolves trailers and ordinary enrichment concurrently on the awaited `load()`
+    /// path. Server-provided ratings instead use an independently owned task,
+    /// so a missing or slow response cannot hold loading open. Cancellable via the awaiting
     /// task: a navigate-away cancels `load()`, which cancels this mid-flight (the
-    /// guards below bail) instead of letting YouTube extraction / a ratings fetch
+    /// guards below bail) instead of letting trailer metadata / a ratings fetch
     /// run to completion on the next page's back. The heavy trailer extraction is
     /// additionally gated behind a cancellable dwell (see ``loadTrailers(for:)``)
     /// so rapid tap-through never pays it.
@@ -1228,6 +1364,7 @@ public final class ItemDetailViewModel {
         )
         async let ratingsDone: Void = enrichRatings(
             for: item,
+            provider: provider,
             sourceGeneration: sourceGeneration
         )
         async let overviewDone: Void = enrichOverview(
@@ -1329,7 +1466,7 @@ public final class ItemDetailViewModel {
     }
 
     public func retryExtras() async {
-        guard let detail = state.value else { return }
+        guard let detail = state.value, let activeProvider else { return }
         await loadExtras(
             for: detail.item,
             children: detail.children,
@@ -1348,6 +1485,7 @@ public final class ItemDetailViewModel {
         streamProbeTask?.cancel(); streamProbeTask = nil
         crossServerDiscoveryTask?.cancel(); crossServerDiscoveryTask = nil
         alternateSourceEnrichmentTask?.cancel(); alternateSourceEnrichmentTask = nil
+        serverRatingsTask?.cancel(); serverRatingsTask = nil
         seasonLoadingSuspended = true
         cancelSeasonLoads()
         seasonEpisodeRosters.reset()
@@ -1362,36 +1500,24 @@ public final class ItemDetailViewModel {
             seasonLoadingSuspended = false
         }
         guard hasPaintedFreshDetail else { return }
-        if let item = state.value?.item {
+        if let item = state.value?.item, let activeProvider {
             startStreamProbeEnrichment(
                 for: item,
                 provider: activeProvider,
                 sourceGeneration: sourceGeneration
             )
+            if serverRatingsTask == nil, !item.usesProviderRatings,
+               let server = activeProvider as? any ServerRatingsProviding {
+                startServerRatings(for: item, server: server, generation: sourceGeneration)
+            }
         }
         guard !enrichmentComplete, enrichmentTask == nil,
               let item = enrichmentItem else { return }
         startSpeculativeEnrichment(for: item)
     }
 
-    /// Fetches the item's trailers off the critical path. The Trailer button is
-    /// surfaced **fast** (optimistically, from the server's own trailer id) and
-    /// the verified, actually-playable id is refined in the background — so the
-    /// button appears in well under a second instead of waiting 5–10s for the full
-    /// extract → byte-check → keyless-search chain to finish.
-    ///
-    /// Flow:
-    ///  1. A local server trailer file wins outright (a real asset, no network).
-    ///  2. A cached outcome for this item (working id or "none") applies instantly.
-    ///  3. Otherwise, if the server has a remote (YouTube) trailer id, show the
-    ///     button **immediately** from it, then verify in the same pass: refine to
-    ///     the first id that actually plays, search for a replacement when the
-    ///     server ids are all dead, and retract only when nothing plays at all.
-    ///  4. With no server id, a keyless search decides whether to show a button.
-    ///
-    /// The verified outcome is cached so revisiting the page is instant, and the
-    /// player's own primary→alternatives→error fallback means an optimistic button
-    /// self-heals at tap time rather than ever being a dead end.
+    /// Prefer provider-owned files, including cross-server copies. Otherwise show
+    /// a server or TMDB YouTube link. Video availability is handled by YouTube.
     private func loadTrailers(
         for item: MediaItem,
         provider: any MediaProvider,
@@ -1431,7 +1557,7 @@ public final class ItemDetailViewModel {
         let serverIDs = orderedUnique(provided.compactMap(\.youTubeTrailerVideoID))
 
         // 2) A cached decision applies instantly — the main reason a revisited page
-        //    no longer re-pays the extraction/search cost.
+        //    no longer repeats the metadata lookup.
         if let cached = trailerCache.outcome(for: item.id) {
             guard isStillLoaded(item, sourceGeneration: sourceGeneration) else { return }
             switch cached {
@@ -1448,25 +1574,13 @@ public final class ItemDetailViewModel {
             surfaceTrailer(videoID: optimistic, for: item)
         }
 
-        // Dwell gate: the verify/replace pass below now uses a cheap keyless oEmbed
-        // existence check (no JavaScriptCore), but it's still speculative network
-        // work, so a short settle keeps fast browsing from firing a burst of checks.
-        // Roughly 1.7s of continuous settle on ONE page before any trailer
-        // verification runs — so flying through pages triggers none, only a page the
-        // user has genuinely settled on. The optimistic button above (server-id
-        // items) has already appeared, so this never delays what the user sees.
-        // trailers run on the awaited load() path, so a navigate-away cancels load()
-        // — and this dwell with it (the guard below bails). Skipped under tests so
-        // the (injected, instant) verify/search pass is deterministic.
-        if Self.trailerExtractionDwellNanos > 0 {
-            try? await Task.sleep(nanoseconds: Self.trailerExtractionDwellNanos)
+        if serverIDs.isEmpty, Self.trailerMetadataDwellNanos > 0 {
+            try? await Task.sleep(nanoseconds: Self.trailerMetadataDwellNanos)
             guard !Task.isCancelled,
                   isStillLoaded(item, sourceGeneration: sourceGeneration) else { return }
         }
 
-        // Verify (existence): confirm the server id exists+embeds via oEmbed, else
-        // search for a replacement and confirm that, then cache the outcome. Full
-        // stream extraction (JavaScriptCore) is deferred to tap-time playback.
+        // Validate link syntax only. Do not scrape, probe, or extract YouTube media.
         var workingID = await playableVideoIDResolver(serverIDs)
         guard !Task.isCancelled else { return }
         if workingID == nil {
@@ -1482,8 +1596,7 @@ public final class ItemDetailViewModel {
             surfaceTrailer(videoID: workingID, for: item)
             trailerCache.record(.working(workingID), for: item.id)
         } else {
-            // Nothing playable anywhere — retract the optimistic button (rare; a
-            // server trailer with no working video and no findable replacement).
+            // Neither the server nor metadata supplied a usable link.
             trailers = []
             trailerCache.record(.none, for: item.id)
         }
@@ -1533,9 +1646,7 @@ public final class ItemDetailViewModel {
         return nil
     }
 
-    /// Builds and shows the online (YouTube) Trailer button for `videoID`, stamped
-    /// with the item's context so a play-time replacement search has a clean
-    /// title/year to work with.
+    /// Builds an external YouTube trailer action with the title's presentation context.
     private func surfaceTrailer(videoID: String, for item: MediaItem) {
         let trailer = MediaItem.youTubeTrailer(
             videoID: videoID,
@@ -1557,11 +1668,8 @@ public final class ItemDetailViewModel {
         return out
     }
 
-    /// Stamps the parent title and year onto an online (YouTube) trailer so that,
-    /// if its video later proves unavailable at play time, the keyless search for
-    /// a replacement trailer has a clean title/year to work with (server trailers
-    /// often carry only a generic name like "Trailer" and no year). Local trailers
-    /// and already-populated fields are left untouched.
+    /// Keep external trailer metadata attached to the parent title. Local trailers
+    /// and already-populated fields remain untouched.
     private func stampTrailerContext(_ trailer: MediaItem, from item: MediaItem) -> MediaItem {
         guard trailer.isYouTubeTrailer else { return trailer }
         var copy = trailer
@@ -1673,7 +1781,7 @@ public final class ItemDetailViewModel {
         // reload) while this one is still awaiting the network; re-checking the
         // identity before publishing makes a superseded reload bail instead of
         // painting the previous server's detail/children over the newer one.
-        let provider = activeProvider
+        guard let provider = activeProvider else { await load(); return }
         let itemID = activeItemID
         let account = activeSourceAccountID
         let reloadSourceGeneration = sourceGeneration
@@ -1742,7 +1850,7 @@ public final class ItemDetailViewModel {
             guard !Task.isCancelled, isCurrent() else { return }
         }
         guard !Task.isCancelled else { return }
-        await enrichRatings(for: item, sourceGeneration: reloadSourceGeneration)
+        await enrichRatings(for: item, provider: provider, sourceGeneration: reloadSourceGeneration)
         await enrichOverview(for: item, sourceGeneration: reloadSourceGeneration)
         await enrichDetailMetadata(for: item, sourceGeneration: reloadSourceGeneration)
         async let trailers: Void = loadTrailers(
@@ -1860,11 +1968,11 @@ public final class ItemDetailViewModel {
     /// Reads bounded pages without changing the existing collection detail/rail
     /// presentation. A failed later page is never cached as an empty collection.
     public func retryCollectionMembers() async {
-        guard case var .loaded(detail) = state, detail.item.kind == .collection else { return }
+        guard case var .loaded(detail) = state, detail.item.kind == .collection,
+              let provider = activeProvider else { return }
         collectionLoadGeneration &+= 1
         let requestGeneration = collectionLoadGeneration
         let generation = sourceGeneration
-        let provider = activeProvider
         let itemID = detail.item.id
         detail.collectionMembersState = .loading
         state = .loaded(detail)
@@ -2032,6 +2140,7 @@ public final class ItemDetailViewModel {
     /// failures cache an empty list so a missing season does not retry on every
     /// focus change.
     public func loadEpisodes(for seasonID: String, forceRefresh: Bool = false) async {
+        guard let provider = activeProvider else { return }
         let sourceItemID = activeItemID
         let sourceAccountID = activeSourceAccountID
         let loadSourceGeneration = sourceGeneration
@@ -2058,7 +2167,6 @@ public final class ItemDetailViewModel {
                    !previousAttemptFailed {
                     return
                 }
-                let provider = activeProvider
                 let token = UUID()
                 load = SeasonLoad(token: token)
                 let superseded = seasonLoads[seasonID]
@@ -2194,19 +2302,30 @@ public final class ItemDetailViewModel {
     /// Overlay technical facts without replacing current progress, numbering or
     /// ownership. A later sparse season/resume result must not erase hero badges.
     public func episodeWithEnrichedBadges(_ episode: MediaItem) -> MediaItem {
+        if hasNoPlaybackStreams(for: episode) {
+            var unavailable = episode
+            unavailable.versions = []
+            return unavailable
+        }
         guard episode.kind == .episode,
               episode.sourceAccountID == nil || activeSourceAccountID == nil
                 || episode.sourceAccountID == activeSourceAccountID,
               let full = episodeBadgeEnrichment[episode.id] else { return episode }
         var enriched = episode
         enriched.mediaInfo = full.mediaInfo ?? enriched.mediaInfo
-        if !full.versions.isEmpty { enriched.versions = full.versions }
+        if episodeBadgeEnrichment.hasAuthoritativeInventory(for: episode.id) || !full.versions.isEmpty {
+            enriched.versions = full.versions
+        }
+        if episodeBadgeEnrichment.hasAuthoritativeInventory(for: episode.id) {
+            enriched.sources = full.sources
+        }
         return enriched
     }
 
-    /// Fetches full file facts once per episode/source without rewriting the rail.
+    /// Fetches presentation metadata once per episode/source, without probing,
+    /// without rewriting the rail or replacing the series' editorial hero.
     public func enrichEpisodeBadgesIfNeeded(_ episode: MediaItem) async -> MediaItem? {
-        guard episode.kind == .episode,
+        guard let activeProvider, episode.kind == .episode,
               episode.sourceAccountID == nil || activeSourceAccountID == nil
                 || episode.sourceAccountID == activeSourceAccountID else { return nil }
         if episodeBadgeEnrichment[episode.id] != nil {
@@ -2215,17 +2334,27 @@ public final class ItemDetailViewModel {
         let generation = sourceGeneration
         let itemID = activeItemID
         let accountID = activeSourceAccountID
+        let provider = activeProvider
         do {
-            let full = try await activeProvider.item(id: episode.id)
-            guard !Task.isCancelled, full.id == episode.id,
+            let full = try await provider.item(id: episode.id)
+            guard !Task.isCancelled,
                   isCurrentSource(generation: generation, itemID: itemID, accountID: accountID) else { return nil }
+            guard full.id == episode.id, full.kind == .episode,
+                  full.sourceAccountID == nil || full.sourceAccountID == accountID else {
+                PlaybackPreparationDiagnostics.identityFailure(
+                    provider: provider.kind, operation: .episodeVersions, expectedID: episode.id,
+                    expectedKind: .episode, expectedAccountID: accountID, resolved: full
+                )
+                PlozzLog.playback.error("Episode metadata did not match the requested source.")
+                return nil
+            }
             episodeBadgeEnrichment.store(full)
             HandoffDiagnostics.emit("detail episode metadata versions=\(full.versions.count) badges=\(full.technicalBadges.count)")
             return episodeWithEnrichedBadges(episode)
         } catch {
-            guard !Task.isCancelled,
+            guard !Task.isCancelled, !(error is CancellationError), (error as? AppError) != .cancelled,
                   isCurrentSource(generation: generation, itemID: itemID, accountID: accountID) else { return nil }
-            PlozzLog.networking.error("Episode technical metadata lookup failed")
+            _ = PlaybackVersionChoiceModel.reportFailure(error, stage: "episode-detail")
             return nil
         }
     }
@@ -2243,7 +2372,7 @@ public final class ItemDetailViewModel {
         tagged.sources.removeAll { tagged.rejectedSourceIDs.contains($0.id) }
         if editionOpeningSource?.matches(tagged) == true {
             tagged.editionOpeningSource = editionOpeningSource
-            tagged.edition = Self.nonblankEdition(tagged.edition) ?? Self.nonblankEdition(openingEdition)
+            tagged.edition = Self.nonblank(tagged.edition) ?? Self.nonblank(openingEdition)
         } else {
             tagged.editionOpeningSource = nil
         }
@@ -2276,6 +2405,8 @@ public final class ItemDetailViewModel {
 
     private func invalidateSourceOperations() {
         sourceGeneration += 1
+        serverRatingsTask?.cancel()
+        serverRatingsTask = nil
         if var detail = state.value, detail.serverResumeEpisode != nil {
             detail.serverResumeEpisode = nil
             state = .loaded(detail)
@@ -2286,6 +2417,7 @@ public final class ItemDetailViewModel {
         pendingSnapshotWrite?.cancel()
         pendingSnapshotWrite = nil
         episodeBadgeEnrichment.reset()
+        playbackInventoryState.reset()
         seasonEpisodeRosters.reset()
     }
 
@@ -2414,18 +2546,60 @@ public final class ItemDetailViewModel {
         return seriesEpisodeContext.stamping(episodes)
     }
 
-    /// Fetches external ratings off the critical path and merges them into the
-    /// already-loaded detail. Failures are silent — the screen keeps whatever
-    /// backend-native ratings it already has.
-    private func enrichRatings(for item: MediaItem, sourceGeneration: UInt64) async {
+    /// Server metadata is independent of load completion and never delays Play.
+    private func enrichRatings(
+        for item: MediaItem, provider: any MediaProvider, sourceGeneration: UInt64
+    ) async {
         guard !item.usesProviderRatings else { return }
+        if let server = provider as? any ServerRatingsProviding {
+            startServerRatings(for: item, server: server, generation: sourceGeneration)
+            return
+        }
         let external = await ratingsProvider.ratings(for: item)
-        guard !Task.isCancelled, self.sourceGeneration == sourceGeneration else { return }
-        guard !external.isEmpty else { return }
-        guard case var .loaded(detail) = state, detail.item.id == item.id,
+        guard !Task.isCancelled else { return }
+        applyRatings(external, serverSupplied: false, itemID: item.id, generation: sourceGeneration)
+    }
+
+    private func startServerRatings(for item: MediaItem, server: any ServerRatingsProviding, generation: UInt64) {
+        serverRatingsTask?.cancel()
+        let externalProvider = ratingsProvider
+        serverRatingsTask = Task { [weak self] in
+            do {
+                if let supplied = try await server.serverRatings(for: item) {
+                    guard !Task.isCancelled else { return }
+                    self?.applyRatings(supplied, serverSupplied: true, itemID: item.id, generation: generation)
+                    return
+                }
+            } catch {
+                guard !Task.isCancelled, !(error is CancellationError),
+                      error as? AppError != .cancelled else { return }
+                PlozzLog.networking.error("Unable to read server-provided rating metadata.")
+            }
+            guard !Task.isCancelled else { return }
+            let external = await externalProvider.ratings(for: item)
+            guard !Task.isCancelled else { return }
+            self?.applyRatings(external, serverSupplied: false, itemID: item.id, generation: generation)
+        }
+    }
+
+    func waitForServerRatings() async {
+        await serverRatingsTask?.value
+    }
+
+    private func applyRatings(
+        _ ratings: [ExternalRating], serverSupplied: Bool, itemID: String, generation: UInt64
+    ) {
+        guard sourceGeneration == generation, serverSupplied || !ratings.isEmpty,
+              case var .loaded(detail) = state, detail.item.id == itemID,
               !detail.item.usesProviderRatings else { return }
-        detail.item.ratings = detail.item.ratings.mergedWithAuthoritative(external)
+        if serverSupplied {
+            detail.item.ratings = ratings
+            detail.item.usesProviderRatings = true
+        } else {
+            detail.item.ratings = detail.item.ratings.mergedWithAuthoritative(ratings)
+        }
         state = .loaded(detail)
+        persistSnapshot()
     }
 
     private func enrichDetailMetadata(for item: MediaItem, sourceGeneration: UInt64) async {
@@ -2652,13 +2826,35 @@ public final class ItemDetailViewModel {
     /// The primary/active source is always retained so the page the user
     /// navigated to never loses its own entry. This is what keeps a disabled
     /// server from lingering in the picker when it's restored from a stale
-    /// on-disk snapshot persisted while the server was still enabled.
+    /// on-disk snapshot persisted while the server was still enabled. Repairs
+    /// missing display labels using only each retained source's owning provider.
     private func prunedToActiveAccounts(_ candidate: [MediaSourceRef]) -> [MediaSourceRef] {
-        candidate.filter { source in
-            !rejectedSourceIDs.contains(source.id)
-                && (source.accountID == activeSourceAccountID
-                    || alternateProviderResolver(source.accountID) != nil)
+        candidate.compactMap { source in
+            guard !rejectedSourceIDs.contains(source.id) else { return nil }
+            let isActiveSource = source.accountID == activeSourceAccountID
+            let provider = isActiveSource ? activeProvider : alternateProviderResolver(source.accountID)
+            guard isActiveSource || provider != nil else { return nil }
+            return Self.fillingSourceDisplayMetadata(in: source, provider: provider)
         }
+    }
+
+    private static func fillingSourceDisplayMetadata(
+        in source: MediaSourceRef,
+        from known: MediaSourceRef? = nil,
+        provider: (any MediaProvider)? = nil
+    ) -> MediaSourceRef {
+        let known = known.flatMap {
+            $0.accountID == source.accountID && $0.itemID == source.itemID ? $0 : nil
+        }
+        var result = source
+        result.providerKind = result.providerKind ?? known?.providerKind ?? provider?.kind
+        if nonblank(result.serverName) == nil {
+            result.serverName = nonblank(known?.serverName) ?? nonblank(provider?.session.server.name)
+        }
+        if nonblank(result.accountName) == nil {
+            result.accountName = nonblank(known?.accountName) ?? nonblank(provider?.session.userName)
+        }
+        return result
     }
 
     /// Stamps the primary source with the freshly-fetched detail so the picker and
@@ -2702,39 +2898,44 @@ public final class ItemDetailViewModel {
                 if let revision = version.sourceMetadata?.sourceRevision {
                     return revision == candidate.sourceMetadata?.sourceRevision
                 }
-                guard let file = Self.nonblankEdition(version.fileName) else { return false }
-                return file == Self.nonblankEdition(candidate.fileName)
+                guard let file = Self.nonblank(version.fileName) else { return false }
+                return file == Self.nonblank(candidate.fileName)
             }
         }
         var result = fresh
-        let freshEdition = nonblankEdition(fresh.edition)
+        let freshEdition = nonblank(fresh.edition)
         result.edition = freshEdition
         result.versions = fresh.versions.enumerated().map { index, version in
             var restored = version
-            restored.edition = nonblankEdition(version.edition)
+            restored.edition = nonblank(version.edition)
                 ?? freshEdition
-                ?? matches[index].flatMap { nonblankEdition($0.edition) }
+                ?? matches[index].flatMap { nonblank($0.edition) }
             return restored
         }
         if freshEdition == nil,
-           let previousEdition = nonblankEdition(known.edition),
+           let previousEdition = nonblank(known.edition),
            !incoming.isEmpty,
            matches.allSatisfy({ $0 != nil }),
            result.versions.allSatisfy({
-               nonblankEdition($0.edition)?.caseInsensitiveCompare(previousEdition) == .orderedSame
+               nonblank($0.edition)?.caseInsensitiveCompare(previousEdition) == .orderedSame
            }) {
             result.edition = previousEdition
         }
         return result
     }
 
-    private static func nonblankEdition(_ value: String?) -> String? {
+    private static func nonblank(_ value: String?) -> String? {
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
               !trimmed.isEmpty else { return nil }
         return trimmed
     }
 
     private func applyDiscoveredSources(_ resolution: CrossServerSourceResolution, primary: MediaItem) async {
+        var primary = primary
+        if let latest = state.value?.item,
+           latest.id == primary.id, latest.sourceAccountID == primary.sourceAccountID {
+            primary = latest
+        }
         retainSourceRejections(resolution.rejectedSourceIDs)
         if let accountID = activeSourceAccountID {
             rejectedSourceIDs.remove("\(accountID):\(primary.id)")
@@ -2745,7 +2946,11 @@ public final class ItemDetailViewModel {
         guard !discovered.isEmpty || !resolution.rejectedSourceIDs.isEmpty else { return }
         if retained.isEmpty, let accountID = activeSourceAccountID, primary.locallyValidatedPlayableSource {
             retained = [stampedPrimarySource(
-                MediaSourceRef(accountID: accountID, itemID: primary.id, kind: primary.kind),
+                Self.fillingSourceDisplayMetadata(
+                    in: MediaSourceRef(accountID: accountID, itemID: primary.id, kind: primary.kind),
+                    from: discovered.first { $0.accountID == accountID && $0.itemID == primary.id },
+                    provider: activeProvider
+                ),
                 from: primary
             )]
         }
@@ -2758,22 +2963,20 @@ public final class ItemDetailViewModel {
             // Already had a (seeded) picker: union in any newly-found servers,
             // preserving existing order + already-enriched versions.
             result = retained
-            // Refresh each KEPT source's locality from the re-discovery first: a
-            // repeated discovery may re-classify a server local↔remote after a
-            // network change (e.g. the device got home onto the LAN, or dropped
-            // off it onto Tailscale) WITHOUT surfacing any new server. That
-            // must still update the picker highlight and the play default, so we
-            // publish on a locality change even when the server count is
-            // unchanged (the count-grew guard below alone would swallow it).
-            let discoveredLocality = Dictionary(
-                discovered.compactMap { ref in ref.locality.map { (sourceKey(ref), $0) } },
-                uniquingKeysWith: { first, _ in first }
+            // Rediscovery can repair sparse labels or change locality without
+            // adding a source. Keep the live versions and per-account watch state.
+            let discoveredByKey = Dictionary(
+                discovered.map { (sourceKey($0), $0) },
+                uniquingKeysWith: { first, next in
+                    var combined = Self.fillingSourceDisplayMetadata(in: first, from: next)
+                    combined.locality = first.locality ?? next.locality
+                    return combined
+                }
             )
             result = result.map { existing in
-                guard let refreshed = discoveredLocality[sourceKey(existing)],
-                      refreshed != existing.locality else { return existing }
-                var copy = existing
-                copy.locality = refreshed
+                guard let refreshed = discoveredByKey[sourceKey(existing)] else { return existing }
+                var copy = Self.fillingSourceDisplayMetadata(in: existing, from: refreshed)
+                copy.locality = refreshed.locality ?? existing.locality
                 return copy
             }
             var keys = Set(result.map(sourceKey))
@@ -2781,10 +2984,7 @@ public final class ItemDetailViewModel {
                 result.append(source)
             }
         }
-        // Publish when discovery expanded the server list or refreshed locality.
-        // Even an unchanged result must continue into retargeting: the same list
-        // may already have arrived from a snapshot while the active detail provider
-        // is still the merge primary.
+        // Metadata-only repairs must also reach the picker and snapshot cache.
         if result != sources || !resolution.rejectedSourceIDs.isEmpty {
             sources = result
             applyUnifiedWatchState()
@@ -2994,8 +3194,10 @@ public final class ItemDetailViewModel {
             }
             evidence.append(update.identity)
             var source = updatedSources[index]
-            source.versions = update.versions
-            source.edition = update.edition
+            if !playbackInventoryState.authoritativeSourceIDs.contains(source.id) {
+                source.versions = update.versions
+                source.edition = update.edition
+            }
             source.resumePosition = update.resumePosition
             source.playedPercentage = update.playedPercentage
             source.unwatchedEpisodeCount = update.unwatchedEpisodeCount

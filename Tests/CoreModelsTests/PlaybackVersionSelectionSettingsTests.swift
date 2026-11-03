@@ -10,9 +10,27 @@ final class PlaybackVersionSelectionSettingsTests: XCTestCase {
 
     func testModesRoundTripWithoutChangingOtherPlaybackPreferences() throws {
         for mode in PlaybackVersionSelectionMode.allCases {
-            let settings = PlaybackSettings(backgroundAudio: true, versionSelectionMode: mode)
-            XCTAssertEqual(try JSONDecoder().decode(PlaybackSettings.self, from: JSONEncoder().encode(settings)), settings)
+            for remembers in [false, true] {
+                let settings = PlaybackSettings(
+                    backgroundAudio: true, versionSelectionMode: mode, rememberVersionPerSeries: remembers
+                )
+                XCTAssertEqual(try JSONDecoder().decode(PlaybackSettings.self, from: JSONEncoder().encode(settings)), settings)
+            }
         }
+    }
+
+    func testLegacyRememberModeMigratesWithoutAnotherIntroduction() throws {
+        let migrated = try JSONDecoder().decode(PlaybackSettings.self, from: Data(
+            #"{"versionSelectionMode":"rememberChoice"}"#.utf8
+        ))
+        XCTAssertEqual(migrated.versionSelectionMode, .automatic)
+        XCTAssertTrue(migrated.rememberVersionPerSeries)
+        XCTAssertTrue(PlaybackSettings.default.rememberVersionPerSeries)
+        let disabled = try JSONDecoder().decode(PlaybackSettings.self, from: Data(
+            #"{"versionSelectionMode":"rememberChoice","rememberVersionPerSeries":false}"#.utf8
+        ))
+        XCTAssertEqual(disabled.versionSelectionMode, .automatic)
+        XCTAssertFalse(disabled.rememberVersionPerSeries)
     }
 
     @MainActor
@@ -27,11 +45,29 @@ final class PlaybackVersionSelectionSettingsTests: XCTestCase {
         XCTAssertEqual(primary.load().versionSelectionMode, .askEveryTime)
         XCTAssertNil(guest.load().versionSelectionMode)
         let guestModel = PlaybackSettingsModel(store: guest)
-        guestModel.settings.versionSelectionMode = .rememberChoice
+        guestModel.settings.versionSelectionMode = .automatic
+        guestModel.settings.rememberVersionPerSeries = false
+        XCTAssertFalse(VersionPreferenceStore(defaults: defaults, namespace: "guest").remembersSeriesVersions)
+        XCTAssertTrue(VersionPreferenceStore(defaults: defaults).remembersSeriesVersions)
         let snapshot = ProfileSettingsTransfer.capture(namespace: "guest", defaults: defaults)
         ProfileSettingsTransfer.apply(snapshot, namespace: "restored", defaults: defaults)
-        XCTAssertEqual(PlaybackSettingsStore(defaults: defaults, namespace: "restored").load().versionSelectionMode, .rememberChoice)
+        XCTAssertEqual(PlaybackSettingsStore(defaults: defaults, namespace: "restored").load().versionSelectionMode, .automatic)
+        XCTAssertFalse(VersionPreferenceStore(defaults: defaults, namespace: "restored").remembersSeriesVersions)
         XCTAssertEqual(primary.load().versionSelectionMode, .askEveryTime)
+    }
+
+    func testDisabledSeriesMemoryDoesNotDisableMoviePreferences() throws {
+        let suite = "version-memory-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = PlaybackSettingsStore(defaults: defaults)
+        settings.save(PlaybackSettings(rememberVersionPerSeries: false))
+        let preferences = VersionPreferenceStore(defaults: defaults)
+        XCTAssertTrue(preferences.shouldRememberVersion(for: .init(id: "movie", title: "Movie", kind: .movie)))
+        XCTAssertFalse(preferences.shouldRememberVersion(for: .init(id: "series", title: "Series", kind: .series)))
+        XCTAssertFalse(preferences.shouldRememberVersion(for: .init(
+            id: "episode", title: "Episode", kind: .episode, seriesID: "series"
+        )))
     }
 
     func testAutomaticMatchingDoesNotSubstituteDifferentOrUnknownFacts() {

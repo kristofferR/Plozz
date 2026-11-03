@@ -73,6 +73,7 @@ public struct HomeHeroBackdrop: View {
     /// Last-resort async art lookup (e.g. TMDb) when none of `urls` load.
     let asyncFallbackURL: (@Sendable () async -> URL?)?
     @Environment(\.plozzArtworkPolicy) private var artworkPolicy
+    let artworkPlacement: ArtworkPlacement?
     let sharedResolutionIdentity: String?
     /// Stable identity of the fronted slide (the item id). A *change* in this is
     /// what triggers a wipe — never a mere `urls` array rebuild for the same slide.
@@ -82,6 +83,8 @@ public struct HomeHeroBackdrop: View {
     let forward: Bool
     let width: CGFloat
     let height: CGFloat
+    /// Extra image above the resting viewport for an incoming vertical transition.
+    let topOverscan: CGFloat
     /// Legibility scrim tone — dark in dark mode, light in light mode.
     let scrimTone: Color
     /// How far UP (points) to translate the backdrop when the hero recedes: 0 at
@@ -122,6 +125,7 @@ public struct HomeHeroBackdrop: View {
         forward: Bool,
         width: CGFloat,
         height: CGFloat,
+        topOverscan: CGFloat = 0,
         scrimTone: Color,
         recedeLift: CGFloat = 0,
         receded: Bool = false,
@@ -132,15 +136,18 @@ public struct HomeHeroBackdrop: View {
         scrimOpacity: Double = 1,
         sharedResolutionIdentity: String? = nil,
         transition: Transition = .wipe,
-        scrimStyle: ScrimStyle = .carousel
+        scrimStyle: ScrimStyle = .carousel,
+        artworkPlacement: ArtworkPlacement? = nil
     ) {
         self.references = references
+        self.artworkPlacement = artworkPlacement
         self.asyncFallbackURL = asyncFallbackURL
         self.sharedResolutionIdentity = sharedResolutionIdentity
         self.slideID = slideID
         self.forward = forward
         self.width = width
         self.height = height
+        self.topOverscan = topOverscan
         self.scrimTone = scrimTone
         self.recedeLift = recedeLift
         self.receded = receded
@@ -160,6 +167,7 @@ public struct HomeHeroBackdrop: View {
         forward: Bool,
         width: CGFloat,
         height: CGFloat,
+        topOverscan: CGFloat = 0,
         scrimTone: Color,
         recedeLift: CGFloat = 0,
         receded: Bool = false,
@@ -179,6 +187,7 @@ public struct HomeHeroBackdrop: View {
             forward: forward,
             width: width,
             height: height,
+            topOverscan: topOverscan,
             scrimTone: scrimTone,
             recedeLift: recedeLift,
             receded: receded,
@@ -222,7 +231,7 @@ public struct HomeHeroBackdrop: View {
         dissolvedSurface
             .frame(maxWidth: .infinity, alignment: artworkAlignment)
             // Keep the translation inside the safe-area breakout.
-            .modifier(HomeVerticalMotion(y: -recedeLift))
+            .modifier(HomeVerticalMotion(y: -recedeLift - topOverscan))
             .animation(reduceMotion ? nil : .smooth(duration: 0.96), value: recedeLift)
             .animation(reduceMotion ? nil : .smooth(duration: 0.96), value: receded)
             .ignoresSafeArea(
@@ -238,7 +247,7 @@ public struct HomeHeroBackdrop: View {
 
     private var backdropSurface: some View {
         backdropImage
-            .frame(width: width, height: height)
+            .frame(width: width, height: height + topOverscan)
             .clipped()
             .overlay {
                 if showsTrailer, let trailerController {
@@ -268,18 +277,19 @@ public struct HomeHeroBackdrop: View {
     @ViewBuilder
     private var backdropImage: some View {
         #if canImport(UIKit)
+        let policy = artworkPolicy.forPlacement(artworkPlacement ?? artworkPolicy.placement)
         WipeImageView(
             references: references,
             asyncFallbackURL: asyncFallbackURL,
-            prefersOnlineArtwork: artworkPolicy.prefersOnlineArtwork,
-            sharedResolutionIdentity: sharedResolutionIdentity.map { "\($0)|\(artworkPolicy.identity)" },
+            prefersOnlineArtwork: policy.prefersOnlineArtwork,
+            sharedResolutionIdentity: sharedResolutionIdentity.map { "\($0)|\(policy.identity)" },
             slideID: slideID,
             forward: forward,
             transition: transition,
             width: width,
-            height: height
+            height: height + topOverscan
         )
-        .id(artworkPolicy.identity)
+        .id(policy.identity)
         #else
         Rectangle().fill(.tertiary)
         #endif

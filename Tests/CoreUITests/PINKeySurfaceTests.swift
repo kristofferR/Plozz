@@ -6,11 +6,17 @@ import XCTest
 
 @MainActor
 final class PINKeySurfaceTests: XCTestCase {
-    func testDigitAndDeleteKeysShareTheGradientSurfaceAndOpaqueFallback() throws {
+    func testDigitAndDeleteKeysKeepTheirOpaqueAndLegacyFallbacks() throws {
+        let reductions: [Bool]
+        if #available(iOS 26.0, tvOS 26.0, *) {
+            reductions = [true]
+        } else {
+            reductions = [false, true]
+        }
         for palette in [ThemePalette.dark, .pureBlack, .light] {
             for width in [PINMetrics.keyDiameter, PINMetrics.deleteKeyWidth] {
                 for gradient in [false, true] {
-                    for reduced in [false, true] {
+                    for reduced in reductions {
                         let backdrop = LinearGradient(
                             colors: [.red, .blue], startPoint: .top, endPoint: .bottom
                         )

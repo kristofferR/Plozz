@@ -3,7 +3,29 @@ import CoreSecureStore
 import FeatureAuth
 import Foundation
 import XCTest
+import TopShelfKit
+@testable import AppRuntime
 @testable import AppShell
+
+private struct OnboardingLibraryProvider: MediaProvider {
+    let session: UserSession
+    var kind: ProviderKind { .plex }
+    func libraries() async throws -> [MediaLibrary] {
+        guard session.accessToken == "viewer-server" else { throw AppError.unauthorized }
+        return [.init(id: "movies", title: "Movies", kind: .movie)]
+    }
+    func continueWatching(limit: Int) async throws -> [MediaItem] { [] }
+    func latest(limit: Int) async throws -> [MediaItem] { [] }
+    func item(id: String) async throws -> MediaItem { throw AppError.notFound }
+    func children(of itemID: String) async throws -> [MediaItem] { [] }
+    func items(in containerID: String, kind: MediaItemKind, page: PageRequest) async throws -> MediaPage {
+        .init(items: [], startIndex: 0, totalCount: 0)
+    }
+    func search(query: String, limit: Int) async throws -> [MediaItem] { [] }
+    func playbackInfo(for itemID: String) async throws -> PlaybackRequest { throw AppError.notFound }
+    func reportPlayback(_ progress: PlaybackProgress, event: PlaybackEvent) async throws {}
+    func imageURL(itemID: String, kind: ImageKind, maxWidth: Int?) -> URL? { nil }
+}
 
 @MainActor
 final class AppAdmissionIntegrationTests: XCTestCase {
@@ -71,6 +93,13 @@ final class AppAdmissionIntegrationTests: XCTestCase {
             accountStore: accounts,
             registry: ProviderRegistry(),
             profilesModel: profiles,
+            homeLibraryVisibilityModel: HomeLibraryVisibilityModel(
+                store: HomeLibraryVisibilityStore(defaults: defaults)
+            ),
+            navigationStyleModel: NavigationStyleSettingsModel(
+                store: NavigationStyleSettingsStore(defaults: defaults),
+                layoutStore: NavigationLibraryLayoutStore(defaults: defaults)
+            ),
             appAdmissionStore: admission
         )
         return Harness(state: state, accounts: accounts, profiles: profiles, defaults: defaults)
@@ -83,6 +112,218 @@ final class AppAdmissionIntegrationTests: XCTestCase {
         XCTAssertFalse(harness.state.pendingStandaloneLiveTVEntry)
         XCTAssertEqual(harness.state.state, .onboarding(.selectingServer, canReturnToApp: false))
         XCTAssertEqual(harness.profiles.activeProfile.name, "Me")
+    }
+
+    func testImportedFirstRunCompletionDoesNotReopenAppearanceOnReselectOrReload() async throws {
+        let harness = try makeHarness()
+        harness.state.bootstrap()
+        let users = [
+            PlexHomeUser(id: "parent", name: "Parent", requiresPIN: false, isAdmin: true),
+            PlexHomeUser(id: "child", name: "Child", requiresPIN: false)
+        ]
+        harness.state.plexHomeUsers.plexHomeUsersFetch = { _, _ in users }
+        harness.state.plexHomeUsers.plexHomeUserSwitch = { user, _, _, _ in "cloud-\(user)" }
+        harness.state.plexHomeUsers.plexServerTokenResolve = { _, _, _ in "server-token" }
+        harness.state.addAccount(provider: .plex)
+        XCTAssertTrue(harness.state.didAuthenticate(.init(
+            server: .init(id: "server", name: "Server", baseURL: URL(string: "https://server.example")!, provider: .plex),
+            userID: "owner", userName: "Owner", deviceID: "fixture", accessToken: "fixture-owner"
+        )))
+        for _ in 0..<200 {
+            if harness.state.plexHomeUsers.pendingPlexUserSelection != nil { break }
+            await Task.yield()
+        }
+        XCTAssertNotNil(harness.state.plexHomeUsers.pendingPlexUserSelection)
+        XCTAssertEqual(harness.state.importPlexHomeProfilesDuringOnboarding(), .added)
+        harness.state.selectPlexUserDuringOnboarding(users[1], addAllProfiles: true)
+        await harness.state.plexHomeUsers.waitForPlexPINRequirementCheck()
+        let selected = harness.profiles.activeProfileID
+        XCTAssertNotEqual(selected, ProfileStore.defaultProfileID)
+        XCTAssertTrue(harness.state.profileFlow.hasResumableSetup)
+        harness.state.confirmLibrarySelection()
+        harness.state.confirmFirstRunProfile()
+        harness.state.completeFirstRunSeerrSetup()
+        harness.state.finishThemeSelection()
+        harness.state.finishNavigationSelection()
+        XCTAssertFalse(harness.state.profileFlow.hasResumableSetup)
+        harness.state.profileFlow.switchProfile(to: selected)
+        XCTAssertFalse(harness.state.profileFlow.isPickingAppearanceForNewProfile)
+        XCTAssertFalse(harness.state.profileFlow.hasResumableSetup)
+        let reloaded = AppState(
+            accountStore: harness.accounts, registry: ProviderRegistry(),
+            profilesModel: ProfilesModel(store: ProfileStore(defaults: harness.defaults)),
+            appAdmissionStore: AppAdmissionStore(defaults: harness.defaults)
+        )
+        reloaded.profileFlow.resumeSetupIfNeeded()
+        XCTAssertFalse(reloaded.profileFlow.hasResumableSetup)
+        XCTAssertFalse(reloaded.profileFlow.isPickingAppearanceForNewProfile)
+    }
+
+    func testPlexLibrarySelectionAuthenticatesChosenViewerBeforeDiscovery() async throws {
+        for protected in [false, true] {
+            let harness = try makeHarness()
+            harness.state.accountsProviders.registry.register(.plex) {
+                OnboardingLibraryProvider(session: $0.session)
+            }
+            harness.state.bootstrap()
+            let users = [
+                PlexHomeUser(id: "parent", name: "Parent", requiresPIN: true, isAdmin: true),
+                PlexHomeUser(id: "viewer", name: "Viewer", requiresPIN: protected)
+            ]
+            harness.state.plexHomeUsers.plexHomeUsersFetch = { _, _ in users }
+            harness.state.plexHomeUsers.plexHomeUserSwitch = { user, pin, _, _ in
+                XCTAssertEqual(user, "viewer", "Import must never authenticate the other profiles.")
+                XCTAssertEqual(pin, protected ? "2468" : nil)
+                return "viewer-cloud"
+            }
+            harness.state.plexHomeUsers.plexServerTokenResolve = { _, token, _ in
+                XCTAssertEqual(token, "viewer-cloud")
+                return "viewer-server"
+            }
+            harness.state.addAccount(provider: .plex)
+            XCTAssertTrue(harness.state.didAuthenticate(.init(
+                server: .init(id: "server", name: "Server", baseURL: URL(string: "https://server.example")!, provider: .plex),
+                userID: "owner", userName: "Owner", deviceID: "fixture", accessToken: "owner-token"
+            )))
+            for _ in 0..<200 {
+                if harness.state.plexHomeUsers.pendingPlexUserSelection != nil { break }
+                await Task.yield()
+            }
+            XCTAssertNotNil(harness.state.plexHomeUsers.pendingPlexUserSelection)
+            XCTAssertEqual(harness.state.importPlexHomeProfilesDuringOnboarding(), .added)
+            harness.state.selectPlexUserDuringOnboarding(users[1], addAllProfiles: true)
+            let ids = harness.state.pendingLibrarySelectionAccountIDs
+            XCTAssertFalse(ids.isEmpty)
+            await harness.state.plexHomeUsers.waitForPlexPINRequirementCheck()
+            if protected {
+                XCTAssertEqual(harness.state.plexHomeUsers.plexPINEntryAvailability, .available)
+                XCTAssertTrue(harness.state.accountsProviders.resolvedAccounts(withIDs: ids).isEmpty)
+                harness.state.confirmLibrarySelection()
+                XCTAssertEqual(harness.state.pendingLibrarySelectionAccountIDs, ids)
+                let unavailable = LibraryDiscoveryModel()
+                await unavailable.load(from: [], expectedAccountIDs: Set(ids))
+                guard case .failed = unavailable.state else {
+                    XCTFail("Unresolved credentials must not report an empty library.")
+                    continue
+                }
+                harness.state.plexHomeUsers.submitPlexPIN("2468")
+                await harness.state.plexHomeUsers.waitForPlexPINRequirementCheck()
+            }
+            XCTAssertNil(harness.state.plexHomeUsers.pendingPlexPINRequest)
+            let accounts = harness.state.accountsProviders.resolvedAccounts(withIDs: ids)
+            XCTAssertEqual(accounts.count, ids.count)
+            XCTAssertTrue(accounts.allSatisfy { $0.provider.session.accessToken == "viewer-server" })
+            let discovery = LibraryDiscoveryModel()
+            await discovery.load(from: accounts, expectedAccountIDs: Set(ids))
+            guard case let .loaded(libraries) = discovery.state else {
+                XCTFail("The library picker should load the authenticated viewer's libraries.")
+                continue
+            }
+            XCTAssertEqual(libraries.map(\.library.id), ["movies"])
+            XCTAssertFalse(harness.profiles.firstRunProfileSetupComplete)
+        }
+    }
+
+    func testLibraryDiscoveryDoesNotPublishAfterItsProfileScopeChanges() async {
+        let discovery = LibraryDiscoveryModel()
+        await discovery.load(from: [], expectedAccountIDs: ["plex"], isCurrent: { false })
+        XCTAssertEqual(discovery.state, .loading)
+    }
+
+    func testPendingPlexHomeIdentityKeepsNavigationWithoutAuthorizingProviderAccess() throws {
+        let harness = try makeHarness(profileSetupComplete: true, withAccount: true, accountProvider: .plex)
+        harness.profiles.update(harness.profiles.activeProfile.settingHomeUserBinding(
+            .init(homeUserID: "viewer", name: "Viewer", requiresPIN: true),
+            forPlexAccount: "media-account"
+        ))
+        harness.state.bootstrap()
+
+        XCTAssertNil(harness.state.plexHomeUsers.resolvedToken(for: "media-account"))
+        XCTAssertTrue(harness.state.accountsProviders.homeAccounts.isEmpty)
+        XCTAssertFalse(harness.state.isLiveTVProfileAuthorized)
+        let accounts = harness.state.accountsProviders.navigationAccounts
+        XCTAssertEqual(accounts.map(\.id), ["media-account"])
+        let availability = NavigationContentAvailability(
+            accounts: accounts, libraries: [], discoveredAccountIDs: [],
+            disabledLibraryKeys: [], hasDiscoverySearch: false, hasWatchlistItems: false
+        )
+        XCTAssertTrue(availability.hasHomeContent)
+        XCTAssertFalse(availability.prefersLiveTV)
+    }
+
+    func testTopShelfDetailsWaitForAdmissionWithoutBecomingAPlayRequest() throws {
+        let harness = try makeHarness(profileSetupComplete: true)
+        harness.state.bootstrap()
+        harness.state.handle(url: TopShelf.itemDeepLink(id: "1", accountID: "plex", action: .details))
+        XCTAssertNil(harness.state.pendingPlay.request)
+        XCTAssertFalse(harness.state.canEnterApp)
+        XCTAssertTrue(harness.state.enterStandalonePlayback())
+        let request = try XCTUnwrap(harness.state.pendingPlay.request)
+        XCTAssertEqual(request.reference, .init(id: "1", accountID: "plex", action: .details))
+        XCTAssertEqual(harness.state.pendingPlay.request, request)
+    }
+
+    func testTopShelfNewActionSupersedesEvenTheSameItemAndConsumesOnlyOnce() throws {
+        let harness = try makeHarness(profileSetupComplete: true, withAccount: true)
+        harness.state.bootstrap()
+        let pending = harness.state.pendingPlay
+        harness.state.handle(url: TopShelf.itemDeepLink(id: "1", accountID: "plex"))
+        let play = try XCTUnwrap(pending.request)
+        harness.state.handle(url: TopShelf.itemDeepLink(id: "1", accountID: "plex", action: .details))
+        let details = try XCTUnwrap(pending.request)
+        XCTAssertNotEqual(play.id, details.id)
+        XCTAssertFalse(pending.consume(play))
+        XCTAssertEqual(pending.request, details)
+        harness.state.handle(url: TopShelf.itemDeepLink(id: "1", accountID: "jellyfin", action: .details))
+        let otherAccount = try XCTUnwrap(pending.request)
+        XCTAssertFalse(pending.consume(details))
+        XCTAssertTrue(pending.consume(otherAccount))
+        XCTAssertFalse(pending.consume(otherAccount))
+        XCTAssertNil(pending.request)
+    }
+
+    func testPlexReconnectPreservesLegacyAccountProfileBindingsAndLibrarySelections() throws {
+        for batch in [false, true] {
+            let harness = try makeHarness(profileSetupComplete: true, withAccount: true, accountProvider: .plex)
+            let original = try XCTUnwrap(harness.accounts.loadAccounts().first)
+            let profileID = harness.profiles.activeProfileID
+            harness.profiles.update(harness.profiles.activeProfile.settingHomeUserBinding(
+                .init(homeUserID: "parent", name: "Parent", requiresPIN: false),
+                forPlexAccount: original.id
+            ))
+            harness.profiles.setActiveAccountIDs([original.id], for: profileID)
+            let other = harness.profiles.add(name: "Kids", activeAccountIDs: [original.id])
+            harness.profiles.update(other.settingHomeUserBinding(
+                .init(homeUserID: "child", name: "Child", requiresPIN: false),
+                forPlexAccount: original.id
+            ))
+            harness.profiles.select(profileID)
+            harness.state.plexHomeUsers.plexHomeUsersFetch = { _, _ in
+                [PlexHomeUser(id: "parent", name: "Parent", requiresPIN: false)]
+            }
+            harness.state.plexHomeUsers.plexHomeUserSwitch = { _, _, _, _ in "HOME-TOKEN" }
+            harness.state.plexHomeUsers.plexServerTokenResolve = { _, _, _ in "HOME-SERVER-TOKEN" }
+            harness.state.bootstrap()
+            let visibility = harness.state.profileSettings.homeLibraryVisibilityModel
+            visibility.setEnabled(false, for: "\(original.id):movies")
+
+            let session = original.session(token: "test-token")
+            if batch {
+                harness.state.didAuthenticatePlexMany([session, session])
+            } else {
+                XCTAssertTrue(harness.state.didAuthenticate(session))
+            }
+
+            XCTAssertEqual(harness.accounts.loadAccounts(), [original])
+            XCTAssertEqual(harness.state.pendingLibrarySelectionAccountIDs, [original.id])
+            XCTAssertEqual(harness.profiles.activeProfile.homeUserBinding(forPlexAccount: original.id)?.homeUserID, "parent")
+            XCTAssertEqual(harness.profiles.profiles.first { $0.id == other.id }?
+                .homeUserBinding(forPlexAccount: original.id)?.homeUserID, "child")
+            XCTAssertEqual(harness.profiles.storedActiveAccountIDs(for: profileID), [original.id])
+            XCTAssertEqual(harness.profiles.storedActiveAccountIDs(for: other.id), [original.id])
+            XCTAssertFalse(visibility.visibility.isEnabled("\(original.id):movies"))
+            harness.state.plexHomeUsers.forgetAccount(original.id)
+        }
     }
 
     func testSyncedUnknownIdentityDoesNotBlockKnownNonPlexSources() throws {
@@ -142,6 +383,44 @@ final class AppAdmissionIntegrationTests: XCTestCase {
         XCTAssertFalse(harness.state.presentsAccountSetupOverApp)
     }
 
+    func testForegroundLockAlsoProtectsCancelableAccountSetup() throws {
+        let harness = try makeHarness(profileSetupComplete: true, withAccount: true)
+        harness.state.bootstrap()
+        var profile = harness.profiles.activeProfile
+        profile.lock = ProfileLock.make(pin: "2468", iterations: 1)
+        harness.profiles.update(profile)
+        harness.profiles.noteProfileUnlocked(profile.id)
+        harness.state.addAccount(provider: .iptv)
+        XCTAssertFalse(harness.state.isActiveProfileAuthorized)
+        harness.state.lockBrowsingForForegroundIfNeeded()
+        XCTAssertTrue(harness.state.profileFlow.isForegroundLocked)
+        harness.state.cancelAuthentication()
+        harness.state.profileFlow.cancelProfileSelection()
+        XCTAssertFalse(harness.state.isActiveProfileAuthorized)
+        XCTAssertTrue(harness.state.profileFlow.isChoosingProfile)
+    }
+
+    func testForegroundLockQueuesTopShelfAndRejectsAnInFlightConsumption() async throws {
+        let harness = try makeHarness(profileSetupComplete: true, withAccount: true)
+        harness.state.bootstrap()
+        var profile = harness.profiles.activeProfile
+        profile.lock = ProfileLock.make(pin: "2468", iterations: 1)
+        harness.profiles.update(profile)
+        harness.profiles.noteProfileUnlocked(profile.id)
+        harness.state.handle(url: TopShelf.itemDeepLink(id: "movie", accountID: "media-account"))
+        let inFlight = try XCTUnwrap(harness.state.pendingPlay.request)
+        harness.state.lockBrowsingForForegroundIfNeeded()
+        XCTAssertNil(harness.state.pendingPlay.request)
+        XCTAssertFalse(harness.state.pendingPlay.consume(inFlight))
+        harness.state.profileFlow.switchProfile(to: profile.id)
+        let accepted = await harness.state.profileFlow.submitProfileLockPIN("2468")
+        XCTAssertTrue(accepted)
+        XCTAssertNil(harness.state.pendingPlay.request, "Authorization includes dismissing the foreground gate.")
+        harness.state.profileFlow.finishForegroundUnlockIfReady()
+        XCTAssertEqual(harness.state.pendingPlay.request, inFlight)
+        XCTAssertTrue(harness.state.pendingPlay.consume(inFlight))
+    }
+
     func testFirstIPTVAccountCompletesProfileSetupWithoutShowingTheSignedInShellEarly() throws {
         let harness = try makeHarness()
         harness.state.bootstrap()
@@ -159,7 +438,6 @@ final class AppAdmissionIntegrationTests: XCTestCase {
         harness.state.completeFirstRunSeerrSetup()
         harness.state.finishThemeSelection()
         harness.state.finishNavigationSelection()
-        harness.state.finishHomeLayoutSelection()
 
         XCTAssertEqual(harness.state.state, .ready)
         XCTAssertTrue(harness.profiles.firstRunProfileSetupComplete)
@@ -224,10 +502,12 @@ final class AppAdmissionIntegrationTests: XCTestCase {
         try harness.accounts.add(Account(id: Account.stableID(for: session), from: session), token: "fixture")
         harness.profiles.setActiveAccountIDs(["media-account"], for: harness.profiles.activeProfileID)
         harness.state.bootstrap()
+        harness.state.profileSettings.navigationStyleModel.showsLiveTV = false
 
         XCTAssertTrue(harness.state.didAuthenticate(session))
 
         XCTAssertEqual(harness.state.accountsProviders.activeAccountIDs, ["media-account"])
+        XCTAssertFalse(harness.state.profileSettings.navigationStyleModel.showsLiveTV)
     }
 
     func testAddingIPTVCannotOverwriteAnUnreadableProfileSelection() throws {
@@ -235,6 +515,7 @@ final class AppAdmissionIntegrationTests: XCTestCase {
         let harness = try makeHarness(profileSetupComplete: true, withAccount: true, profileSecrets: secrets)
         harness.profiles.setActiveAccountIDs(["media-account"], for: harness.profiles.activeProfileID)
         harness.state.bootstrap()
+        harness.state.profileSettings.navigationStyleModel.showsLiveTV = false
         secrets.failMembershipReads = true
         harness.profiles.setActiveAccountIDs(["media-account"], for: harness.profiles.activeProfileID)
         let session = UserSession(
@@ -244,12 +525,15 @@ final class AppAdmissionIntegrationTests: XCTestCase {
         )
 
         XCTAssertFalse(harness.state.didAuthenticate(session))
+        XCTAssertFalse(harness.state.profileSettings.navigationStyleModel.showsLiveTV)
+        XCTAssertTrue(harness.state.accountsProviders.navigationAccounts.isEmpty)
 
         secrets.failMembershipReads = false
         harness.profiles.retryUnconfirmedAccountSelections()
         XCTAssertEqual(harness.profiles.storedActiveAccountIDs(for: harness.profiles.activeProfileID), ["media-account"])
         harness.state.accountsProviders.reloadAccounts()
         XCTAssertTrue(harness.state.didAuthenticate(session, activateIPTVAccount: true))
+        XCTAssertTrue(harness.state.profileSettings.navigationStyleModel.showsLiveTV)
         XCTAssertTrue(harness.state.accountsProviders.activeAccountIDs.contains(Account.stableID(for: session)))
     }
 
@@ -265,12 +549,16 @@ final class AppAdmissionIntegrationTests: XCTestCase {
         harness.profiles.setActiveAccountIDs(["media-account"], for: harness.profiles.activeProfileID)
         let other = harness.profiles.add(name: "Other", activeAccountIDs: ["media-account"])
         harness.state.bootstrap()
+        harness.state.profileSettings.navigationStyleModel.showsLiveTV = false
 
         XCTAssertTrue(harness.state.didAuthenticate(session, activateIPTVAccount: true))
 
         XCTAssertEqual(harness.accounts.loadAccounts().filter { $0.id == id }.count, 1)
         XCTAssertTrue(harness.state.accountsProviders.liveTVServerChoices.contains { $0.id == id })
         XCTAssertEqual(harness.profiles.storedActiveAccountIDs(for: other.id), ["media-account"])
+        XCTAssertTrue(harness.state.profileSettings.navigationStyleModel.showsLiveTV)
+        XCTAssertTrue(NavigationLibraryLayoutStore(defaults: harness.defaults).load()
+            .shownKeys.contains(NavigationLibraryLayout.liveTVKey))
     }
 
     func testNormalLastAccountSignOutStillOnboards() throws {
@@ -287,7 +575,9 @@ final class AppAdmissionIntegrationTests: XCTestCase {
         harness.state.bootstrap()
         let profile = harness.profiles.activeProfile
         let rememberedSelection = harness.profiles.hasRememberedSelection
+        harness.state.profileSettings.navigationStyleModel.showsLiveTV = false
         XCTAssertTrue(harness.state.recordSuccessfulIPTVSetup())
+        XCTAssertTrue(harness.state.profileSettings.navigationStyleModel.showsLiveTV)
         XCTAssertEqual(harness.state.state, .ready)
         XCTAssertEqual(harness.profiles.activeProfile, profile)
         XCTAssertEqual(harness.profiles.hasRememberedSelection, rememberedSelection)
@@ -316,7 +606,7 @@ final class AppAdmissionIntegrationTests: XCTestCase {
         XCTAssertFalse(harness.profiles.firstRunProfileSetupComplete)
     }
 
-    func testForegroundCredentialRecoveryCannotSkipProfileUnlockDuringLaunch() throws {
+    func testForegroundCredentialRecoveryCannotSkipProfileUnlockDuringLaunch() async throws {
         let secrets = AdmissionMembershipStore()
         let harness = try makeHarness(
             profileSetupComplete: true, withAccount: true, profileSecrets: secrets
@@ -340,9 +630,11 @@ final class AppAdmissionIntegrationTests: XCTestCase {
         XCTAssertEqual(harness.state.state, .ready)
         XCTAssertTrue(harness.state.profileFlow.isChoosingProfile)
         harness.state.profileFlow.switchProfile(to: profile.id)
-        XCTAssertFalse(harness.state.profileFlow.submitProfileLockPIN("0000"))
+        let incorrect = await harness.state.profileFlow.submitProfileLockPIN("0000")
+        XCTAssertFalse(incorrect)
         XCTAssertFalse(harness.state.isLiveTVProfileAuthorized)
-        XCTAssertTrue(harness.state.profileFlow.submitProfileLockPIN("1234"))
+        let accepted = await harness.state.profileFlow.submitProfileLockPIN("1234")
+        XCTAssertTrue(accepted)
         XCTAssertFalse(harness.state.profileFlow.isChoosingProfile)
         XCTAssertTrue(harness.state.isLiveTVProfileAuthorized)
     }
@@ -365,8 +657,6 @@ final class AppAdmissionIntegrationTests: XCTestCase {
         harness.state.finishThemeSelection()
         XCTAssertEqual(harness.state.state, .onboarding(.selectNavigation, canReturnToApp: true))
         harness.state.finishNavigationSelection()
-        XCTAssertEqual(harness.state.state, .onboarding(.selectHomeLayout, canReturnToApp: true))
-        harness.state.finishHomeLayoutSelection()
         XCTAssertEqual(harness.state.state, .ready)
         XCTAssertTrue(harness.state.pendingStandaloneLiveTVEntry)
         XCTAssertTrue(harness.state.consumeStandaloneLiveTVEntryIntent())
@@ -416,7 +706,7 @@ final class AppAdmissionIntegrationTests: XCTestCase {
         XCTAssertTrue(harness.state.allowsStandalonePlayback)
     }
 
-    func testStandaloneProfileSwitchKeepsAdmissionAndLockGate() throws {
+    func testStandaloneProfileSwitchKeepsAdmissionAndLockGate() async throws {
         let harness = try makeHarness(standalone: true, profileSetupComplete: true)
         var locked = harness.profiles.add(name: "Locked")
         locked.replaceLock(with: try XCTUnwrap(ProfileLock.make(pin: "1234", iterations: 64)))
@@ -429,7 +719,8 @@ final class AppAdmissionIntegrationTests: XCTestCase {
         XCTAssertEqual(harness.state.state, .ready)
         XCTAssertTrue(harness.state.canEnterApp)
         XCTAssertTrue(harness.state.profileFlow.isChoosingProfile)
-        XCTAssertTrue(harness.state.profileFlow.submitProfileLockPIN("1234"))
+        let accepted = await harness.state.profileFlow.submitProfileLockPIN("1234")
+        XCTAssertTrue(accepted)
         XCTAssertEqual(harness.profiles.activeProfileID, locked.id)
         XCTAssertEqual(harness.state.state, .ready)
         XCTAssertTrue(harness.state.canEnterApp)

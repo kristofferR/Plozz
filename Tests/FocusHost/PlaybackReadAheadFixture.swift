@@ -5,14 +5,20 @@ import CoreUI
 import SwiftUI
 
 struct PlaybackReadAheadFixture: View {
-    @State private var models = ProfileSettingsModel(namespace: "read-ahead-fixture")
+    @State private var models: ProfileSettingsModel
     @AppStorage(PlaybackReadAheadStore.storageKey) private var selection = PlaybackReadAhead.default
+    @AppStorage(LivePlaybackBufferStore.storageKey) private var liveSelection = LivePlaybackBuffer.default
     private let subtitleWorkspace = ProcessInfo.processInfo.arguments.contains("--subtitle-settings-workspace")
+    private var inWorkspace: Bool {
+        subtitleWorkspace || ProcessInfo.processInfo.arguments.contains("--playback-settings-workspace")
+    }
 
     init() {
         if ProcessInfo.processInfo.arguments.contains("--reset-read-ahead") {
             PlaybackReadAheadStore().save(.default)
+            LivePlaybackBufferStore().save(.default)
         }
+        _models = State(initialValue: ProfileSettingsModel(namespace: "read-ahead-fixture"))
     }
 
     var body: some View {
@@ -26,8 +32,8 @@ struct PlaybackReadAheadFixture: View {
                 canDownloadSubtitles: false,
                 section: subtitleWorkspace ? .subtitles : .playback
             )
-            .environment(\.settingsInWorkspace, subtitleWorkspace)
-            .frame(maxWidth: subtitleWorkspace ? SettingsFormMetrics.pageWidth : .infinity)
+            .environment(\.settingsInWorkspace, inWorkspace)
+            .frame(maxWidth: inWorkspace ? SettingsFormMetrics.pageWidth : .infinity)
         }
         .environment(models.uiDensityModel)
         .environment(models.transparencyModel)
@@ -35,8 +41,12 @@ struct PlaybackReadAheadFixture: View {
         .environment(\.colorScheme, .dark)
         .environment(\.locale, Locale(identifier: "en_US"))
         .overlay(alignment: .bottomLeading) {
-            Text(verbatim: selection.rawValue)
-                .accessibilityIdentifier("read-ahead-saved")
+            VStack(alignment: .leading) {
+                Text(verbatim: selection.rawValue)
+                    .accessibilityIdentifier("read-ahead-saved")
+                Text(verbatim: liveSelection.rawValue)
+                    .accessibilityIdentifier("live-buffer-saved")
+            }
         }
     }
 }

@@ -2,10 +2,11 @@ import Foundation
 
 /// A local, user-shared report. Only closed-vocabulary facts are exported.
 public enum PlaybackDiagnosticReport: Equatable, Sendable {
-    public enum Stage: String, Sendable { case preparation, opening, playback }
+    public enum Stage: String, Codable, Sendable { case preparation, opening, playback }
 
     case setup(IPTVSetupDiagnostic)
     case playback(LiveChannelFailureReport)
+    case library(LibraryLoadDiagnostic)
     case onDemand(
         error: StreamingQualityError, provider: ProviderKind, engine: PlaybackEngineKind?,
         stage: Stage, negotiatedCodec: DirectPlayVideoCodec? = nil,
@@ -14,6 +15,7 @@ public enum PlaybackDiagnosticReport: Equatable, Sendable {
 
     public var message: LocalizedStringResource? {
         switch self {
+        case .library: return nil
         case .onDemand(let error, _, _, _, _, _): return error.userMessage
         case .playback(let report): return report.message
         case .setup(let diagnostic):
@@ -31,12 +33,14 @@ public enum PlaybackDiagnosticReport: Equatable, Sendable {
 
     // l10n:content — stable, credential-free support protocol fields, not UI labels
     public var supportText: String {
+        if case .library(let diagnostic) = self { return diagnostic.supportText }
         var fields = ["format=plozz-live-tv-1"]
         func field(_ key: String, _ value: String?) {
             if let value { fields.append("\(key)=\(value)") }
         }
         func number(_ key: String, _ value: Int?) { field(key, value.map(String.init)) }
         switch self {
+        case .library: break
         case .onDemand(let error, let provider, let engine, let stage, let codec, let retryCodec):
             fields[0] = "format=plozz-playback-1"
             field("operation", "playback")

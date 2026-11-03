@@ -7,16 +7,14 @@ without an identifiable movie or episode are not scrobbled.
 ## Release availability
 
 Both platforms use `RuntimeFeatureFlags.buildDefault` for tracker setup,
-watchlist links, runtime integration, and resolved configuration. Debug builds
-enable WeTrakr for local testing with the request-budget safeguards.
+watchlist links, runtime integration, and resolved configuration. Debug and
+Release builds, including TestFlight and App Store archives, use the same
+`RuntimeFeatureFlags.productionDefault`, with WeTrakr enabled. A configured
+client ID and the viewer's connected account are still required for tracking.
 
-Release builds, including TestFlight and App Store archives, retain
-`RuntimeFeatureFlags.productionDefault`, where WeTrakr is disabled while API
-rate-limit behavior is investigated. Those builds hide its setup and links, and
-resolved configuration remains unavailable even when a client ID and saved
-connection exist. Status refresh, watchlist sync, and playback tracking therefore
-cannot contact WeTrakr. Stored connections are not erased. Restoring the
-production flag remains a separate release decision.
+An explicit feature-flag override can disable the integration without erasing
+saved connections. Disabled configuration prevents status, watchlist and playback
+requests even when a client ID and saved connection exist.
 
 ## Registration
 
@@ -111,3 +109,43 @@ numeric HTTP outcomes in `PlozzLog` and the existing bounded development playbac
 journal. No credentials, credential fingerprints, media IDs, titles, request
 bodies or arbitrary paths enter these diagnostic lines. These counters are for
 attributing a future controlled run; they cannot reconstruct past API usage.
+
+### Watchlist writes
+
+The shared reconciler groups up to 50 pending WeTrakr changes with the same
+profile, account scope and desired state into one request. Movies and shows may
+share a batch; adds and removals use separate endpoints. Other destinations keep
+their existing single-item transport unless they explicitly support batching.
+The 50-title limit is a conservative client bound, not a documented server limit.
+
+Before writing, WeTrakr checks its complete planning snapshot and skips titles
+already in the requested state. A cold snapshot still needs activity and
+paginated list reads; an unchanged list needs no writes. Complete same-identity
+native observations also settle matching durable mutations without writing,
+unless a newer intent superseded the read.
+Missing or ambiguous remote identifiers cannot prove absence; those removals
+still go to the service for resolution.
+
+Each durable mutation has a persisted delivery identity. The batch retry key
+includes those identities and the exact submitted body. An unchanged retry reuses
+the key and deterministic body bytes; a changed intent or payload cannot reuse
+the old response.
+Every submitted title needs positive evidence: exact per-kind planning counts
+for successes, and unambiguous identifiers for individual failures. Unresolved
+titles wait for new identity evidence; rejected titles remain failed. Malformed
+or ambiguous replies never acknowledge a whole batch.
+
+The corrected writer uses write-policy version 1. When current watchlist intent
+re-offers a mutation left permanently failed by an older policy, the queue grants
+one recovery attempt through the normal bounded batch path. The policy marker
+and new delivery identity are saved atomically before dispatch. Repeated refreshes
+and process restarts cannot reopen a failure from the same policy; existing
+cooldowns, attempt counts and other destinations remain untouched. This recovers
+legacy queue state, but does not turn an unresolved or rejected title into a
+successful sync without fresh evidence from WeTrakr.
+
+Any attempted write invalidates the planning cache, including a lost response.
+The next pass re-establishes the full baseline rather than trusting a lagging
+journal. Aggregate batch diagnostics report unchanged, confirmed, unresolved
+and failed counts without title IDs or request bodies. Destination cooldowns
+also control the next scheduler wake, including queued work not yet attempted.

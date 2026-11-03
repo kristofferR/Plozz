@@ -191,10 +191,33 @@ that's out of scope for v1.
   AVPlayer-native path cannot. On a custom reader the native path re-muxes to
   cleartext fMP4 on the loopback cache (fine for at-rest content).
 - **No transcoding.** Playback is limited to what the device + AetherEngine can
-  decode on-device (which is wide — MKV, HEVC/AV1, DoVi, Atmos, DTS/TrueHD
-  bridged). There is **no server-side downscale fallback**, so a very high-bitrate
+  decode on-device (which is wide — MKV, HEVC/AV1, Dolby Vision, spatial audio
+  and bridged multichannel audio). There is **no server-side downscale fallback**, so a very high-bitrate
   4K file over a slow remote link may buffer with no graceful degradation.
 - SMB support is **read-only, NTLMv2 / guest auth (no Kerberos)**.
+
+### Imported external titles
+
+Network-share libraries also discover `.strmlnk` files. Name the file like the
+title, for example `Arrival (2016).strmlnk`, and put one official HTTPS title URL
+inside it (UTF-8, at most 8 KiB). Files use the existing filename/folder matching
+and metadata system; multiple movie sources in the same title folder are grouped.
+There is no manual bookmark library or automatic purchase-library import.
+
+Supported destinations are Apple TV, Prime Video, YouTube, Movies Anywhere, and
+Fandango at Home (including legacy Vudu title URLs). Unsupported or malformed
+links produce an error when opened; Plozz does not extract streams from websites.
+The detail action reads **Open in [service]**. Ordinary video files remain the
+default when a title also has external sources, which are selectable under
+Sources. External sources are excluded from downloads and in-player switching.
+
+On iPhone/iPad, the operating system opens the official app or its website.
+On Apple TV, the destination must support opening its HTTPS title link in an
+installed app; otherwise Plozz displays an error. Support for a destination's URL
+does not guarantee its app accepts the link on every platform or in every region.
+The destination handles sign-in and viewing access. A link is not proof of
+ownership, and returning to Plozz does not automatically update watch progress.
+The IPTV/M3U playback and guide paths are unchanged.
 
 ### 5.1 The tvOS SMB saga (why we don't use libsmb2)
 
@@ -309,7 +332,7 @@ share slots in as:
 ## 8. Phasing
 
 1. **Playback spike** — add `AetherEngineSMB` + a `load(source:)` path + tvOS
-   entitlements; prove SMB bytes → DoVi/Atmos pipeline end-to-end on the Apple TV.
+   entitlements; prove SMB bytes → HDR/spatial-audio pipeline end-to-end on the Apple TV.
    ✅ **Done** — plays + seeks, guest and password, on-device. Had to swap the SMB
    transport off libsmb2 to get there (see §5.1); that fix wants upstreaming into
    AetherEngine.

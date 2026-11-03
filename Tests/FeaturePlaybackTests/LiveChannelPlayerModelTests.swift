@@ -1,6 +1,6 @@
 #if DEBUG && canImport(UIKit)
 import AVFoundation
-import CoreModels
+@testable import CoreModels
 import CoreNetworking
 import Observation
 import SwiftUI
@@ -19,6 +19,94 @@ private final class LiveChannelObservationChanges: @unchecked Sendable {
 
 @MainActor
 final class LiveChannelPlayerModelTests: XCTestCase {
+    func testPreviewPublishesSourceRangeAndChangesOutputWithoutRetuning() async {
+        let engine = LiveEngineSpy()
+        let model = LiveChannelPlayerModel(
+            engine: engine, streamURL: URL(string: "https://example.invalid/live.m3u8")!,
+            allowsDisplayMatching: false
+        )
+        defer { model.stop() }
+        await model.start()
+        XCTAssertNil(model.sourceDynamicRange)
+        engine.probedSourceFacts = .init(range: .dolbyVision)
+        model.refreshFromEngine()
+        XCTAssertEqual(model.sourceDynamicRange, .dolbyVision)
+        XCTAssertFalse(model.allowsDisplayMatching)
+        model.setDisplayMatchingAllowed(true)
+        XCTAssertTrue(model.allowsDisplayMatching)
+        XCTAssertFalse(engine.outputPolicy.suppressesDisplayMatching)
+        engine.probedSourceFacts = nil
+        model.refreshFromEngine()
+        XCTAssertEqual(model.sourceDynamicRange, .dolbyVision, "Retain exit facts during an output rebuild")
+        model.setDisplayMatchingAllowed(false)
+        XCTAssertTrue(engine.outputPolicy.suppressesDisplayMatching)
+        XCTAssertEqual(engine.liveLoads, 1)
+        XCTAssertEqual(engine.stopCount, 0)
+    }
+
+    func testLocalJournalCapturesLiveFailuresWithoutServerSessionReporting() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let journal = PlaybackDiagnosticJournal(url: root.appendingPathComponent("playback.json"))
+        let engine = LiveEngineSpy()
+        let model = LiveChannelPlayerModel(
+            engine: engine, input: .stream(url: URL(string: "https://private.test/live.m3u8")!,
+                                          httpHeaders: ["Authorization": "private-token"]),
+            playbackJournal: journal
+        )
+        await model.start()
+        model.refreshFromEngine()
+        let attempt = try XCTUnwrap(PlaybackFailureDiagnostics().begin(
+            layer: .liveEngine, content: .live, captureForPresentation: true
+        ))
+        attempt.fail(stage: .load, reason: .authentication, engineFailure: .sourceRefused, httpStatus: 403)
+        engine.livePlaybackFailureDiagnostic = attempt.diagnostic
+        engine.onFailure?(.unauthorized)
+        engine.onFailure?(.unauthorized)
+        model.stop()
+        await journal.flush()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let report = await journal.report()
+        let json = try XCTUnwrap(report.split(separator: "\n", maxSplits: 2).last)
+        let entries = try JSONDecoder().decode(PlaybackDiagnosticJournal.Journal.self, from: Data(json.utf8)).entries
+        XCTAssertEqual(entries.filter { $0.event == .failed }.count, 1)
+        XCTAssertEqual(entries.first { $0.event == .failed }?.liveFailure?.httpStatus, 403)
+        XCTAssertTrue(entries.contains { $0.event == .firstFrame })
+        XCTAssertTrue(entries.allSatisfy { $0.facts.content == .live && $0.facts.provider == nil })
+        XCTAssertFalse(report.contains("private"))
+        XCTAssertFalse(report.contains("Authorization"))
+    }
+
+    func testLateVideoDimensionsPublishWithoutRetuningOrRepeatedNotifications() async {
+        let engine = LiveEngineSpy()
+        let model = makeModel(engine: engine)
+        defer { model.stop() }
+        await model.start()
+        XCTAssertNil(model.videoAspectRatio)
+        let changes = LiveChannelObservationChanges()
+        withObservationTracking {
+            _ = model.videoAspectRatio
+        } onChange: {
+            changes.record()
+        }
+        engine.videoAspectRatio = 16 / 9
+        model.refreshFromEngine()
+        XCTAssertEqual(model.videoAspectRatio, 16 / 9)
+        XCTAssertEqual(changes.count, 1)
+        withObservationTracking {
+            _ = model.videoAspectRatio
+        } onChange: {
+            changes.record()
+        }
+        model.refreshFromEngine()
+        XCTAssertEqual(changes.count, 1)
+        engine.videoAspectRatio = 4 / 3
+        model.refreshFromEngine()
+        XCTAssertEqual(model.videoAspectRatio, 4 / 3)
+        XCTAssertEqual(changes.count, 2)
+        XCTAssertEqual(engine.liveLoads, 1)
+        XCTAssertEqual(engine.stopCount, 0)
+    }
+
     func testLiveSubtitlesFollowThePresentedFrameInsteadOfTheSeekTarget() async {
         let engine = LiveEngineSpy()
         engine.presentedSubtitleTime = 50
@@ -1033,6 +1121,64 @@ final class LiveChannelPlayerModelTests: XCTestCase {
         XCTAssertEqual(model.phase, .failed(.bufferingTimedOut))
     }
 
+    func testStartupTimeoutAllowsTheSelectedCushionButStillExpires() async {
+        for buffer in LivePlaybackBuffer.allCases {
+            let clock = LiveTestClock()
+            let engine = LiveEngineSpy()
+            engine.liveStartupBuffer = buffer
+            engine.liveSnapshot.firstFrameReady = false
+            let model = makeModel(engine: engine, clock: clock)
+            defer { model.stop() }
+            await model.start()
+            let deadline = 30 + (buffer.seconds ?? 0)
+            clock.now = deadline - 0.01
+            model.refreshFromEngine()
+            XCTAssertEqual(model.phase, .loading, buffer.rawValue)
+            clock.now = deadline
+            model.refreshFromEngine()
+            XCTAssertEqual(model.phase, .failed(.startupTimedOut), buffer.rawValue)
+            XCTAssertEqual(engine.stopCount, 1)
+        }
+    }
+
+    func testIntentionalCushionUsesTheEngineSafeEdgeWithoutChangingAutomatic() async {
+        let engine = LiveEngineSpy()
+        engine.liveStartupBuffer = .fortyFiveSeconds
+        engine.liveSnapshot.seekableRange = 0...100
+        engine.liveSnapshot.position = 55
+        engine.liveSnapshot.behindLiveSeconds = 45
+        engine.liveSnapshot.isAtLiveEdge = true
+        let model = makeModel(engine: engine)
+        defer { model.stop() }
+        await model.start()
+        XCTAssertTrue(model.isAtLiveEdge)
+        XCTAssertFalse(model.canGoLive)
+        engine.liveSnapshot.isAtLiveEdge = false
+        engine.liveSnapshot.behindLiveSeconds = 60
+        model.refreshFromEngine()
+        XCTAssertFalse(model.isAtLiveEdge)
+        XCTAssertTrue(model.canGoLive)
+        engine.liveStartupBuffer = .automatic
+        engine.liveSnapshot.isAtLiveEdge = true
+        model.refreshFromEngine()
+        XCTAssertFalse(model.isAtLiveEdge, "Automatic retains the existing time-shift policy.")
+    }
+
+    func testExplicitCushionDoesNotPublishANonFiniteDistance() async {
+        let engine = LiveEngineSpy()
+        engine.liveStartupBuffer = .thirtySeconds
+        let model = makeModel(engine: engine)
+        defer { model.stop() }
+        await model.start()
+        engine.liveSnapshot.behindLiveSeconds = nil
+        engine.liveSnapshot.isAtLiveEdge = false
+        for position in [-Double.infinity, Double.nan] {
+            engine.liveSnapshot.position = position
+            model.refreshFromEngine()
+            XCTAssertEqual(model.behindLiveSeconds, 0)
+        }
+    }
+
     func testTerminalEngineErrorIsNotMistakenForBuffering() async {
         let engine = LiveEngineSpy()
         let model = makeModel(engine: engine)
@@ -1127,6 +1273,80 @@ final class LiveChannelPlayerModelTests: XCTestCase {
         XCTAssertEqual(model.phase, .playing)
     }
 
+    func testSustainedAdvancingPlaybackRestoresAutomaticRetunes() async {
+        let clock = LiveTestClock()
+        let engine = LiveEngineSpy()
+        let model = makeModel(engine: engine, clock: clock)
+        defer { model.stop() }
+        await model.start()
+        for tick in 0..<3 {
+            clock.now = Double(tick) * 20
+            engine.onLiveSourceReset?()
+            await model.requestRetune()?.value
+        }
+        model.refreshFromEngine()
+        for _ in 0..<300 {
+            clock.now += 1
+            engine.liveSnapshot.position += 1
+            model.refreshFromEngine()
+        }
+        engine.onLiveSourceReset?()
+        await model.requestRetune()?.value
+        XCTAssertTrue(engine.loadedURLs.allSatisfy { $0 == engine.loadedURLs.first })
+        XCTAssertEqual(engine.liveLoads, 5)
+        XCTAssertEqual(model.phase, .playing)
+        XCTAssertEqual(model.manualRetryCount, 0)
+    }
+
+    func testPauseBackgroundBufferingAndSeekingDiscardHealthyRecoveryCredit() async {
+        for interruption in ["pause", "background", "buffering", "seek"] {
+            let clock = LiveTestClock()
+            let engine = LiveEngineSpy()
+            let model = makeModel(engine: engine, clock: clock)
+            defer { model.stop() }
+            await model.start()
+            for tick in 0..<3 {
+                clock.now = Double(tick) * 20
+                engine.onLiveSourceReset?()
+                await model.requestRetune()?.value
+            }
+            model.refreshFromEngine()
+            for _ in 0..<299 {
+                clock.now += 1
+                engine.liveSnapshot.position += 1
+                model.refreshFromEngine()
+            }
+            switch interruption {
+            case "pause":
+                model.togglePlayPause()
+                model.togglePlayPause()
+            case "background":
+                model.handleScenePhase(.background)
+                model.handleScenePhase(.active)
+                await waitForLiveLoads(5, engine: engine)
+            case "buffering":
+                engine.liveSnapshot.phase = .rebuffering
+                model.refreshFromEngine()
+                engine.liveSnapshot.phase = .playing
+            default:
+                engine.liveSnapshot.behindLiveSeconds = 40
+                model.refreshFromEngine()
+                XCTAssertTrue(model.canGoLive)
+                await model.goLive()
+                XCTAssertEqual(engine.goLiveCount, 1)
+            }
+            for _ in 0..<2 {
+                clock.now += 1
+                engine.liveSnapshot.position += 1
+                model.refreshFromEngine()
+            }
+            engine.onLiveSourceReset?()
+            XCTAssertNil(model.requestRetune(), interruption)
+            XCTAssertEqual(model.phase, .failed(.recoveryExhausted), interruption)
+            XCTAssertEqual(engine.liveLoads, interruption == "background" ? 5 : 4, interruption)
+        }
+    }
+
     func testSourceResetWhilePausedWaitsForUserResume() async {
         let engine = LiveEngineSpy()
         let model = makeModel(engine: engine)
@@ -1142,18 +1362,17 @@ final class LiveChannelPlayerModelTests: XCTestCase {
         XCTAssertEqual(model.phase, .playing)
     }
 
-    func testSourceResetWhileInactiveWaitsForForeground() async {
+    func testSourceResetWhileBackgroundedWaitsForForeground() async {
         let engine = LiveEngineSpy()
         let model = makeModel(engine: engine)
         defer { model.stop() }
         await model.start()
-        model.handleScenePhase(.inactive)
+        model.handleScenePhase(.background)
         engine.onLiveSourceReset?()
         XCTAssertNil(model.requestRetune())
         XCTAssertEqual(engine.liveLoads, 1)
         model.handleScenePhase(.active)
-        await model.requestRetune()?.value
-        XCTAssertEqual(engine.liveLoads, 2)
+        await waitForLiveLoads(2, engine: engine)
     }
 
     func testRepeatedResetSignalsCoalesceBeforeRetuneStarts() async {
@@ -1204,11 +1423,57 @@ final class LiveChannelPlayerModelTests: XCTestCase {
         defer { model.stop() }
         await model.start()
         model.handleScenePhase(.inactive)
+        #if os(tvOS)
+        XCTAssertEqual(engine.pauseCount, 0)
+        XCTAssertFalse(engine.isPaused)
+        XCTAssertEqual(model.phase, .playing)
+        #else
+        XCTAssertTrue(engine.isPaused)
+        #endif
         model.handleScenePhase(.active)
         XCTAssertEqual(engine.liveLoads, 1)
         XCTAssertEqual(engine.stopCount, 0)
         XCTAssertEqual(model.phase, .playing)
+        #if os(tvOS)
+        XCTAssertEqual(engine.playCount, 0, "Closing an overlay must not synthesize a resume")
+        #endif
     }
+
+    func testInactiveReturnKeepsUserPausedStreamPaused() async {
+        let engine = LiveEngineSpy()
+        let model = makeModel(engine: engine)
+        defer { model.stop() }
+        await model.start()
+        model.togglePlayPause()
+
+        model.handleScenePhase(.inactive)
+        model.handleScenePhase(.active)
+
+        XCTAssertTrue(engine.isPaused)
+        XCTAssertEqual(model.phase, .paused)
+        XCTAssertEqual(engine.playCount, 0)
+        XCTAssertEqual(engine.liveLoads, 1)
+    }
+
+    #if os(tvOS)
+    func testSourceResetUnderSystemOverlayCanStillRecover() async {
+        let engine = LiveEngineSpy()
+        let model = makeModel(engine: engine)
+        defer { model.stop() }
+        await model.start()
+        model.handleScenePhase(.inactive)
+        engine.onLiveSourceReset?()
+
+        let recovery = model.requestRetune()
+        XCTAssertNotNil(recovery)
+        await recovery?.value
+
+        XCTAssertEqual(engine.liveLoads, 2)
+        XCTAssertEqual(model.phase, .playing)
+        model.handleScenePhase(.active)
+        XCTAssertEqual(engine.liveLoads, 2)
+    }
+    #endif
 
     private func waitForLiveLoads(
         _ expected: Int,
@@ -1631,6 +1896,9 @@ private struct LiveFullscreenHarness: View {
 
 @MainActor
 final class LiveEngineSpy: LiveChannelEngine {
+    var probedSourceFacts: EngineProbedSourceFacts?
+    var videoAspectRatio: Double?
+    var liveStartupBuffer: LivePlaybackBuffer = .automatic
     var livePlaybackFailureDiagnostic: PlaybackFailureDiagnostic?
     var isCapturingLiveFailureDiagnostic = false
     let outputView = UIView()

@@ -197,6 +197,7 @@ public final class InfoCardModel {
     /// Arrives with the item, so it needs no request of its own — and the tab
     /// hides itself when this is empty rather than opening an empty card.
     public var cast: [MediaPerson] = []   // l10n:content — media metadata from the server
+    public var chapters: [MediaChapter] = []
     /// The account the item came from, so a person can be looked up on the server
     /// that actually knows their id. Person ids are per-server, so this cannot be
     /// inferred later.
@@ -314,6 +315,8 @@ public final class SkipGestureModel {
     public var hintForward: Bool = true
     /// True while the transient skip indicator is on screen.
     public var hintVisible: Bool = false
+    /// Signed remote scan level; zero means the preview is not advancing.
+    public var scanLevel: Int = 0
     /// Bumped on every skip so the indicator's pop-in transition replays even when
     /// it's already visible (rapid repeated skips).
     public var hintToken: Int = 0
@@ -561,7 +564,19 @@ public final class PlayerControlsModel {
     /// against the observable surface, so they cost nothing here.
     public let upNextCard = UpNextModel()
 
-    public init() {}
+    #if os(tvOS)
+    let systemAudio: SystemPlaybackAudio
+
+    init(systemAudio: SystemPlaybackAudio) {
+        self.systemAudio = systemAudio
+    }
+    #endif
+
+    public init() {
+        #if os(tvOS)
+        systemAudio = .shared
+        #endif
+    }
 
     /// Where the transport playhead should render: the scrub target while
     /// scrubbing, otherwise the live position.
@@ -578,7 +593,12 @@ public final class PlayerControlsModel {
     }
 
     public var hasSelectableAudio: Bool { audioOptions.count > 1 }
-    public var hasAudioControls: Bool { hasSelectableAudio || engineCapabilities.contains(.dialogEnhance) }
+    public var hasAudioControls: Bool {
+        #if os(tvOS)
+        if !systemAudio.availableSettings.isEmpty { return true }
+        #endif
+        return hasSelectableAudio || engineCapabilities.contains(.dialogEnhance)
+    }
     public var hasSelectableSubtitles: Bool { !subtitleOptions.isEmpty }
 
     /// The skippable segment whose window currently contains the live position,
@@ -693,6 +713,14 @@ public final class PlayerControlsModel {
     /// button is surfaced, auto-skipped after a delay, or skipped instantly.
     public var skipMode: SkipIntrosMode {
         skipModes.mode(for: activeSkipSegment?.kind ?? .credits)
+    }
+
+    public var automaticSkipDelay: TimeInterval {
+        skipModes.delay(for: activeSkipSegment?.kind ?? .credits)
+    }
+
+    public var automaticUpNextDelay: TimeInterval {
+        skipModes.delay(for: .credits)
     }
 
     /// In `.autoDelay`, the playback position (seconds) at which the active

@@ -577,6 +577,45 @@ final class NativePlaybackFailureTests: XCTestCase {
     }
 
     @MainActor
+    func testColdTranscodeStartupDoesNotConsumeTheFormatProbeBudget() async throws {
+        let expected = try format(codec: kCMVideoCodecType_H264, transfer: kCMFormatDescriptionTransferFunction_ITU_R_709_2)
+        var waits = 0
+        var reads = 0
+        let observed = try await NativePlaybackFailure.probeConvertedFormat(
+            read: { reads += 1; return expected }, isCurrent: { true },
+            isReady: { waits >= 80 }, pause: { waits += 1 }
+        )
+        XCTAssertEqual(waits, 80)
+        XCTAssertEqual(reads, 1)
+        XCTAssertEqual(observed?.dynamicRange, .sdr)
+    }
+
+    @MainActor
+    func testUnreadyTranscodeFormatWaitIsBoundedAndDoesNotReadTracks() async throws {
+        var waits = 0
+        var reads = 0
+        let observed = try await NativePlaybackFailure.probeConvertedFormat(
+            read: { reads += 1; return nil }, isCurrent: { true },
+            isReady: { false }, pause: { waits += 1 }
+        )
+        XCTAssertNil(observed)
+        XCTAssertEqual(waits, 600)
+        XCTAssertEqual(reads, 0)
+    }
+
+    @MainActor
+    func testReplacedTranscodeStopsWaitingForReadiness() async throws {
+        var current = true
+        var reads = 0
+        let observed = try await NativePlaybackFailure.probeConvertedFormat(
+            read: { reads += 1; return nil }, isCurrent: { current },
+            isReady: { false }, pause: { current = false }
+        )
+        XCTAssertNil(observed)
+        XCTAssertEqual(reads, 0)
+    }
+
+    @MainActor
     func testAuthenticationFailureIsPreservedBeforeAnAVPlayerItemExists() async throws {
         let locator = try AuthenticatedHTTPPlaybackLocator(
             provider: .emby, accountID: "fixture", credentialRevision: CredentialRevision(),
@@ -629,6 +668,59 @@ final class NativePlaybackFailureTests: XCTestCase {
         let result = NativePlaybackFailure.classify(error)
         XCTAssertEqual(result.kind, .unsupportedFormat)
         XCTAssertTrue(result.allowsCodecFallback)
+    }
+
+    func testAmbiguousNativeResourceUnavailableRetainsEvidenceAndAllowsRecovery() {
+        let error = NSError(domain: NSURLErrorDomain, code: URLError.resourceUnavailable.rawValue, userInfo: [
+            NSUnderlyingErrorKey: NSError(domain: NSOSStatusErrorDomain, code: -16849)
+        ])
+        let failure = NativePlaybackFailure.classify(error)
+        XCTAssertEqual(failure.kind, .unavailable)
+        XCTAssertEqual(failure.diagnosticCode, "URL -1008")
+        XCTAssertEqual(failure.underlyingErrors.map(\.code), [-1008, -16849])
+        XCTAssertNil(failure.httpStatus)
+        XCTAssertTrue(failure.allowsCodecFallback,
+                      "URL -1008 without a server refusal must not disable the bounded compatibility recovery.")
+        XCTAssertTrue(StreamingPlaybackFailure(
+            kind: .unavailable, domain: .url, code: URLError.resourceUnavailable.rawValue,
+            engineFailure: .nativeItemFailed
+        ).allowsCodecFallback)
+    }
+
+    func testConfirmedResourceFailuresDoNotAllowCompatibilityRecovery() {
+        let error = URLError(.resourceUnavailable) as NSError
+        for status in [400, 401, 403, 404, 408, 410, 416, 429, 451, 500, 503, 509] {
+            XCTAssertFalse(NativePlaybackFailure.classify(error, httpStatus: status).allowsCodecFallback,
+                           "HTTP \(status) is stronger evidence than a generic native resource error.")
+        }
+        for failure in [
+            NativePlaybackFailure.classify(URLError(.fileDoesNotExist) as NSError),
+            StreamingPlaybackFailure(kind: .unavailable),
+            .init(kind: .unavailable, domain: .avFoundation, code: URLError.resourceUnavailable.rawValue),
+            .init(kind: .unavailable, domain: .url, code: URLError.resourceUnavailable.rawValue,
+                  providerReason: .sessionExpired),
+            .init(kind: .unavailable, domain: .url, code: URLError.resourceUnavailable.rawValue,
+                  engineFailure: .sourceRefused)
+        ] {
+            XCTAssertFalse(failure.allowsCodecFallback)
+        }
+    }
+
+    func testGenericResourceErrorCannotMaskAnUnderlyingTerminalFailure() {
+        var causes = [
+            URLError.Code.fileDoesNotExist, .userAuthenticationRequired, .timedOut,
+            .notConnectedToInternet, .networkConnectionLost, .cannotFindHost, .serverCertificateUntrusted
+        ].map { URLError($0) as NSError }
+        causes.append(POSIXError(.ENOENT) as NSError)
+        for cause in causes {
+            let error = NSError(
+                domain: NSURLErrorDomain, code: URLError.resourceUnavailable.rawValue,
+                userInfo: [NSUnderlyingErrorKey: cause]
+            )
+            let failure = NativePlaybackFailure.classify(error)
+            XCTAssertFalse(failure.allowsCodecFallback)
+            XCTAssertEqual(failure.underlyingErrors.map(\.code), [-1008, cause.code])
+        }
     }
 
     func testNetworkMessagesExplainKnownOfflineDNSAndCertificateFailures() {

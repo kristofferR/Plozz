@@ -16,13 +16,39 @@ public struct EngineLiveTelemetry: Equatable, Sendable {
     /// Engine-owned label for the active audio pipeline, not a receiver-output
     /// measurement. Display verbatim; never parse it to make playback decisions.
     public var audioPipelineDescription: String?
+    public var sessionCache: EngineSessionCache?
 
     public init(droppedFrameCount: Int? = nil, observedFps: Double? = nil, observedBitrate: Double? = nil,
-                bufferedSecondsAhead: Double? = nil, audioPipelineDescription: String? = nil) {
+                bufferedSecondsAhead: Double? = nil, audioPipelineDescription: String? = nil,
+                sessionCache: EngineSessionCache? = nil) {
         self.droppedFrameCount = droppedFrameCount
         self.observedFps = observedFps
         self.observedBitrate = observedBitrate
         self.bufferedSecondsAhead = bufferedSecondsAhead
         self.audioPipelineDescription = audioPipelineDescription
+        self.sessionCache = sessionCache
+    }
+}
+
+/// The engine's active temporary cache and its effective budget.
+/// Memory usage excludes purgeable played history; disk usage includes retained history.
+/// The budget and requested duration are not promises of contiguous playable coverage.
+public struct EngineSessionCache: Equatable, Sendable {
+    public enum Storage: Equatable, Sendable {
+        case memory, disk
+    }
+    public let residentBytes: Int64
+    public let effectiveBudgetBytes: Int64
+    public let storage: Storage
+    public let targetSeconds: Double?
+    public let byteLimitReached: Bool
+
+    public init(residentBytes: Int64, effectiveBudgetBytes: Int64,
+                storage: Storage = .disk, targetSeconds: Double? = nil, byteLimitReached: Bool = false) {
+        self.residentBytes = residentBytes
+        self.effectiveBudgetBytes = effectiveBudgetBytes
+        self.storage = storage
+        self.targetSeconds = targetSeconds
+        self.byteLimitReached = byteLimitReached
     }
 }

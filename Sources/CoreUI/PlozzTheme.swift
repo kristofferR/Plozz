@@ -79,6 +79,8 @@ public enum PlozzTheme {
         /// reflection stops reading as the picture having a soft bottom and
         /// starts being a feature of its own that the chip then sits on top of.
         public static let continueWatchingReflectionShare: CGFloat = 0.135
+        /// Narrow portrait slots need a deeper band to keep the resume chip below the full poster.
+        public static let continueWatchingPortraitReflectionShare: CGFloat = 0.10
         /// Fraction of the artwork's width trimmed from **each** side of a
         /// Continue Watching card.
         ///
@@ -181,9 +183,9 @@ public enum PlozzTheme {
         // (`posterCardCornerRadius` / `landscapeCardCornerRadius`), so the glass
         // corner always stays concentric with the artwork at every density.
 
-        /// Inner artwork corner radius for a poster ("Browse") card. Matches Twozz.
+        /// Inner artwork corner radius for a poster ("Browse") card. Matches Strozz.
         public static let posterArtCornerRadius: CGFloat = 16
-        /// Inner media corner radius for a landscape (medium) card. Matches Twozz.
+        /// Inner media corner radius for a landscape (medium) card. Matches Strozz.
         public static let mediumMediaCornerRadius: CGFloat = 18
         /// Shared artwork rounding for posters and Continue Watching on touch.
         public static let touchMediaCornerRadius: CGFloat = 12
@@ -315,7 +317,7 @@ public enum PlozzTheme {
         /// Leaves clearance inside the information grid's 18pt gutters, including
         /// the outgoing card while native focus settles onto its neighbor.
         public static let informationFocusMaximumOutset: CGFloat = 6
-        /// Scale applied to a focused browsing tile (matches Twozz Browse).
+        /// Scale applied to a focused browsing tile (matches Strozz Browse).
         public static let focusedCardScale: CGFloat = 1.08
 
         // MARK: Focus — "Highlight" style (outline off)
@@ -491,17 +493,6 @@ public enum PlozzTheme {
         /// `cardInset` so a borderless poster still reads larger than the framed
         /// card's inset artwork. Base value; density-scaled in `PlozzMetrics`.
         public static let borderlessCardSideMargin: CGFloat = 10
-
-        /// Base height of a card's watched-progress bar. Density-scaled (with a
-        /// floor at `progressBarMinHeight`) in `PlozzMetrics`, so the scrubber
-        /// grows/shrinks with the display-size setting like the rest of the card
-        /// instead of staying a fixed pixel height.
-        public static let progressBarHeight: CGFloat = 12
-        /// Smallest the density-scaled progress bar is allowed to get, so it stays
-        /// legible at the smallest display-size settings.
-        public static let progressBarMinHeight: CGFloat = 9
-        /// Touch artwork uses a slimmer floor, independent of TV and resume chips.
-        public static let touchProgressBarMinHeight: CGFloat = 8
 
         /// Base leg length of the "unwatched" corner flag (the right-triangle in a
         /// card's top-trailing corner). Density-scaled (with a floor at

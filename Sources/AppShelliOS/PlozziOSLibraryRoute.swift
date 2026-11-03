@@ -1,6 +1,7 @@
 #if os(iOS)
 import SwiftUI
 import CoreModels
+import CoreUI
 import FeatureHomeCore
 
 /// A pushed library grid, addressed by value rather than by an eagerly-built view.
@@ -97,7 +98,8 @@ struct PlozziOSLibraryDestinationView: View {
                     containerKind: route.containerKind,
                     sourceAccountID: route.accountID,
                     browseScope: route.browseScope,
-                    settingsNamespace: appModel.profiles.activeNamespace
+                    settingsNamespace: appModel.profiles.activeNamespace,
+                    presentation: appModel.settings.libraryPresentation
                 ),
                 title: title,
                 provider: provider,
@@ -119,6 +121,10 @@ extension View {
     func plozziOSLibraryDestination(appModel: PlozziOSAppModel) -> some View {
         navigationDestination(for: PlozziOSLibraryRoute.self) { route in
             PlozziOSLibraryDestinationView(appModel: appModel, route: route)
+        }
+        .navigationDestination(for: MediaArtworkZoomRoute<PlozziOSLibraryRoute>.self) { route in
+            PlozziOSLibraryDestinationView(appModel: appModel, route: route.value)
+                .mediaArtworkZoomDestination(route.source)
         }
     }
 }

@@ -118,6 +118,7 @@ public struct IPTVCredential: Codable, Sendable, Equatable, CustomStringConverti
 
     public var explicitGuideURLs: [URL] { (guideURL.map { [$0] } ?? []) + (additionalGuideURLs ?? []) }
     public var explicitGuideHeaders: [String: String] { configuredGuideHeaders ?? [:] }
+    /// Retained for decoding old credentials and identifying catalogues imported with discovery disabled.
     public var automaticallyDiscoversGuides: Bool { discoversPlaylistGuides ?? true }
 
     public func guideHeaders(for url: URL) -> [String: String] {

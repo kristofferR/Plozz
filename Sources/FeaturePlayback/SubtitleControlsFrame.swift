@@ -5,7 +5,7 @@ import SwiftUI
 @Observable
 public final class SubtitleControlsLayout {
     public enum Region: Hashable, Sendable {
-        case transport, title, trackControls, timeline, card, menu
+        case transport, centerTransport, topControls, title, trackControls, timeline, card, menu
         case tab(String)
     }
     private struct Entry: Hashable {

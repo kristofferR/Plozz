@@ -5,7 +5,11 @@ import SwiftUI
 import CoreUI
 
 struct PlozziOSSearchView: View {
+    @Environment(\.plozzMetrics) private var metrics
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.plozziOSUsesVerticalToolbar) private var usesVerticalToolbar
+    @Environment(\.plozziOSIsOverflowDestination) private var isOverflowDestination
+    @FocusState private var isSearchFocused: Bool
     @State private var viewModel: SearchViewModel
     private let appModel: PlozziOSAppModel
     private let onShowSettings: () -> Void
@@ -41,20 +45,28 @@ struct PlozziOSSearchView: View {
         VStack(spacing: 0) {
             PlozziOSSearchHeader(
                 query: $viewModel.query,
+                isFocused: $isSearchFocused,
                 onShowSettings: onShowSettings
             )
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .simultaneousGesture(TapGesture().onEnded { isSearchFocused = false })
         }
         // Compact tabs do not need a second bar above the explicit Search header.
         // Regular-width iPad keeps the bar so the system sidebar toggle remains
         // reachable when the adaptable tab sidebar is collapsed.
         .toolbar(
-            horizontalSizeClass == .compact && !keepsNavigationBar ? .hidden : .visible,
+            horizontalSizeClass == .compact && !keepsNavigationBar && !usesVerticalToolbar ? .hidden : .visible,
             for: .navigationBar
         )
-        .navigationTitle(horizontalSizeClass == .compact ? Text(verbatim: "") : Text("Search"))
-        .toolbarTitleDisplayMode(.large)
+        .toolbar {
+            if usesVerticalToolbar || isOverflowDestination {
+                PlozziOSSettingsToolbarItem(action: onShowSettings)
+            }
+        }
+        .navigationTitle(horizontalSizeClass == .compact && !isOverflowDestination ? Text(verbatim: "") : Text("Search"))
+        .toolbarTitleDisplayMode(isOverflowDestination ? .inline : .large)
         .environment(\.plozzCardCaptionView, .search)
         .task(id: viewModel.query) {
             await viewModel.search()
@@ -104,12 +116,12 @@ struct PlozziOSSearchView: View {
 
     private func results(_ sections: [SearchSection]) -> some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: PlozziOSMediaRailLayout.sectionSpacing) {
+            LazyVStack(alignment: .leading, spacing: PlozziOSMediaRailLayout.sectionGap(metrics: metrics)) {
                 ForEach(sections) { section in
                     PlozziOSMediaSection(title: Text(section.title)) {
                         LazyVGrid(
                             columns: appModel.settings.density.density.iOSPosterGridColumns(
-                                horizontalSizeClass: horizontalSizeClass
+                                horizontalSizeClass: horizontalSizeClass, isRunningOnMac: metrics.usesDesktopSizing
                             ),
                             spacing: 18
                         ) {
@@ -126,6 +138,7 @@ struct PlozziOSSearchView: View {
             }
             .padding(.vertical)
         }
+        .scrollDismissesKeyboard(.interactively)
     }
 
     private func provider(for item: MediaItem) -> (any MediaProvider)? {
@@ -136,10 +149,14 @@ struct PlozziOSSearchView: View {
     }
 }
 
-/// Explicit top header: a touch-friendly search field that takes all available
-/// width with the active-profile settings avatar immediately to its right.
+/// Keep a local Settings entry only when native navigation does not expose it.
 private struct PlozziOSSearchHeader: View {
+    @Environment(\.themePalette) private var palette
+    @Environment(\.hasVisibleSettingsNavigationEntry) private var hasVisibleSettingsNavigationEntry
+    @Environment(\.plozziOSUsesVerticalToolbar) private var usesVerticalToolbar
+    @Environment(\.plozziOSIsOverflowDestination) private var isOverflowDestination
     @Binding var query: String
+    @FocusState.Binding var isFocused: Bool
     let onShowSettings: () -> Void
 
     var body: some View {
@@ -149,9 +166,12 @@ private struct PlozziOSSearchHeader: View {
                     .plozzForeground(.secondary)
                 TextField(
                     "Movies, shows, and episodes",
-                    text: $query
+                    text: $query,
+                    prompt: Text("Movies, shows, and episodes").foregroundColor(palette.secondaryText)
                 )
+                .focused($isFocused)
                 .textFieldStyle(.plain)
+                .foregroundStyle(palette.primaryText)
                 .autocorrectionDisabled()
                 .submitLabel(.search)
                 .accessibilityLabel("Search your libraries")
@@ -170,10 +190,13 @@ private struct PlozziOSSearchHeader: View {
             }
             .padding(.horizontal, 12)
             .frame(minHeight: 44)
-            .background(.thinMaterial, in: Capsule())
+            .plozzSurface(.raised, cornerRadius: PlozzTheme.Metrics.Radius.card)
             .frame(maxWidth: .infinity)
 
-            PlozziOSSettingsAvatarButton(action: onShowSettings)
+            if !hasVisibleSettingsNavigationEntry && !usesVerticalToolbar && !isOverflowDestination {
+                PlozziOSSettingsAvatarButton(action: onShowSettings)
+                    .accessibilityIdentifier("search-settings-avatar")
+            }
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
@@ -189,7 +212,7 @@ private struct PlozziOSSearchResultCard: View {
     var body: some View {
         Group {
             if let provider {
-                NavigationLink {
+                MediaArtworkZoomLink(id: item.stablePresentationID) {
                     PlozziOSItemDetailView(
                         appModel: appModel,
                         provider: provider,

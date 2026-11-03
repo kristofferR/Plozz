@@ -19,7 +19,7 @@ public struct SyncDataBreakdown: View {
             SettingsPanel(title: "Sync Data on This Device") {
                 SyncDataBreakdownRows(inventory: inventory, failed: failed)
                 Button("Refresh Breakdown") { refresh += 1 }
-                    .buttonStyle(SettingsFocusButtonStyle())
+                    .plozzActionButton(role: .secondary)
             }
             #else
             SettingsSectionGroup("Sync Data on This Device") {
@@ -74,7 +74,12 @@ private struct SyncDataBreakdownRows: View {
             }
             Text("\(inventory.pendingUploads) pending uploads · \(inventory.pendingDeletions) pending deletions")
                 .font(.footnote)
+            Text("\(inventory.pendingUploadBytes, format: .byteCount(style: .file)) of encoded data is pending upload.")
+                .font(.footnote)
             Text("Sizes show encoded sync data, not iCloud storage usage. Counts include pending uploads and exclude pending deletions. Refresh to update this snapshot.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Text("Plozz Channels schedules include the library items needed to keep generated channels aligned across devices. Downloaded IPTV guides are not included.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             Text("iCloud Keychain logins and Trakt's shared sign-in records are stored separately and are not included.")

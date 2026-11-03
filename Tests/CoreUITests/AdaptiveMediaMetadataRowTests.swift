@@ -39,8 +39,20 @@ final class AdaptiveMediaMetadataRowTests: XCTestCase {
                     .font(.subheadline.weight(.medium))
                     .fixedSize()
             }
-            ForEach(ratings) { RatingBadge(rating: $0) }
-            ForEach(badges) { MetadataMediaBadgeChip(badge: $0) }
+            if !ratings.isEmpty || !badges.isEmpty {
+                HStack(spacing: 14) {
+                    if !ratings.isEmpty {
+                        HStack(spacing: 14) {
+                            ForEach(ratings) { RatingBadge(rating: $0) }
+                        }
+                    }
+                    if !badges.isEmpty {
+                        HStack(spacing: 12) {
+                            ForEach(badges) { MetadataMediaBadgeChip(badge: $0) }
+                        }
+                    }
+                }
+            }
         }
         .fixedSize()
     }

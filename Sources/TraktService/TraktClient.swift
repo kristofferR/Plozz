@@ -165,10 +165,46 @@ struct TraktClient: Sendable {
         let endpoint = try Endpoint(method: .post, path: "/scrobble/\(action)", headers: headers(accessToken: accessToken))
             .jsonBody(body)
         do {
-            _ = try await http.send(endpoint, baseURL: baseURL)
+            let (data, _) = try await http.send(endpoint, baseURL: baseURL)
+            recordScrobbleResponse(action: action, body: body, data: data)
         } catch AppError.conflict {
             // 409 = already scrobbled = success.
         }
+    }
+
+    private func recordScrobbleResponse(action: String, body: TraktScrobbleBody, data: Data) {
+        guard HandoffDiagnostics.isEnabled else { return }
+        let safeAction = ["start", "pause", "stop"].contains(action) ? action : "unknown"
+        let request = "TRAKT_SCROBBLE requestedAction=\(safeAction) requested={\(body.diagnosticDescription)}"
+        do {
+            let receipt = try JSONDecoder().decode(ScrobbleReceipt.self, from: data)
+            let acknowledged = TraktScrobbleBody(
+                movie: receipt.movie,
+                show: receipt.show,
+                episode: receipt.episode,
+                progress: receipt.progress
+            )
+            let message = "\(request) responseAction=\(receipt.action.rawValue) response={\(acknowledged.diagnosticDescription)}"
+            PlozzLog.playback.info(message)
+            HandoffDiagnostics.emit(message)
+        } catch {
+            // Receipt diagnostics must not retry an already accepted write.
+            let message = "\(request) response=unreadable"
+            PlozzLog.playback.error(message)
+            HandoffDiagnostics.emit(message)
+        }
+    }
+
+    private struct ScrobbleReceipt: Decodable {
+        enum Action: String, Decodable {
+            case start, pause, scrobble
+        }
+
+        let action: Action
+        let progress: Double
+        let movie: TraktMovieRef?
+        let show: TraktShowRef?
+        let episode: TraktEpisodeRef?
     }
 
     // MARK: - Watchlist

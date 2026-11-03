@@ -43,11 +43,13 @@ final class IPTVCatalog {
         self.url = url
         self.key = SymmetricKey(data: key)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        IPTVCatalogStorage.retain(url)
         var handle: OpaquePointer?
         guard sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil)
                 == SQLITE_OK, let handle else {
             let error = Self.databaseError(sqlite3_extended_errcode(handle))
-            if let handle { Self.retire(handle) }
+            if let handle { Self.retire(handle, url: url) }
+            else { IPTVCatalogStorage.release(url) }
             throw error
         }
         db = handle
@@ -70,17 +72,17 @@ final class IPTVCatalog {
             try createIndexes()
         } catch {
             db = nil
-            Self.retire(handle)
+            Self.retire(handle, url: url)
             throw error
         }
     }
 
     deinit {
-        if let db { Self.retire(db, statements: Array(writeStatements.values)) }
+        if let db { Self.retire(db, url: url, statements: Array(writeStatements.values)) }
     }
 
-    private static func retire(_ db: OpaquePointer, statements: [OpaquePointer] = []) {
-        let teardown = ConnectionTeardown(db: db, statements: statements)
+    private static func retire(_ db: OpaquePointer, url: URL, statements: [OpaquePointer] = []) {
+        let teardown = ConnectionTeardown(db: db, url: url, statements: statements)
         if Thread.isMainThread {
             teardownQueue.async { teardown.close() }
         } else {
@@ -92,6 +94,7 @@ final class IPTVCatalog {
     // SQLite close may checkpoint the WAL; never make view teardown wait for disk I/O.
     private struct ConnectionTeardown: @unchecked Sendable {
         let db: OpaquePointer
+        let url: URL
         let statements: [OpaquePointer]
 
         func close() {
@@ -99,6 +102,8 @@ final class IPTVCatalog {
             let status = sqlite3_close(db)
             if status != SQLITE_OK {
                 PlozzLog.networking.error("IPTV catalogue close failed sqlite=\(status)")
+            } else {
+                IPTVCatalogStorage.release(url)
             }
         }
     }
@@ -115,25 +120,11 @@ final class IPTVCatalog {
 
     /// Run on the client's actor, not during synchronous provider construction.
     /// A busy reader keeps its snapshot; never unlink or force-reset SQLite files.
-    func reclaimJournal() {
-        do {
-            let wal = URL(fileURLWithPath: url.path + "-wal")
-            let size = try wal.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-            guard size > Self.maximumRetainedJournalBytes else { return }
-        } catch CocoaError.fileReadNoSuchFile {
-            return
-        } catch {
-            PlozzLog.networking.error("IPTV journal size could not be read code=\((error as NSError).code)")
-            return
-        }
+    @discardableResult
+    func reclaimJournal() -> Bool {
         sqlite3_busy_timeout(db, 0)
         defer { sqlite3_busy_timeout(db, 15_000) }
-        let status = sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_TRUNCATE, nil, nil)
-        if status == SQLITE_BUSY || status == SQLITE_LOCKED {
-            PlozzLog.networking.debug("IPTV journal reclamation deferred for an active reader")
-        } else if status != SQLITE_OK {
-            PlozzLog.networking.error("IPTV journal reclamation failed sqlite=\(status)")
-        }
+        return IPTVCatalogStorage.reclaimJournal(db: db, url: url)
     }
 
     func insert(_ record: IPTVRecord, overwrite: Bool = true, into table: Table = .entries) throws {
@@ -239,6 +230,7 @@ final class IPTVCatalog {
         writeStatements.removeAll()
         do { try execute("DROP TABLE IF EXISTS incoming") }
         catch { PlozzLog.networking.error("IPTV temporary catalogue could not be removed") }
+        reclaimJournal()
     }
 
     func commitImport(

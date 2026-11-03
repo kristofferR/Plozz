@@ -13,7 +13,6 @@ import MetadataKit
 import FeatureSearch
 import FeatureSettings
 import FeatureProfiles
-import ProviderTrailers
 import RatingsService
 import TraktService
 import SeerService
@@ -49,19 +48,26 @@ private struct PlaylistDetailRoute: Hashable {
 /// full-screen player presentation. Every destination resolves its provider from
 /// the tapped item/library's `sourceAccountID`.
 struct HomeTab: View {
+    @State private var trailerOpening = YouTubeTrailerOpening()
+    @State private var externalOpening = ExternalMediaOpening()
+    @Environment(ProfilesModel.self) private var profilesModel: ProfilesModel?
     /// The app's effective language, injected by `AppLanguageScope`. Read here
     /// only to hand to the Top Shelf publisher: that snapshot crosses into
     /// another process, so its titles have to be resolved on this side.
     @Environment(\.locale) private var locale
+    @Environment(\.plozzMetrics) private var metrics
+    @Environment(\.detailPlaybackPreparationAllowed) private var playbackPreparationAllowed
+    @Environment(LibraryPresentationSettingsModel.self) private var libraryPresentation
     @Environment(\.plozzArtworkPolicy) private var artworkPolicy
+    @Environment(\.plozzShowsContentRatings) private var showsContentRatings
     @Environment(\.mediaItemActionHandler) private var mediaItemActionHandler
-    /// The rail's chrome model, present only under ``NavigationStyle/rail``. This
-    /// stack reports its depth so the rail steps aside on a detail page.
+    /// Custom navigation observes this stack's depth to step aside on pushed pages.
     @Environment(NavigationChromeModel.self) private var navigationChrome: NavigationChromeModel?
     /// What this stack is rooted at: `.home` for the Home destination, a library
     /// for one of the rail's library slots.
     var root: HomeTabRoot = .home
     let accounts: [ResolvedAccount]
+    var isProfileAuthorized: @MainActor () -> Bool = { false }
     /// Every server added to the device, regardless of what this profile has
     /// switched on. Home needs it to tell "no servers yet" from "all off".
     let configuredServerCount: Int
@@ -174,7 +180,7 @@ struct HomeTab: View {
     /// stack, and `ItemDetailView` keeps only the first value in `@State` — so
     /// building one inline meant constructing and discarding a view model (and
     /// re-resolving the item's cross-server sources) several times per push.
-    @State private var detailViewModels = KeyedViewStateCache<String, ItemDetailViewModel>()
+    @State private var detailViewModels = KeyedViewStateCache<DetailViewModelCacheKey, ItemDetailViewModel>()
     /// Person view models, cached for the same reason as `detailViewModels`: the
     /// destination closure re-runs on every render pass, so building one inline
     /// constructs and discards a model (and re-issues its credits fetch) on each.
@@ -216,7 +222,7 @@ struct HomeTab: View {
         case .watchlist:
             watchlistRoot
         case let .library(library):
-            libraryBrowse(for: library)
+            libraryBrowse(for: library, isNavigationRoot: true)
         case let .allLibraries(libraries):
             allLibrariesBrowse(libraries)
         }
@@ -226,11 +232,13 @@ struct HomeTab: View {
         runtime.homeViewModel.value(forKey: runtime.scopeKey) {
             HomeViewModel(
                 accounts: accounts,
+                profileNamespace: libraryPreferencesNamespace,
                 layoutStore: homeLayoutStore,
                 contentStore: homeContentStore,
                 identitySources: identitySources,
                 currentVisibility: { homeVisibility.visibility },
                 prepareVisibility: { await homeVisibility.prepareServerDefaults(accounts: accounts) },
+                sectionDiagnostics: homeVisibility.sectionDiagnostics,
                 pendingWatchMutations: pendingWatchMutations,
                 recentlyAppliedRecency: appliedWatchRecency,
                 mediaItemActionHandler: mediaItemActionHandler,
@@ -244,13 +252,30 @@ struct HomeTab: View {
                         continueWatching: continueWatching,
                         latest: latest,
                         locale: locale,
+                        spoilerSettings: SpoilerSettingsStore(namespace: libraryPreferencesNamespace).load(),
+                        showsContentRatings: ContentRatingSettingsStore(namespace: libraryPreferencesNamespace).load(),
+                        resolveMetadata: { item in
+                            guard let accountID = item.sourceAccountID else { return item }
+                            return try await TopShelfItemResolver.resolve(
+                                .init(id: item.id, accountID: accountID), accounts: accounts
+                            )
+                        },
                         resolveArtwork: { item in
                             let source = MediaArtworkSource(
                                 item: item, placement: item.kind == .episode ? .seriesPoster : .poster,
                                 policy: policy
                             )
-                            return await source.resolve(variant: .posterCard, maxAspectRatio: 1)?
-                                .image.pngData()
+                            guard let artwork = await source.resolve(variant: .posterCard, maxAspectRatio: 1)
+                            else { return nil }
+                            return await TopShelfArtworkEncoder.shared.data(for: artwork.image, format: .png)
+                        },
+                        resolveBackdrop: { item in
+                            let subject = item.kind == .episode ? ArtworkRouter.seriesArtworkItem(for: item) : item
+                            let source = MediaArtworkSource(
+                                item: subject, placements: [.detailBackdrop, .poster], policy: policy
+                            )
+                            guard let artwork = await source.resolve(variant: .heroBackdrop) else { return nil }
+                            return await TopShelfArtworkEncoder.shared.data(for: artwork.image, format: .jpeg)
                         }
                     )
                 }
@@ -277,6 +302,7 @@ struct HomeTab: View {
                     heroSettings: heroSettings,
                     identitySources: identitySources
                 ),
+                heroIdentityRevision: identityRevision,
                 heroRequestIdentity: { seer.hasRequestIdentity(for: $0) },
                 heroFeaturedStatusProvider: makeHeroFeaturedStatusProvider(
                     seer: seer
@@ -330,21 +356,16 @@ struct HomeTab: View {
                         Task { @MainActor in
                             await heroTrailerController.captureHandoffFrame()
                         }
-                        // Keep the live player handoff, but never make navigation
-                        // or the first animation frame wait for video decoding.
-                        var transaction = Transaction()
-                        transaction.disablesAnimations = true
-                        withTransaction(transaction) {
-                            navigate(item)
-                        }
-                    } else {
-                        navigate(item)
                     }
+                    // Frame capture must not delay navigation. The shared router
+                    // suppresses native motion only for an opted-in zoom.
+                    navigate(item)
                 },
                 onPlayItem: { requestPlay($0) },
                 onSelectLibrary: { library in
                     path.append(library)
                 },
+                onBrowse: { $0.push(onto: $path, chrome: navigationChrome) },
                 configuredServerCount: configuredServerCount,
                 enabledServerCount: accounts.count
             )
@@ -386,33 +407,40 @@ struct HomeTab: View {
     }
 
     /// One library's paged grid. Shared by the pushed `MediaLibrary` destination
-    /// and — under the rail — by the stack root, so a library looks and behaves the
+    /// and by the stack root, so a library looks and behaves the
     /// same however it was opened.
-    private func libraryBrowse(for library: MediaLibrary) -> some View {
-        let browse = resolveLibraryBrowse(
+    @ViewBuilder
+    private func libraryBrowse(for library: MediaLibrary, isNavigationRoot: Bool = false) -> some View {
+        if let browse = try? resolveLibraryBrowse(
             for: library,
             in: accounts,
             identitySources: identitySources,
             identityRevision: identityRevision
-        )
-        return LibraryBrowseView(
-            viewModel: LibraryBrowseViewModel(
-                provider: browse.provider,
-                containerID: library.id,
-                containerKind: library.kind,
-                sourceAccountID: browse.sourceAccountID,
-                settingsNamespace: libraryPreferencesNamespace
-            ),
-            title: library.displayName,
-            spoilerSettings: spoilerSettings,
-            continueWatchingShowsSeriesArtwork: homeVisibility.continueWatchingShowsSeriesArtwork,
-            onSelect: {
-                navigate(
-                    $0,
-                    libraryOrigin: browse.sourceAccountID ?? library.sourceAccountID
-                )
-            }
-        )
+        ) {
+            LibraryBrowseView(
+                viewModel: LibraryBrowseViewModel(
+                    provider: browse.provider,
+                    containerID: library.id,
+                    containerKind: library.kind,
+                    sourceAccountID: browse.sourceAccountID,
+                    settingsNamespace: libraryPreferencesNamespace,
+                    presentation: libraryPresentation
+                ),
+                title: library.displayName,
+                isNavigationRoot: isNavigationRoot,
+                spoilerSettings: spoilerSettings,
+                continueWatchingShowsSeriesArtwork: homeVisibility.continueWatchingUsesSeriesArtwork,
+                continueWatchingLayout: homeVisibility.continueWatchingLayout,
+                onSelect: {
+                    navigate(
+                        $0,
+                        libraryOrigin: browse.sourceAccountID ?? library.sourceAccountID
+                    )
+                }
+            )
+        } else {
+            MediaSourceUnavailableView()
+        }
     }
 
     /// The combined "All Libraries" grid. Falls back to an unavailable state if no
@@ -436,9 +464,11 @@ struct HomeTab: View {
                     containerKind: .unknown,
                     sortKeySuffix: AllLibrariesBrowse.sortKeySuffix,
                     sourceAccountID: nil,
-                    settingsNamespace: libraryPreferencesNamespace
+                    settingsNamespace: libraryPreferencesNamespace,
+                    presentation: libraryPresentation
                 ),
                 title: Text(AllLibrariesBrowse.title),
+                isNavigationRoot: true,
                 spoilerSettings: spoilerSettings,
                 onSelect: { navigate($0) }
             )
@@ -460,6 +490,24 @@ struct HomeTab: View {
         let _ = PlozzBodyRate.tick("HomeTab")
         NavigationStack(path: $path) {
             rootContent
+            .modifier(NavigationRailRootContentInset())
+            .navigationDestination(for: HomeBrowseDestination.self) { destination in
+                Group {
+                    switch destination {
+                    case let .row(browser):
+                        HomeRowBrowseView(model: browser, columns: metrics.posterColumns) { item in
+                            PosterCardView(item: item, style: .poster, spoilerSettings: spoilerSettings) {
+                                navigate(item)
+                            }
+                            .navigationEntryFocus(.content)
+                        }
+                    case .watchlist:
+                        watchlistRoot
+                    }
+                }
+                .toolbar(.hidden, for: .tabBar)
+                .environment(\.plozzTopNavigationScroll, nil)
+            }
             .navigationDestination(for: MediaLibrary.self) { library in
                 libraryBrowse(for: library)
             }
@@ -469,7 +517,13 @@ struct HomeTab: View {
                 itemDetail(for: item, libraryOrigin: nil)
             }
             .onChange(of: pendingTitleRoute) { _, _ in consumePendingTitleRoute() }
+            .youTubeTrailerOpeningFailures(trailerOpening)
+            .externalMediaOpeningFailures(externalOpening)
+            .onChange(of: accounts.map(\.account.id)) { _, _ in externalOpening.cancel() }
             .onChange(of: artworkPolicy.forArea(.topShelf).identity) { _, _ in
+                if case .home = root { sharedHomeViewModel.publishCurrentContent() }
+            }
+            .onChange(of: showsContentRatings) { _, _ in
                 if case .home = root { sharedHomeViewModel.publishCurrentContent() }
             }
             .onChange(of: isActiveTab, initial: true) { _, _ in consumePendingTitleRoute() }
@@ -551,84 +605,99 @@ struct HomeTab: View {
                 )
             }
             .navigationDestination(for: EpisodeContextRoute.self) { route in
-                ItemDetailView(
-                    viewModel: detailViewModels.value(
-                        forKey: "episode:\(route.seriesID)#\(route.episode.id)"
-                    ) { detailEnvironment.makeSeriesContextViewModel(
-                        seriesID: route.seriesID,
-                        seed: route.episode,
-                        sourceAccountID: route.sourceAccountID,
-                        originAccountID: route.originAccountID
-                    ) },
-                    spoilerSettings: spoilerSettings,
-                    onPlay: { requestPlay($0) },
-                    onSelectChild: { navigate($0, libraryOrigin: route.originAccountID) },
-                    onNavigate: { navigate($0, asOwnSubject: $0.kind == .episode) },
-                    onSelectPerson: { person, accountID in
-                        path.append(PersonRoute(person: person, sourceAccountID: accountID))
-                    },
-                    stackDepth: detailStackDepth,
-                    heroTrailerResolver: makeHeroTrailerResolver(),
-                    preservesHeroTrailerOnDisappear: preservesHeroTrailerOnReturn,
-                    initialEpisode: route.episode,
-                    seerConnected: seer.isConfigured,
-                    requestAvailabilityRefresh: { await seer.requestAvailability(for: $0) },
-                    onRequestSeasons: { item, seasons in
-                        let outcome = await seer.request(
-                            item,
-                            seasons: seasons,
-                            identity: activeSeerrIdentity
+                if let model = try? detailViewModels.value(
+                    forKey: DetailViewModelCacheKey(route),
+                    {
+                        try detailEnvironment.makeSeriesContextViewModel(
+                            seriesID: route.seriesID,
+                            seed: route.episode,
+                            sourceAccountID: route.sourceAccountID,
+                            originAccountID: route.originAccountID
                         )
-                        return seerRequestResult(outcome, actingName: requestActingName)
-                    },
-                    requestActingName: requestActingName,
-                    confirmAdminRequest: confirmAdminRequest
-                )
+                    })
+                {
+                    ItemDetailView(
+                        viewModel: model,
+                        spoilerSettings: spoilerSettings,
+                        onPlay: { requestPlay($0) },
+                        onSelectChild: { navigate($0, libraryOrigin: route.originAccountID) },
+                        onNavigate: { navigate($0, asOwnSubject: $0.kind == .episode) },
+                        onSelectPerson: { person, accountID in
+                            path.append(PersonRoute(person: person, sourceAccountID: accountID))
+                        },
+                        stackDepth: detailStackDepth,
+                        heroTrailerResolver: makeHeroTrailerResolver(),
+                        preservesHeroTrailerOnDisappear: preservesHeroTrailerOnReturn,
+                        initialEpisode: route.episode,
+                        seerConnected: seer.isConfigured,
+                        requestAvailabilityRefresh: { await seer.requestAvailability(for: $0) },
+                        onRequestSeasons: { item, seasons in
+                            let outcome = await seer.request(
+                                item,
+                                seasons: seasons,
+                                identity: activeSeerrIdentity
+                            )
+                            return seerRequestResult(outcome, actingName: requestActingName)
+                        },
+                        requestActingName: requestActingName,
+                        confirmAdminRequest: confirmAdminRequest
+                    )
+                } else {
+                    MediaSourceUnavailableView()
+                }
             }
             .navigationDestination(for: SeasonContextRoute.self) { route in
-                ItemDetailView(
-                    viewModel: detailViewModels.value(
-                        forKey: "season:\(route.seriesID)#\(route.season.id)"
-                    ) { detailEnvironment.makeSeriesContextViewModel(
-                        seriesID: route.seriesID,
-                        seed: route.season,
-                        sourceAccountID: route.sourceAccountID,
-                        originAccountID: route.originAccountID
-                    ) },
-                    spoilerSettings: spoilerSettings,
-                    onPlay: { requestPlay($0) },
-                    onSelectChild: { navigate($0, libraryOrigin: route.originAccountID) },
-                    onNavigate: { navigate($0, asOwnSubject: $0.kind == .episode) },
-                    onSelectPerson: { person, accountID in
-                        path.append(PersonRoute(person: person, sourceAccountID: accountID))
-                    },
-                    stackDepth: detailStackDepth,
-                    heroTrailerResolver: makeHeroTrailerResolver(),
-                    preservesHeroTrailerOnDisappear: preservesHeroTrailerOnReturn,
-                    initialSeasonID: route.season.id,
-                    seerConnected: seer.isConfigured,
-                    requestAvailabilityRefresh: { await seer.requestAvailability(for: $0) },
-                    onRequestSeasons: { item, seasons in
-                        let outcome = await seer.request(
-                            item,
-                            seasons: seasons,
-                            identity: activeSeerrIdentity
+                if let model = try? detailViewModels.value(
+                    forKey: DetailViewModelCacheKey(route),
+                    {
+                        try detailEnvironment.makeSeriesContextViewModel(
+                            seriesID: route.seriesID,
+                            seed: route.season,
+                            sourceAccountID: route.sourceAccountID,
+                            originAccountID: route.originAccountID
                         )
-                        return seerRequestResult(outcome, actingName: requestActingName)
-                    },
-                    requestActingName: requestActingName,
-                    confirmAdminRequest: confirmAdminRequest
-                )
+                    })
+                {
+                    ItemDetailView(
+                        viewModel: model,
+                        spoilerSettings: spoilerSettings,
+                        onPlay: { requestPlay($0) },
+                        onSelectChild: { navigate($0, libraryOrigin: route.originAccountID) },
+                        onNavigate: { navigate($0, asOwnSubject: $0.kind == .episode) },
+                        onSelectPerson: { person, accountID in
+                            path.append(PersonRoute(person: person, sourceAccountID: accountID))
+                        },
+                        stackDepth: detailStackDepth,
+                        heroTrailerResolver: makeHeroTrailerResolver(),
+                        preservesHeroTrailerOnDisappear: preservesHeroTrailerOnReturn,
+                        initialSeasonID: route.season.id,
+                        seerConnected: seer.isConfigured,
+                        requestAvailabilityRefresh: { await seer.requestAvailability(for: $0) },
+                        onRequestSeasons: { item, seasons in
+                            let outcome = await seer.request(
+                                item,
+                                seasons: seasons,
+                                identity: activeSeerrIdentity
+                            )
+                            return seerRequestResult(outcome, actingName: requestActingName)
+                        },
+                        requestActingName: requestActingName,
+                        confirmAdminRequest: confirmAdminRequest
+                    )
+                } else {
+                    MediaSourceUnavailableView()
+                }
             }
             // Installed *inside* the stack, after the destinations, so pushed
             // pages inherit it too. Applied outside the `NavigationStack` it only
             // reaches the root content — "Episode Info" worked on Continue
             // Watching and was silently dropped in every pushed detail page.
             .mediaItemNavigator { navigate($0, asOwnSubject: $0.kind == .episode) }
+            .environment(\.detailPlaybackPreparationAllowed, playbackPreparationAllowed && isActiveTab)
         }
-        // Under the rail, a pushed page is a detail page — report the depth so the
-        // chrome steps aside and the title page is full-bleed. No-op under the two
-        // native tab styles, which install no chrome model.
+        .cinematicDetailNavigation(path: $path)
+        // All pushed pages, including Home row browsers, share this path so
+        // custom chrome and Back agree about whether Home is still the root.
         .reportsNavigationDepth(path.count, to: navigationChrome)
         // The deep-link watcher lives in its own leaf view. Reading the pending
         // id in *this* body subscribed the whole tab to it, and every publish
@@ -640,6 +709,7 @@ struct HomeTab: View {
             DeepLinkPlayRouter(
                 pendingPlay: runtime.pendingPlay,
                 accounts: accounts,
+                scopeKey: runtime.scopeKey,
                 isActive: isActiveTab,
                 // Open the title's page, then start it. Playing straight from the
                 // shelf left the viewer on Home the moment they backed out — the
@@ -648,7 +718,11 @@ struct HomeTab: View {
                 // again. Pushing first means Back lands somewhere that makes
                 // sense, and costs nothing on the way in: the player is presented
                 // over the stack, so the page is simply already there underneath.
-                onResolved: { item in
+                onResolved: { item, action in
+                    if action == .details {
+                        navigate(item, libraryOrigin: item.sourceAccountID)
+                        return
+                    }
                     #if os(tvOS)
                     DetailTransitionNavigation.suppressNextEntranceForPlayback()
                     #endif
@@ -676,7 +750,7 @@ struct HomeTab: View {
                 },
                 onPush: { path.append($0) },
                 // Straight to the player, NOT through `requestPlay`: an item
-                // with progress raises the Resume/Start Over prompt, and a
+                // with progress can raise the Resume/Start Over prompt, and a
                 // capture of the player is then a capture of that alert.
                 //
                 // A series still has to be resolved to an episode first. Series
@@ -915,7 +989,7 @@ struct HomeTab: View {
         }
 
         private func person(named name: String, in item: MediaItem) async -> MediaPerson? {
-            let provider = resolveProvider(item.sourceAccountID, in: accounts)
+            guard let provider = try? resolveProvider(item.sourceAccountID, in: accounts) else { return nil }
             let detailed = (try? await provider.item(id: item.id)) ?? item
             let cast = detailed.cast.isEmpty ? detailed.people : detailed.cast
             return cast.first {
@@ -939,18 +1013,18 @@ struct HomeTab: View {
         }
     }
 
-    /// Resolves a deep-linked item id (from a Top Shelf card) and routes to it,
-    /// then clears the request so it fires exactly once. Because the id alone is
-    /// provider-ambiguous once content is merged, each active provider is tried
-    /// until one resolves the item; the resolved item is tagged with its source.
+    /// Resolves a Top Shelf action against its owning account, then consumes it
+    /// once. Unscoped links from older builds retain their provider search.
     ///
     /// Lives on ``DeepLinkPlayRouter`` rather than on the tab so that watching
     /// the pending id cannot invalidate the tab's body.
     private struct DeepLinkPlayRouter: View {
         let pendingPlay: PendingPlayRequest
         let accounts: [ResolvedAccount]
+        let scopeKey: String
         let isActive: Bool
-        let onResolved: (MediaItem) -> Void
+        let onResolved: (MediaItem, TopShelf.ItemReference.Action) -> Void
+        @State private var failure: AppError?
 
         var body: some View {
             Color.clear
@@ -962,72 +1036,61 @@ struct HomeTab: View {
                 // again — the app opens and sits there, which is exactly what the
                 // shelf looked like from the sofa.
                 .task(id: RouteRequest(
-                    itemID: pendingPlay.itemID,
-                    accountID: pendingPlay.accountID,
+                    request: pendingPlay.request,
                     accountIDs: accounts.map(\.account.id),
+                    scopeKey: scopeKey,
                     isActive: isActive
                 )) { await route() }
+                .alert(
+                    "Unable to Open Title",
+                    isPresented: Binding(
+                        get: { failure != nil },
+                        set: { if !$0 { failure = nil } }
+                    ),
+                    presenting: failure
+                ) { _ in
+                    Button("OK", role: .cancel) {}
+                } message: { error in
+                    Text(error.userMessage)
+                }
         }
 
         /// What a routing attempt depends on. Any change re-runs it.
         private struct RouteRequest: Equatable {
-            let itemID: String?
-            let accountID: String?
+            let request: PendingPlayRequest.Request?
             let accountIDs: [String]
+            let scopeKey: String
             let isActive: Bool
         }
 
         private func route() async {
-            guard isActive else { return }
-            guard let id = pendingPlay.itemID else { return }
+            guard isActive, let request = pendingPlay.request else { return }
             // Nothing to ask yet. Deliberately keeps the request pending: accounts
             // arriving is a change this task is watching, so it will run again with
             // something to resolve against.
             guard !accounts.isEmpty else { return }
 
-            // The link's own account first, when it named one — it is the server the
-            // card was built from, so it is both the fastest answer and the only one
-            // guaranteed to mean the same title.
-            let ordered: [ResolvedAccount]
-            if let owner = pendingPlay.accountID,
-               let match = accounts.first(where: { $0.account.id == owner }) {
-                ordered = [match] + accounts.filter { $0.account.id != owner }
-            } else {
-                ordered = accounts
+            do {
+                let item = try await TopShelfItemResolver.resolve(request.reference, accounts: accounts)
+                try Task.checkCancellation()
+                guard pendingPlay.consume(request) else { return }
+                failure = nil
+                onResolved(item, request.reference.action)
+            } catch {
+                guard !Task.isCancelled, !(error is CancellationError),
+                      (error as? AppError) != .cancelled, pendingPlay.consume(request) else { return }
+                PlozzLog.app.error("Unable to resolve the Top Shelf action in the active account scope.")
+                failure = error as? AppError ?? .unknown("Top Shelf item unavailable")
             }
-
-            for resolved in ordered {
-                if let item = try? await resolved.provider.item(id: id) {
-                    // Another run may have resolved it while this one was waiting:
-                    // the task restarts whenever the accounts change, and a request
-                    // already in flight is not stopped by that. Acting twice pushes
-                    // the page twice and presents the player over itself.
-                    guard pendingPlay.itemID == id else { return }
-                    pendingPlay.itemID = nil
-                    pendingPlay.accountID = nil
-                    onResolved(item.taggingSource(resolved.account.id))
-                    return
-                }
-            }
-            // Only an uninterrupted sweep may declare the title gone. A cancelled
-            // one asked nobody: the fetch above cannot tell being cancelled apart
-            // from a server saying no, so a task restarted mid-flight would fall
-            // through here and discard a request that no server ever answered —
-            // landing the viewer on Home, which is the whole thing this fixes.
-            guard !Task.isCancelled else { return }
-            // Asked every signed-in server and none of them knows it. Clearing stops
-            // a title that has genuinely gone from re-asking on every account change
-            // for the rest of the session.
-            pendingPlay.itemID = nil
-            pendingPlay.accountID = nil
         }
     }
 
     /// Pushes a detail page for any item — movies get a Movie Details page (with a
     /// Play button); series/seasons get their children list. A tapped episode is
     /// redirected to its *series* page (fronting that episode) so the user never
-    /// lands on a dead-end single-episode page. Immediate playback is reserved for
-    /// Continue Watching and the detail page's own Play action.
+    /// lands on a single-episode page unless that is the requested destination.
+    /// Playback remains available through the detail page and the optional
+    /// Continue Watching Play action.
     ///
     /// `libraryOrigin` carries the owning `Account.id` when the navigation springs
     /// from a single-server library tile, so the pushed detail (and any movie/
@@ -1038,10 +1101,8 @@ struct HomeTab: View {
     /// Routes a navigation to `item`.
     ///
     /// `asOwnSubject` distinguishes the two ways an episode can be navigated to.
-    /// A menu's "Episode Info" wants the episode's *own* page — its synopsis, air
-    /// date, and the file that would play. Everything else that hands over an
-    /// episode (a deep link, a tapped card) means "show me this episode in
-    /// context", which is the series page with it fronted.
+    /// A menu's "Go to Episode" opens the episode's own page. Ordinary browsing,
+    /// including Continue Watching, shows the series page with that episode fronted.
     private func navigate(
         _ item: MediaItem,
         libraryOrigin: String? = nil,
@@ -1089,14 +1150,15 @@ struct HomeTab: View {
         let seer = self.seer
         let runtime = self.runtime
         return DetailOpenEnvironment(
-            resolveProvider: { resolveProvider($0, in: accounts) },
+            resolveProvider: { try resolveProvider($0, in: accounts) },
             resolveOptionalProvider: { resolveOptionalProvider($0, in: accounts) },
             identitySources: identitySources,
             crossServerSourceResolver: crossServerSourceResolver(in: accounts, identitySources: identitySources),
             continueWatchingSnapshot: { runtime.continueWatchingForDetail },
             ratingsProvider: ratingsProvider,
             detailMetadataResolver: { await DetailMetadataResolver.household.resolve($0) },
-            discoveryStatusRefresh: { await seer.availability(for: $0) },
+            onlineTrailerResolver: { await DetailMetadataResolver.household.trailers(for: $0) },
+            discoveryStatusRefresh: { await seer.requestAvailability(for: $0) },
             loadSeasonEpisodeRoster: { await seer.seasonEpisodeRoster(for: $0, seasonNumber: $1) },
             makeRelatedTitlesLoader: {
                 makeRelatedTitlesLoader(
@@ -1111,14 +1173,14 @@ struct HomeTab: View {
 
     @ViewBuilder
     private func itemDetail(for item: MediaItem, libraryOrigin: String?) -> some View {
-        let provider = resolveProvider(libraryOrigin ?? item.sourceAccountID, in: accounts)
-        if let route = CollectionBrowseRoute(
+        let provider = try? resolveProvider(libraryOrigin ?? item.sourceAccountID, in: accounts)
+        if provider != nil, let route = CollectionBrowseRoute(
             item: item,
-            fallbackAccountID: libraryOrigin ?? provider.session.server.id
-        ) {
+            fallbackAccountID: libraryOrigin ?? accounts.first?.account.id
+        ), let collectionProvider = try? resolveProvider(route.accountID, in: accounts) {
             LibraryBrowseView(
                 viewModel: LibraryBrowseViewModel(
-                    provider: resolveProvider(route.accountID, in: accounts),
+                    provider: collectionProvider,
                     containerID: route.collectionID,
                     containerKind: route.kind,
                     sourceAccountID: route.accountID,
@@ -1136,10 +1198,10 @@ struct HomeTab: View {
                     }
                 }
             )
-        } else if let library = MediaFolderNavigation.library(
+        } else if let provider, let library = MediaFolderNavigation.library(
             for: item,
             providerKind: provider.kind,
-            sourceAccountID: libraryOrigin ?? item.sourceAccountID ?? provider.session.server.id
+            sourceAccountID: libraryOrigin ?? item.sourceAccountID ?? accounts.first?.account.id
         ) {
             MediaFolderBrowseView(
                 library: library,
@@ -1152,6 +1214,7 @@ struct HomeTab: View {
         }
     }
 
+    @ViewBuilder
     private func titleDetail(
         for item: MediaItem, libraryOrigin: String?,
         playlistOrigin: VideoPlaylistPlaybackOrigin? = nil
@@ -1162,46 +1225,55 @@ struct HomeTab: View {
         // titles (available/partiallyAvailable) are NOT discovery: they resolve to
         // a real library copy via the identity index, so they keep the normal
         // playable detail page.
-        return ItemDetailView(
-            viewModel: detailViewModels.value(forKey: "item:\(item.id)#\(libraryOrigin ?? "")") {
-                detailEnvironment.makeViewModel(for: item, libraryOrigin: libraryOrigin)
-            },
-            spoilerSettings: spoilerSettings,
-            onPlay: { requestPlay($0, playlistOrigin: playlistOrigin) },
-            onSelectChild: { navigate($0, libraryOrigin: libraryOrigin) },
-            onNavigate: { navigate($0, asOwnSubject: $0.kind == .episode) },
-            onSelectPerson: { person, accountID in
-                path.append(PersonRoute(person: person, sourceAccountID: accountID))
-            },
-            stackDepth: detailStackDepth,
-            heroTrailerResolver: makeHeroTrailerResolver(),
-            preservesHeroTrailerOnDisappear: preservesHeroTrailerOnReturn,
-            initialSeasonID: item.seasonID,
-            seerConnected: seer.isConfigured,
-            onRequest: { item in
-                let outcome = await seer.request(item, identity: activeSeerrIdentity)
-                return seerRequestResult(outcome, actingName: requestActingName)
-            },
-            requestAvailabilityRefresh: { await seer.requestAvailability(for: $0) },
-            onRequestSeasons: { item, seasons in
-                let outcome = await seer.request(
-                    item,
-                    seasons: seasons,
-                    identity: activeSeerrIdentity
-                )
-                return seerRequestResult(outcome, actingName: requestActingName)
-            },
-            requestActingName: requestActingName,
-            confirmAdminRequest: confirmAdminRequest
-        )
+        if let model = try? detailViewModels.value(
+            forKey: .title(for: item, libraryOrigin: libraryOrigin),
+            {
+                try detailEnvironment.makeViewModel(for: item, libraryOrigin: libraryOrigin)
+            })
+        {
+            ItemDetailView(
+                viewModel: model,
+                spoilerSettings: spoilerSettings,
+                onPlay: { requestPlay($0, playlistOrigin: playlistOrigin) },
+                onSelectChild: { navigate($0, libraryOrigin: libraryOrigin) },
+                onNavigate: { navigate($0, asOwnSubject: $0.kind == .episode) },
+                onSelectPerson: { person, accountID in
+                    path.append(PersonRoute(person: person, sourceAccountID: accountID))
+                },
+                stackDepth: detailStackDepth,
+                heroTrailerResolver: makeHeroTrailerResolver(),
+                preservesHeroTrailerOnDisappear: preservesHeroTrailerOnReturn,
+                initialSeasonID: item.seasonID,
+                seerConnected: seer.isConfigured,
+                onRequest: { item in
+                    let outcome = await seer.request(item, identity: activeSeerrIdentity)
+                    return seerRequestResult(outcome, actingName: requestActingName)
+                },
+                requestAvailabilityRefresh: { await seer.requestAvailability(for: $0) },
+                onRequestSeasons: { item, seasons in
+                    let outcome = await seer.request(
+                        item,
+                        seasons: seasons,
+                        identity: activeSeerrIdentity
+                    )
+                    return seerRequestResult(outcome, actingName: requestActingName)
+                },
+                requestActingName: requestActingName,
+                confirmAdminRequest: confirmAdminRequest
+            )
+        } else {
+            MediaSourceUnavailableView()
+        }
     }
 
-    /// In-progress items prompt "Resume vs Start Over"; fully-unwatched items
-    /// play immediately from the start.
-
+    /// In-progress items resume directly unless the profile asks for a choice.
     private func requestPlay(
         _ item: MediaItem, playlistOrigin: VideoPlaylistPlaybackOrigin? = nil
     ) {
+        if item.isYouTubeTrailer {
+            Task { await trailerOpening.open(item) }
+            return
+        }
         let origin = playlistOrigin?.containsSelection(item) == true ? playlistOrigin : nil
         let target = origin == nil
             ? bestSourcePlayItem(item, accounts: accounts, identitySources: identitySources)
@@ -1231,23 +1303,37 @@ struct HomeTab: View {
     }
 
     /// Presents the player for an already-resolved, directly-playable `target`
-    /// (movie or episode), prompting Resume vs Start Over when it has progress.
+    /// (movie or episode), honoring the profile's resume confirmation preference.
     private func presentPlay(
         _ target: MediaItem, playlistOrigin: VideoPlaylistPlaybackOrigin? = nil
     ) {
+        if target.opensExternalSource {
+            do {
+                let provider = try resolveProvider(target.sourceAccountID, in: accounts)
+                let profileID = profilesModel?.activeProfileID
+                Task {
+                    await externalOpening.open(target, provider: provider) {
+                        profilesModel?.activeProfileID == profileID && isProfileAuthorized()
+                    }
+                }
+            } catch {
+                externalOpening.failed = true
+            }
+            return
+        }
         pendingPlaylistOrigin = playlistOrigin
-        if let resume = target.resumePosition, resume > 1 {
+        if playbackSettings.shouldAskBeforeResuming(at: target.resumePosition) {
             HandoffDiagnostics.emit(
                 "tap RESUME_PROMPT item=\(target.id) provider=\(target.sourceAccountID ?? "nil")"
             )
             resumePrompt = target
         } else {
-            let playlist = playlistOrigin.map {
-                VideoPlaylistPlaybackContext(
-                    origin: $0, provider: resolveProvider($0.accountID, in: accounts)
-                )
+            let playlist: VideoPlaylistPlaybackContext? = playlistOrigin.flatMap { origin in
+                guard let provider = try? resolveProvider(origin.accountID, in: accounts) else { return nil }
+                return VideoPlaylistPlaybackContext(origin: origin, provider: provider)
             }
-            let request = PlayRequest(item: target, startPosition: 0, playlist: playlist)
+            let request = PlayRequest(item: target, startPosition: target.resumePosition ?? 0, playlist: playlist)
+            pendingPlaylistOrigin = nil
             HandoffDiagnostics.emit(
                 "tap PLAY trace=\(request.traceID.uuidString.prefix(8)) item=\(target.id) "
                     + "provider=\(target.sourceAccountID ?? "nil")"
@@ -1260,9 +1346,10 @@ struct HomeTab: View {
     /// resolver both shells use, so tvOS and iOS front the same episode and a
     /// series can never reach the player on either platform.
     private func resolveSeriesNextUpEpisode(_ series: MediaItem) async -> MediaItem? {
-        await HeroPlayTargetResolver.playbackTarget(
+        guard let provider = try? resolveProvider(series.sourceAccountID, in: accounts) else { return nil }
+        return await HeroPlayTargetResolver.playbackTarget(
             for: series,
-            provider: resolveProvider(series.sourceAccountID, in: accounts)
+            provider: provider
         )
     }
 }

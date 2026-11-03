@@ -2,6 +2,8 @@
 import SwiftUI
 import CoreModels
 import CoreUI
+import FeatureLiveTV
+import FeatureLiveTVCore
 
 /// "Choose your libraries" — shown right after one or more servers are added
 /// (both first run and later adds). It lists the just-added servers' libraries
@@ -19,6 +21,10 @@ struct SelectLibrariesView: View {
 
     @State private var discovery = LibraryDiscoveryModel()
     @FocusState private var focused: Field?
+
+    private var guides: [LiveTVGuidePreparationModel.Status] {
+        appState.pendingLibrarySelectionAccountIDs.compactMap { appState.guidePreparation.statuses[$0] }
+    }
 
     private enum Field: Hashable {
         case library(String)
@@ -54,10 +60,39 @@ struct SelectLibrariesView: View {
     }
 
     var body: some View {
+        Group {
+            if let request = appState.plexHomeUsers.pendingPlexPINRequest {
+                PlexPINEntryView(
+                    appState: appState,
+                    userName: request.homeUserName,
+                    avatarURLString: request.homeUserAvatarURL,
+                    dismissOnSuccess: false,
+                    onSubmit: { appState.plexHomeUsers.submitPlexPIN($0) },
+                    onCancel: { appState.plexHomeUsers.cancelPlexPIN() }
+                )
+            } else {
+                librarySelection
+            }
+        }
+        .task(id: loadID) {
+            guard appState.plexHomeUsers.pendingPlexPINRequest == nil else { return }
+            await loadLibraries()
+        }
+    }
+
+    private var loadID: [String] {
+        [appState.profilesModel.activeProfileID, String(appState.plexHomeUsers.plexIdentityGeneration)]
+            + appState.pendingLibrarySelectionAccountIDs
+            + appState.accountsProviders.accounts.map { "\($0.id):\($0.credentialRevision.rawValue)" }
+    }
+
+    private var librarySelection: some View {
         VStack(spacing: 0) {
             OnboardingHeader(
-                Text("Choose your libraries"),
-                subtitle: Text("You can change this any time in Settings.")
+                discovery.canSkipSelection && !guides.isEmpty ? Text("Live TV") : Text("Choose your libraries"),
+                subtitle: discovery.canSkipSelection && !guides.isEmpty
+                    ? Text("You can start watching while the guide loads.")
+                    : Text("You can change this any time in Settings.")
             )
             .padding(.bottom, 28)
 
@@ -81,17 +116,15 @@ struct SelectLibrariesView: View {
         .frame(maxWidth: 900)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onExitCommand { appState.confirmLibrarySelection() }
-        .task(id: appState.pendingLibrarySelectionAccountIDs) {
-            await loadLibraries()
-        }
     }
 
     private func loadLibraries() async {
+        let scope = loadID
         let ids = appState.pendingLibrarySelectionAccountIDs
         let accounts = appState.accountsProviders.resolvedAccounts(withIDs: ids)
-        await discovery.load(from: accounts)
-        guard !Task.isCancelled, ids == appState.pendingLibrarySelectionAccountIDs,
-              accounts.count == ids.count, discovery.canSkipSelection else { return }
+        await discovery.load(from: accounts, expectedAccountIDs: Set(ids), isCurrent: { scope == loadID })
+        guard !Task.isCancelled, scope == loadID, ids == appState.pendingLibrarySelectionAccountIDs,
+              accounts.count == ids.count, discovery.canSkipSelection, guides.isEmpty else { return }
         appState.confirmLibrarySelection()
     }
 
@@ -99,19 +132,24 @@ struct SelectLibrariesView: View {
     private var content: some View {
         switch discovery.state {
         case .idle, .loading:
-            SetupProgressCard(
-                title: "Finding your libraries",
-                detail: "Checking your connected sources for available libraries.",
-                symbol: "rectangle.stack"
-            )
+            VStack(alignment: .leading, spacing: 16) {
+                SetupProgressCard(
+                    title: "Finding your libraries",
+                    detail: "Checking your connected sources for available libraries.",
+                    symbol: "rectangle.stack"
+                )
+            }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
         case .empty:
-            Text("No libraries were found on the servers you added.")
-                .font(.title3)
-                .plozzForeground(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            VStack(alignment: .leading, spacing: 16) {
+                if guides.isEmpty {
+                    Text("No libraries were found on the servers you added.")
+                } else {
+                    Label("Playlist added", systemImage: "checkmark.circle")
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
         case .failed:
             VStack(spacing: 16) {
@@ -123,7 +161,7 @@ struct SelectLibrariesView: View {
                 } label: {
                     Label("Try Again", systemImage: "arrow.clockwise")
                 }
-                .buttonStyle(SettingsFocusButtonStyle())
+                .plozzActionButton(role: .secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 

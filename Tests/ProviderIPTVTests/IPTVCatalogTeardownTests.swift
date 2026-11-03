@@ -7,6 +7,28 @@ import XCTest
 
 final class IPTVCatalogTeardownTests: XCTestCase {
     @MainActor
+    func testRemovedCatalogWaitsForOffMainSQLiteCloseBeforeRequestingCleanup() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let identity = UUID()
+        let url = root.appendingPathComponent(identity.uuidString + ".sqlite")
+        addTeardownBlock { try FileManager.default.removeItem(at: root) }
+        var catalog: IPTVCatalog? = try IPTVCatalog(url: url, key: Data(repeating: 2, count: 32))
+        let probe = try CatalogCloseProbe(db: XCTUnwrap(catalog?.db))
+        let closed = expectation(description: "Closed connection requests fresh ownership check")
+        try IPTVCatalogStorage.removeUnreferenced(
+            [url], retaining: [], removed: [identity], retryAfterClose: { closed.fulfill() }
+        )
+        catalog = nil
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        await fulfillment(of: [closed], timeout: 5)
+        XCTAssertEqual(probe.state.withLock { $0 }, [.init(onMainThread: false)])
+        try IPTVCatalogStorage.removeUnreferenced(
+            [url], retaining: [], removed: [identity], retryAfterClose: {}
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    @MainActor
     func testMainActorReleaseDoesNotWaitForSQLiteCloseAndPreservesCommittedRows() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let url = root.appendingPathComponent("catalog.sqlite")

@@ -18,6 +18,7 @@ struct PlayerOptionsPanel: View {
     typealias SubtitleScreen = PlayerControls.SubtitleScreen
     typealias TrackRow = PlayerControls.TrackRow
     typealias PlaybackScreen = PlayerControls.PlaybackScreen
+    typealias AudioScreen = PlayerControls.AudioScreen
     static let standardWidth: CGFloat = 520
 
     let category: Category
@@ -28,6 +29,7 @@ struct PlayerOptionsPanel: View {
     /// reads it to know when the Style editor is up.
     @Binding var subtitleScreen: SubtitleScreen
     @Binding var playbackScreen: PlaybackScreen
+    @Binding var audioScreen: AudioScreen
     let videoZoom: PlayerVideoZoomModel
     let offersPlaybackSpeed: Bool
     /// Each menu's last measured height, remembered across opens so a reopen
@@ -44,7 +46,6 @@ struct PlayerOptionsPanel: View {
     /// Measured from that player's viewport, never the device's screen bounds.
     let maximumHeight: CGFloat
 
-    @Environment(\.plozzHDRDisplayActive) private var hdrDisplayActive
     @Environment(\.locale) private var locale
 
     /// The panel body's measured natural height, driving the glass box's height.
@@ -62,7 +63,8 @@ struct PlayerOptionsPanel: View {
         offersDualSubtitles: Bool = true,
         playbackScreen: Binding<PlaybackScreen> = .constant(.options),
         videoZoom: PlayerVideoZoomModel? = nil,
-        offersPlaybackSpeed: Bool = true
+        offersPlaybackSpeed: Bool = true,
+        audioScreen: Binding<AudioScreen> = .constant(.options)
     ) {
         self.category = category
         self.model = model
@@ -70,6 +72,7 @@ struct PlayerOptionsPanel: View {
         self.actions = actions
         _subtitleScreen = subtitleScreen
         _playbackScreen = playbackScreen
+        _audioScreen = audioScreen
         self.videoZoom = videoZoom ?? model.videoZoom
         self.offersPlaybackSpeed = offersPlaybackSpeed
         _heightCache = heightCache
@@ -91,12 +94,39 @@ struct PlayerOptionsPanel: View {
     var body: some View {
         morphingPanel(for: category)
             .onAppear { reconcileSubtitleScreen() }
+            #if os(tvOS)
+            .onAppear {
+                if category == .audio { model.systemAudio.refresh() }
+            }
+            .onChange(of: model.systemAudio.availableSettings) { _, _ in
+                guard category == .audio, audioScreen == .options else { return }
+                let rows = Self.audioRows(model: model, actions: actions)
+                if case let .row(id) = focus, !rows.contains(where: { $0.id == id }) {
+                    restoreFocus(rows.first.map { .row($0.id) } ?? .subBack)
+                } else if focus == .subBack, let first = rows.first {
+                    restoreFocus(.row(first.id))
+                }
+            }
+            .onChange(of: model.systemAudio.dialogueLevel != nil) { _, available in
+                if category == .audio, audioScreen == .dialogue, !available { openAudioScreen(.options) }
+            }
+            .alert("Couldn't change audio setting", isPresented: Binding(
+                get: { category == .audio && model.systemAudio.failure != nil },
+                set: { if !$0 { model.systemAudio.failure = nil } }
+            )) {
+                Button("OK", role: .cancel) { model.systemAudio.failure = nil }
+            } message: {
+                Text("Try changing this setting in Apple TV Settings.")
+            }
+            #endif
             .onChange(of: model.subtitleStyleAdjustable) { _, _ in reconcileSubtitleScreen() }
             .onChange(of: backRequest) { _, _ in
                 if category == .subtitles, subtitleScreen != .tracks {
                     openSubtitleScreen(subtitleScreen.parent)
                 } else if category == .playback, playbackScreen != .options {
                     openPlaybackScreen(playbackScreen.parent)
+                } else if category == .audio, audioScreen != .options {
+                    openAudioScreen(.options)
                 }
             }
             .onChange(of: model.subtitleDownload.state) { _, state in
@@ -119,7 +149,7 @@ struct PlayerOptionsPanel: View {
         Self.preferredFocus(
             for: category, subtitleScreen: subtitleScreen, model: model,
             offersDualSubtitles: offersDualSubtitles, playbackScreen: playbackScreen,
-            offersPlaybackSpeed: offersPlaybackSpeed, zoomMode: videoZoom.settings.mode
+            offersPlaybackSpeed: offersPlaybackSpeed, zoomMode: videoZoom.settings.mode, audioScreen: audioScreen
         )
     }
 
@@ -131,13 +161,14 @@ struct PlayerOptionsPanel: View {
         offersDualSubtitles: Bool = true,
         playbackScreen: PlaybackScreen = .options,
         offersPlaybackSpeed: Bool = true,
-        zoomMode: PlayerVideoZoom.Mode? = nil
+        zoomMode: PlayerVideoZoom.Mode? = nil,
+        audioScreen: AudioScreen = .options
     ) -> FocusSlot? {
         let subtitleScreen = model.subtitleStyleAdjustable ? subtitleScreen : availableSubtitleScreen(
             subtitleScreen, model: model, offersDualSubtitles: offersDualSubtitles
         )
         switch panel {
-        case .info, .cast, .episodes, .playlist:
+        case .info, .cast, .chapters, .episodes, .playlist:
             // The tab, not the card: the row above the card behaves like a
             // segmented control, so opening lands there and a further Down press
             // steps into the card's actions.
@@ -157,7 +188,7 @@ struct PlayerOptionsPanel: View {
                 // its right.
                 return .row(0)
             case .style:
-                return model.secondarySubtitleImagePrimaryFormat == nil ? .row(0) : .subBack
+                return .row(0)
             case .styleFont:
                 let style = SystemCaptionStyle.shared.resolved(model.subtitleStyle)
                 return .row(style.systemFont == nil && style.fontDescriptor == nil
@@ -181,7 +212,17 @@ struct PlayerOptionsPanel: View {
                 return .row(PlaybackOptionsPane.speedSlot)
             }
             return nil
-        case .audio, .version:
+        case .audio:
+            #if os(tvOS)
+            if audioScreen == .dialogue {
+                return dialogueRows(model: model).first(where: \.isSelected).map { .row($0.id) } ?? .subBack
+            }
+            return audioRows(model: model, actions: PlayerOptionsActions()).isEmpty
+                ? .subBack : .row(selectedRowIndex(for: panel, model: model))
+            #else
+            return .row(selectedRowIndex(for: panel, model: model))
+            #endif
+        case .version:
             return .row(selectedRowIndex(for: panel, model: model))
         case .sync:
             if model.engineCapabilities.contains(.audioDelay) { return .row(0) }
@@ -212,6 +253,9 @@ struct PlayerOptionsPanel: View {
         // room to be readable without being absurdly wide.
         case .subtitles where subtitleScreen == .download: return 860
         case .subtitles: return SubtitleStylePanel.panelWidth
+        #if os(tvOS)
+        case .audio: return 580
+        #endif
         default: return standardWidth
         }
     }
@@ -255,8 +299,7 @@ struct PlayerOptionsPanel: View {
         // HDR-compensated like the borders, and for the same reason: this sits
         // inside the panel whose edge it has to match, and both are drawn into a
         // signal that maps SDR white brighter than SDR mode does.
-        PlozzFrostedSurface.dividerColor(hdrDisplayActive: hdrDisplayActive)
-            .frame(height: PlozzFrostedSurface.dividerHeight)
+        PlayerOptionsDivider()
     }
 
     @ViewBuilder
@@ -288,6 +331,7 @@ struct PlayerOptionsPanel: View {
         // `onPreferenceChange` — both of which sit OUTSIDE this nil scope.
         .animation(nil, value: subtitleScreen)
         .animation(nil, value: playbackScreen)
+        .animation(nil, value: audioScreen)
         .frame(width: panelWidth(for: category), alignment: .leading)
         // Stay inside the host even before the header's first measurement. Keep
         // short menus content-sized instead of stretching them to this ceiling.
@@ -295,18 +339,6 @@ struct PlayerOptionsPanel: View {
         .fixedSize(horizontal: false, vertical: true)
         .modifier(PanelGlassBackground())
         .clipShape(RoundedRectangle(cornerRadius: 32, style: .continuous))
-        // OUTSIDE the background, not inside it.
-        //
-        // `.colorScheme` sets the environment for the subtree it is attached to,
-        // and a `.background` added by a later modifier is not in that subtree —
-        // so with this above `PanelGlassBackground` the panel's CONTENT was dark
-        // while its material resolved against the ambient scheme. A `Material`
-        // is scheme-dependent and `.thickMaterial` in light mode is white, which
-        // is the white slab that appeared before the panel settled.
-        //
-        // It never showed while the panel was glass: `glassEffect` is not a
-        // Material and does not flip on colour scheme.
-        .colorScheme(.dark)
         // Drive the height change explicitly (see note above). The first
         // measurement for a given panel snaps in (no grow-from-zero / no
         // shrink-from-stale); later changes *within the same panel* (the
@@ -326,7 +358,8 @@ struct PlayerOptionsPanel: View {
             // cache the tracks-list height — a fresh open always starts on the track list,
             // so we must not seed it with the taller Style-editor height.
             if (panel != .subtitles || subtitleScreen == .tracks)
-                && (panel != .playback || playbackScreen == .options) {
+                && (panel != .playback || playbackScreen == .options)
+                && (panel != .audio || audioScreen == .options) {
                 heightCache[panel] = newHeight
             }
             if measuredFor != panel {
@@ -417,7 +450,8 @@ struct PlayerOptionsPanel: View {
             }
             .padding(.horizontal, 14)
         case .subtitles: subtitleBody
-        case .audio: AudioPaneView(rows: Self.audioRows(model: model, actions: actions), palette: palette, focus: $focus)
+        case .audio:
+            audioBody
         case .playback:
             PlaybackOptionsPane(
                 model: model, zoom: videoZoom, palette: palette, actions: actions,
@@ -427,7 +461,7 @@ struct PlayerOptionsPanel: View {
             )
         case .sync: SyncPaneView(model: model, actions: actions, focus: $focus)
         // Card tabs render in the bottom card, never in the floating menu.
-        case .info, .cast, .episodes, .playlist: EmptyView()
+        case .info, .cast, .chapters, .episodes, .playlist: EmptyView()
         }
     }
 
@@ -441,10 +475,13 @@ struct PlayerOptionsPanel: View {
             // in the header — leading the title — so it mirrors the other menus
             // rather than floating inside the scrollable content.
             if (category == .subtitles && subtitleScreen != .tracks)
-                || (category == .playback && playbackScreen != .options) {
+                || (category == .playback && playbackScreen != .options)
+                || (category == .audio && audioScreen != .options) {
                 Button {
                     if category == .playback {
                         openPlaybackScreen(playbackScreen.parent)
+                    } else if category == .audio {
+                        openAudioScreen(.options)
                     } else {
                         openSubtitleScreen(subtitleScreen.parent)
                     }
@@ -459,10 +496,10 @@ struct PlayerOptionsPanel: View {
                 .padding(.leading, -10)
             }
             Text(Self.headerTitle(
-                for: category, subtitleScreen: subtitleScreen, playbackScreen: playbackScreen
+                for: category, subtitleScreen: subtitleScreen, playbackScreen: playbackScreen, audioScreen: audioScreen
             ))
                 .font(.headline.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(Color.primary)
             Spacer(minLength: 12)
             if category == .subtitles && subtitleScreen == .tracks {
                 // Timing (Sync) chip — only when the app's overlay owns the active
@@ -514,8 +551,10 @@ struct PlayerOptionsPanel: View {
 
     static func headerTitle(
         for category: Category, subtitleScreen: SubtitleScreen,
-        playbackScreen: PlaybackScreen = .options
+        playbackScreen: PlaybackScreen = .options,
+        audioScreen: AudioScreen = .options
     ) -> LocalizedStringResource {
+        if category == .audio, audioScreen == .dialogue { return "Enhance Dialogue" }
         if category == .playback {
             switch playbackScreen {
             case .options: return category.title
@@ -631,6 +670,60 @@ struct PlayerOptionsPanel: View {
         restoreFocus(screen == .options ? .row(PlaybackOptionsPane.zoomSlot) : preferredFocus)
     }
 
+    private func openAudioScreen(_ screen: AudioScreen) {
+        withAnimation(.easeInOut(duration: 0.28)) { audioScreen = screen }
+        #if os(tvOS)
+        if screen == .options, model.systemAudio.values[.enhanceDialogue] != nil {
+            restoreFocus(.row(SystemPlaybackAudioSetting.enhanceDialogue.rawValue))
+        } else {
+            restoreFocus(preferredFocus)
+        }
+        #endif
+    }
+
+    @ViewBuilder
+    private var audioBody: some View {
+        #if os(tvOS)
+        if audioScreen == .dialogue {
+            PlayerMenuRowStack(
+                rows: Self.dialogueRows(model: model, selected: {
+                    if audioScreen == .dialogue { openAudioScreen(.options) }
+                }),
+                palette: palette, focus: $focus
+            )
+            .padding(.horizontal, 14)
+        } else {
+            let rows = Self.audioRows(model: model, actions: actions, openDialogue: { openAudioScreen(.dialogue) })
+            PlayerOptionsInputScope(
+                screen: audioScreen, rows: rows.compactMap(\.submenu), focus: $focus,
+                content: AudioPaneView(rows: rows, palette: palette, focus: $focus, close: close)
+            )
+        }
+        #else
+        AudioPaneView(rows: Self.audioRows(model: model, actions: actions), palette: palette, focus: $focus, close: close)
+        #endif
+    }
+
+    #if os(tvOS)
+    static func dialogueRows(model: PlayerControlsModel, selected: @escaping () -> Void = {}) -> [TrackRow] {
+        let audio = model.systemAudio
+        guard audio.dialogueLevel != nil else { return [] }
+        return SystemDialogueLevel.choices.map { level in
+            TrackRow(
+                id: -200 - level.rawValue, header: nil, title: Text(level.title), subtitle: nil,
+                isSelected: audio.dialogueLevel == level, isToggle: false,
+                action: {
+                    Task {
+                        await audio.setDialogueLevel(level)
+                        if !Task.isCancelled, audio.pending.isEmpty,
+                           audio.failure == nil, audio.dialogueLevel == level { selected() }
+                    }
+                }
+            )
+        }
+    }
+    #endif
+
     static func availableSubtitleScreen(
         _ screen: SubtitleScreen, model: PlayerControlsModel, offersDualSubtitles: Bool
     ) -> SubtitleScreen {
@@ -716,9 +809,11 @@ struct PlayerOptionsPanel: View {
         }
     }
 
-    /// Audio menu rows: selectable tracks followed by the Dialog Enhance toggle
-    /// when supported. A single track is not an actionable menu row.
-    static func audioRows(model: PlayerControlsModel, actions: PlayerOptionsActions) -> [TrackRow] {
+    /// A single track is metadata, not an action. System controls remain separate
+    /// from any engine-local effect and use stable IDs across track-list changes.
+    static func audioRows(
+        model: PlayerControlsModel, actions: PlayerOptionsActions, openDialogue: @escaping () -> Void = {}
+    ) -> [TrackRow] {
         var rows: [TrackRow] = []
         var index = 0
         for option in model.audioOptions where model.hasSelectableAudio {
@@ -729,6 +824,7 @@ struct PlayerOptionsPanel: View {
                 subtitle: nil,
                 isSelected: option.isSelected,
                 isToggle: false,
+                marqueeTitle: true,
                 action: { actions.selectAudio(option.id) }
             ))
             index += 1
@@ -745,6 +841,37 @@ struct PlayerOptionsPanel: View {
             ))
             index += 1
         }
+        #if os(tvOS)
+        let audio = model.systemAudio
+        var adjustments: [TrackRow] = []
+        for setting in audio.availableSettings {
+            let enabled = audio.values[setting] == true
+            let submenu: PlayerOptionsRowSpec? = setting == .enhanceDialogue
+                ? audio.dialogueLevel.map { level in
+                    .init(slot: setting.rawValue, title: setting.title,
+                          kind: .submenu(summary: Text(level.title), open: openDialogue))
+                } : nil
+            adjustments.append(TrackRow(
+                id: setting.rawValue,
+                header: nil,
+                title: Text(setting.title),
+                subtitle: nil,
+                isSelected: submenu == nil && enabled,
+                isToggle: submenu == nil,
+                isUpdating: audio.pending.contains(setting),
+                submenu: submenu,
+                action: {
+                    if submenu != nil {
+                        openDialogue()
+                    } else {
+                        Task { await audio.setEnabled(!enabled, for: setting) }
+                    }
+                }
+            ))
+        }
+        if !adjustments.isEmpty, !rows.isEmpty { rows[0].startsSection = true }
+        rows = adjustments + rows
+        #endif
         return rows
     }
 
@@ -761,6 +888,7 @@ struct PlayerOptionsPanel: View {
                 facts: presentation.supplementalFacts.isEmpty ? nil
                     : Text(verbatim: presentation.supplementalFacts.joined(separator: " · ")),
                 titleLineLimit: nil,
+                versionPresentation: presentation,
                 action: {
                     withAnimation { close() }
                     model.versions.select(option.id)
@@ -778,12 +906,13 @@ struct PlayerOptionsPanel: View {
             // Open focused on the active subtitle (incl. "Off"), else the top row.
             return subtitleRows(model: model, actions: actions).first(where: { $0.isSelected })?.id ?? 0
         case .audio:
-            return audioRows(model: model, actions: actions).first(where: { $0.isSelected })?.id ?? 0
+            let rows = audioRows(model: model, actions: actions)
+            return rows.first(where: { !$0.isToggle && $0.isSelected })?.id ?? rows.first?.id ?? 0
         case .playback:
             return model.engineCapabilities.contains(.videoZoom) ? PlaybackOptionsPane.zoomSlot : PlaybackOptionsPane.speedSlot
         case .sync:
             return 0
-        case .info, .cast, .episodes, .playlist:
+        case .info, .cast, .chapters, .episodes, .playlist:
             return 0
         }
     }

@@ -4,25 +4,8 @@ import CoreModels
 import FeatureProfiles
 import SwiftUI
 
-public struct SettingsExitAction {
-    public let perform: () -> Void
-
-    public init(_ perform: @escaping () -> Void) { self.perform = perform }
-}
-
-private struct SettingsExitActionKey: EnvironmentKey {
-    static let defaultValue: SettingsExitAction? = nil
-}
-
 private struct SettingsWorkspaceFocusScopeKey: EnvironmentKey {
     static let defaultValue: Namespace.ID? = nil
-}
-
-public extension EnvironmentValues {
-    var settingsExitAction: SettingsExitAction? {
-        get { self[SettingsExitActionKey.self] }
-        set { self[SettingsExitActionKey.self] = newValue }
-    }
 }
 
 extension EnvironmentValues {
@@ -36,16 +19,21 @@ struct SettingsWorkspace<Sidebar: View, Detail: View>: View {
     @Bindable var navigation: SettingsNavigationModel
     @ViewBuilder var sidebar: () -> Sidebar
     @ViewBuilder var detail: (SettingsRoute) -> Detail
-    @Environment(\.settingsExitAction) private var exit
+    @Environment(\.plozzTopNavigationContentInsets) private var topNavigationInsets
+    @Environment(\.plozzNavigationStyle) private var navigationStyle
+    @Environment(NavigationChromeModel.self) private var chrome: NavigationChromeModel?
     @Namespace private var sidebarScope
 
     var body: some View {
         SettingsPageStack(
             navigation: navigation.pages, pageWidth: SettingsFormMetrics.pageWidth,
-            onRootBack: { exit?.perform() },
-            fullWidthDestination: \.usesFullScreenDetail
+            onRootBack: nil,
+            fullWidthDestination: \.usesFullScreenDetail,
+            presentsSubpagesFullScreen: navigationStyle == .sidebar,
+            onSubpagesDismiss: navigation.restoreCategoryFocus
         ) {
             sidebar()
+                .padding(.top, topNavigationInsets.top)
                 .focusSection()
                 .focusScope(sidebarScope)
                 .environment(\.settingsWorkspaceFocusScope, sidebarScope)
@@ -67,10 +55,13 @@ struct SettingsWorkspace<Sidebar: View, Detail: View>: View {
             if navigation.isCategoryOpen || !navigation.path.isEmpty {
                 navigation.enterDetail()
             } else {
-                navigation.returnToSidebar()
+                navigation.restoreCategoryFocus()
             }
         }
-        .toolbar(.hidden, for: .tabBar)
+        .reportsNavigationDepth(
+            max(navigation.pages.pages.count, navigation.pages.isTransitioning || navigation.isSearching ? 1 : 0),
+            to: chrome
+        )
     }
 }
 
@@ -98,13 +89,18 @@ private struct SettingsWorkspaceDestination<Content: View>: View {
             content()
         } else {
             content()
-                .environment(\.settingsPageBackButton, AnyView(SettingsBackButton {
+                .environment(\.settingsPageBackButton, AnyView(SettingsBackButton(usesGlass: usesGlassBackButton) {
                     dismiss()
                 }.settingsWorkspaceEntry(route: route)
-                    .settingsPageEntryFocus(enabled: !route.usesFullScreenDetail)
+                    .settingsPageEntryFocus(enabled: !route.usesFullScreenDetail && !route.isSearchResult)
                     .accessibilityIdentifier(page?.depth == 1 ? "settings-category-back" : "settings-workspace-back")))
                 .toolbar(.hidden, for: .tabBar)
         }
+    }
+
+    private var usesGlassBackButton: Bool {
+        if case .profileAppearance = route { return true }
+        return false
     }
 }
 
@@ -234,6 +230,7 @@ enum SettingsWorkspaceHeaderMetrics {
     static let outerInset = SettingsFormMetrics.groupInset
     static let controlInset = PlozzTheme.Spacing.xSmall
     static let contentInset = outerInset + controlInset
+    static let profileLabelHeight: CGFloat = 84
 }
 
 struct SettingsWorkspaceScopeBadge: View {
@@ -260,30 +257,55 @@ struct SettingsWorkspaceProfileHeader: View {
     var body: some View {
         HStack(spacing: 12) {
             Button(action: onSwitch) {
-                HStack(spacing: SettingsWorkspaceHeaderMetrics.labelSpacing) {
-                    ProfileAvatarView(profile: profile, size: SettingsWorkspaceHeaderMetrics.iconSize)
-                        .accessibilityIdentifier("settings-profile-avatar")
-                    Text(verbatim: profile.name)
-                        .font(SettingsWorkspaceHeaderMetrics.titleFont)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .accessibilityIdentifier("settings-profile-name")
-                    Spacer(minLength: 0)
-                }
-                .padding(SettingsWorkspaceHeaderMetrics.controlInset)
+                SettingsWorkspaceProfileLabel(profile: profile)
             }
             .buttonStyle(SettingsFocusButtonStyle(size: .contained))
             .accessibilityLabel("Switch Profile")
             .accessibilityValue(Text(verbatim: profile.name))
             .accessibilityIdentifier("settings-profile-switch")
             if canEdit {
-                SettingsPageActionLink(action: onEdit) { Text("Edit") }
+                SettingsPageActionLink(action: onEdit) {
+                    Text("Edit").padding(.vertical, PlozzTheme.Spacing.small)
+                }
                     .buttonStyle(.bordered)
                     .accessibilityIdentifier("settings-profile-edit")
             }
         }
         .disabled(navigation.focusInDetail || navigation.restoringSidebar || navigation.enteringDetail)
         .padding(SettingsWorkspaceHeaderMetrics.outerInset)
+    }
+}
+
+struct SettingsWorkspaceProfileLabel: View {
+    let profile: Profile
+    @Environment(\.settingsRowIsFocused) private var isFocused
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: SettingsWorkspaceHeaderMetrics.labelSpacing) {
+            ProfileAvatarView(profile: profile, size: SettingsWorkspaceHeaderMetrics.iconSize)
+                .accessibilityIdentifier("settings-profile-avatar")
+            ZStack(alignment: .leading) {
+                Text(verbatim: profile.name)
+                    .font(SettingsWorkspaceHeaderMetrics.titleFont)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .offset(y: isFocused ? -17 : 0)
+                    .accessibilityIdentifier("settings-profile-name")
+                Text("Switch profile")
+                    .font(SettingsRowMetrics.helperFont)
+                    .settingsRowSecondary()
+                    .lineLimit(1)
+                    .offset(y: isFocused ? 22 : 14)
+                    .opacity(isFocused ? 1 : 0)
+                    .accessibilityHidden(true)
+                    .accessibilityIdentifier("settings-profile-switch-hint")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: isFocused)
+        }
+        .frame(height: SettingsWorkspaceHeaderMetrics.profileLabelHeight)
+        .padding(SettingsWorkspaceHeaderMetrics.controlInset)
     }
 }
 #endif

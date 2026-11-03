@@ -29,6 +29,8 @@ public struct MediaTrack: Hashable, Identifiable, Sendable {
     /// hints in the track menu ("PGS", "SRT") and image-vs-text reasoning.
     /// `nil` when the provider/engine didn't report one.
     public var codec: String?
+    /// Per-track source profile, independent of the decoder or output route.
+    public var profile: String?
     public var isDefault: Bool
     public var isForced: Bool
     /// Audio channel count where known (`2` stereo, `6` 5.1, `8` 7.1). `nil` for
@@ -36,8 +38,9 @@ public struct MediaTrack: Hashable, Identifiable, Sendable {
     /// format hint ("5.1"/"7.1") in the track menu.
     public var channels: Int?
     /// `true` for Dolby Atmos audio (object-based; the channel count is just the
-    /// bed). When set, the menu shows "Dolby Atmos" instead of the bed layout.
+    /// bed). The menu retains the underlying codec and omits the bed layout.
     public var isAtmos: Bool
+    public var isDTSX: Bool
     /// `true` for hearing-impaired / SDH tracks (container disposition). A
     /// reliable signal that supersedes the title-text "SDH" heuristic.
     public var isHearingImpaired: Bool
@@ -68,10 +71,12 @@ public struct MediaTrack: Hashable, Identifiable, Sendable {
         displayTitle: String,
         language: String? = nil,
         codec: String? = nil,
+        profile: String? = nil,
         isDefault: Bool = false,
         isForced: Bool = false,
         channels: Int? = nil,
         isAtmos: Bool = false,
+        isDTSX: Bool = false,
         isHearingImpaired: Bool = false,
         isCommentary: Bool = false,
         deliverySource: SubtitleDeliverySource? = nil,
@@ -83,10 +88,12 @@ public struct MediaTrack: Hashable, Identifiable, Sendable {
         self.displayTitle = displayTitle
         self.language = language
         self.codec = codec
+        self.profile = profile
         self.isDefault = isDefault
         self.isForced = isForced
         self.channels = channels
         self.isAtmos = isAtmos
+        self.isDTSX = isDTSX
         self.isHearingImpaired = isHearingImpaired
         self.isCommentary = isCommentary
         self.deliverySource = deliverySource
@@ -285,12 +292,66 @@ public struct MediaSourceMetadata: Hashable, Sendable, Codable {
     }
 }
 
+/// Server decisions are evidence, not permission to bypass a required conversion.
+public struct PlaybackServerDecision: Codable, Hashable, Sendable {
+    public let sourceBitrate: Int?
+    public let clientMaxBitrate: Int?
+    public let supportsDirectPlay: Bool?
+    public let supportsDirectStream: Bool?
+    public let supportsTranscoding: Bool?
+    public let subtitleBurnIn: Bool
+    public let transcodeReasons: [String]?
+
+    public init(
+        sourceBitrate: Int?, clientMaxBitrate: Int?,
+        supportsDirectPlay: Bool?, supportsDirectStream: Bool?, supportsTranscoding: Bool?,
+        subtitleBurnIn: Bool, transcodeReasons: [String]?
+    ) {
+        self.sourceBitrate = sourceBitrate.flatMap { Self.validBitrate($0) ? $0 : nil }
+        self.clientMaxBitrate = clientMaxBitrate.flatMap { Self.validBitrate($0) ? $0 : nil }
+        self.supportsDirectPlay = supportsDirectPlay
+        self.supportsDirectStream = supportsDirectStream
+        self.supportsTranscoding = supportsTranscoding
+        self.subtitleBurnIn = subtitleBurnIn
+        self.transcodeReasons = transcodeReasons.map { reasons in
+            var seen = Set<String>()
+            return reasons.prefix(32).map { Self.allowedReasons.contains($0) ? $0 : "Other" }
+                .filter { seen.insert($0).inserted }
+        }
+    }
+
+    var isValid: Bool {
+        sourceBitrate.map(Self.validBitrate) != false
+            && clientMaxBitrate.map(Self.validBitrate) != false
+            && transcodeReasons.map {
+                $0.count <= 32 && $0.allSatisfy(Self.allowedReasons.contains)
+            } != false
+    }
+
+    private static func validBitrate(_ value: Int) -> Bool { (1...Int(Int32.max)).contains(value) }
+
+    private static let allowedReasons: Set<String> = [
+        "ContainerNotSupported", "VideoCodecNotSupported", "AudioCodecNotSupported",
+        "SubtitleCodecNotSupported", "AudioIsExternal", "SecondaryAudioNotSupported",
+        "StreamCountExceedsLimit", "VideoProfileNotSupported", "VideoRangeTypeNotSupported",
+        "VideoCodecTagNotSupported", "VideoLevelNotSupported", "VideoResolutionNotSupported",
+        "VideoBitDepthNotSupported", "VideoFramerateNotSupported", "VideoRotationNotSupported",
+        "RefFramesNotSupported", "AnamorphicVideoNotSupported", "InterlacedVideoNotSupported",
+        "AudioChannelsNotSupported", "AudioProfileNotSupported", "AudioSampleRateNotSupported",
+        "AudioBitDepthNotSupported", "ContainerBitrateExceedsLimit", "VideoBitrateNotSupported",
+        "AudioBitrateNotSupported", "UnknownVideoStreamInfo", "UnknownAudioStreamInfo",
+        "DirectPlayError", "Other"
+    ]
+}
+
 /// Everything `FeaturePlayback` needs to start playing an item.
 ///
 /// Built by a provider's `playbackInfo(for:)`. The provider decides whether to
 /// direct-play or transcode and hands back either a legacy resolved URL or a
 /// credential-free typed source.
 public struct PlaybackRequest: Hashable, Sendable {
+    /// Bounded server negotiation facts, retained for optional diagnostic exports.
+    public var serverDecision: PlaybackServerDecision?
     /// Library channels own a separate interval-based reporting path; accidental
     /// use in the ordinary reporter must still fail closed.
     public var suppressOrdinaryWatchReporting: Bool = false
@@ -321,6 +382,8 @@ public struct PlaybackRequest: Hashable, Sendable {
     public var playSessionID: String?
     public var audioTracks: [MediaTrack]
     public var subtitleTracks: [MediaTrack]
+    /// Optional server-authored chapters. Empty sources expose no chapter controls.
+    public var chapters: [MediaChapter] = []
     /// Provider stream index already encoded into this rendition's video pixels.
     /// The client must not draw it again; changing it requires a new rendition.
     public var burnedInSubtitleTrackID: Int?
@@ -376,9 +439,6 @@ public struct PlaybackRequest: Hashable, Sendable {
     /// express no preference (engine uses the container default). Not part of the
     /// memberwise init so the many provider construction sites stay untouched.
     public var preferredAudioLanguages: [String] = []
-    /// TrueHD Atmos/DTS:X profile preference, not inferred from provider metadata.
-    /// Unsupported platforms and playback paths ignore this request.
-    public var trueHDAtmosEnabled: Bool = PlaybackSettings.default.trueHDAtmosEnabled
     /// Explicit provider/container stream index used only when a resolved
     /// language cannot match because every audio track is untagged. Language
     /// matching remains authoritative whenever tags exist; this deterministic

@@ -212,19 +212,31 @@ public enum PlozziOSDownloadNotificationBridge {
 }
 
 @MainActor
-private final class PlozziOSDownloadNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+final class PlozziOSDownloadNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     static let shared = PlozziOSDownloadNotificationDelegate()
 
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
-        didReceive response: UNNotificationResponse
-    ) async {
-        guard let target = PlozziOSDownloadNotificationBridge.target(
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping @Sendable () -> Void
+    ) {
+        let target = PlozziOSDownloadNotificationBridge.target(
             actionIdentifier: response.actionIdentifier,
             requestIdentifier: response.notification.request.identifier,
             userInfo: response.notification.request.content.userInfo
-        ) else { return }
-        await PlozziOSDownloadNotificationNavigation.shared.receive(target)
+        )
+        Self.complete(target: target, completionHandler: completionHandler)
+    }
+
+    nonisolated static func complete(
+        target: PlozziOSDownloadNotificationTarget?,
+        completionHandler: @escaping @Sendable () -> Void
+    ) {
+        // UIKit snapshots after this completion, including ignored notifications.
+        Task { @MainActor in
+            if let target { PlozziOSDownloadNotificationNavigation.shared.receive(target) }
+            completionHandler()
+        }
     }
 }
 #endif

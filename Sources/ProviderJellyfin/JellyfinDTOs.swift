@@ -66,6 +66,45 @@ struct ItemsResponse: Decodable {
     let TotalRecordCount: Int?
 }
 
+struct MovieRecommendationsResponse: Decodable {
+    let recommendations: [MovieRecommendationDto]
+
+    private struct EnvelopeKey: CodingKey {
+        let stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { return nil }
+
+        static let items = EnvelopeKey(stringValue: "Items")!
+        static let total = EnvelopeKey(stringValue: "TotalRecordCount")!
+        static let start = EnvelopeKey(stringValue: "StartIndex")!
+    }
+
+    init(from decoder: Decoder) throws {
+        if (try? decoder.unkeyedContainer()) != nil {
+            recommendations = try [MovieRecommendationDto](from: decoder)
+            return
+        }
+        // The compatible bridge returns this exact empty query-result envelope.
+        // A populated query result has no established recommendation-category contract.
+        let values = try decoder.container(keyedBy: EnvelopeKey.self)
+        guard Set(values.allKeys.map(\.stringValue)) == ["Items", "TotalRecordCount", "StartIndex"] else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath, debugDescription: "Unrecognized movie recommendation envelope."
+            ))
+        }
+        let items = try values.nestedUnkeyedContainer(forKey: .items)
+        let total = try values.decode(Int.self, forKey: .total)
+        let start = try values.decode(Int.self, forKey: .start)
+        guard items.isAtEnd, total == 0, start == 0 else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath, debugDescription: "Expected a complete empty movie recommendation result."
+            ))
+        }
+        recommendations = []
+    }
+}
+
 struct MovieRecommendationDto: Decodable {
     let Items: [BaseItemDto]?
     let RecommendationType: String
@@ -101,6 +140,8 @@ struct UserViewsResponse: Decodable {
 struct ChapterInfoDto: Decodable {
     let StartPositionTicks: Int64?
     let MarkerType: String?
+    let Name: String?
+    let ImageTag: String?
 }
 
 struct BaseItemDto: Decodable {
@@ -156,6 +197,7 @@ struct BaseItemDto: Decodable {
     let MediaSources: [MediaSourceInfo]?
     let MediaStreams: [MediaStreamDto]?
     let ImageTags: [String: String]?
+    let PrimaryImageAspectRatio: Double?
     let BackdropImageTags: [String]?
     /// Emby exposes intro and credits markers as chapter entries.
     let Chapters: [ChapterInfoDto]?
@@ -284,6 +326,7 @@ struct MediaSourceInfo: Decodable {
     let SupportsTranscoding: Bool?
     let RequiresOpening: Bool?
     let RequiresClosing: Bool?
+    let IsRemote: Bool?
     let VideoType: String?
     let IsInfiniteStream: Bool?
     let Container: String?
@@ -311,7 +354,7 @@ struct MediaSourceInfo: Decodable {
 /// lets the server choose DirectPlay vs a seekable HLS transcode for this device.
 struct PlaybackInfoBody: Encodable {
     let UserId: String
-    let MaxStreamingBitrate: Int
+    let MaxStreamingBitrate: Int?
     let AutoOpenLiveStream: Bool
     let MediaSourceId: String?
     let EnableDirectPlay: Bool?

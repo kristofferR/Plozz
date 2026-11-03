@@ -14,5 +14,9 @@ final class LibraryQueryPresentation {
     @ObservationIgnored var facetsTask: Task<Void, Never>?
     var progress: Double?
     var message: LocalizedStringResource?
+    var failureDiagnostic: LibraryLoadDiagnostic?
+    var collectionProgress: LibraryCollectionProgress?
+    var collectionScanIncomplete = false
+    var firstPageLoading = false
     var capabilitiesRevision = 0
 }

@@ -20,6 +20,7 @@ public struct LiveTVPlaylistSource: Codable, Equatable, Identifiable, Sendable {
         }
     }
     public var guideSourceIDs: [String]
+    /// Legacy wire value; playlist guide discovery is now automatic.
     public var discoversPlaylistGuides: Bool
     public var guideLookbackDays: Int
     public var guideLookaheadDays: Int

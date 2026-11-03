@@ -4,6 +4,76 @@ import XCTest
 @testable import FeaturePlayback
 
 final class SubtitleOverlayGeometryTests: XCTestCase {
+    func testPictureReferenceUsesVisiblePictureAndScreenDefaultIsUnchanged() {
+        let bounds = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let active = CGRect(x: 0, y: 160, width: 1920, height: 760)
+        var style = SubtitleStyle.default
+        XCTAssertEqual(SubtitleOverlayGeometry.positionReference(style: style, video: active, active: active, bounds: bounds), bounds)
+        style.positionReference = .picture
+        XCTAssertEqual(SubtitleOverlayGeometry.positionReference(style: style, video: bounds, active: active, bounds: bounds), active)
+        XCTAssertEqual(SubtitleOverlayGeometry.positionReference(style: style, video: active, active: nil, bounds: bounds), active)
+        XCTAssertEqual(SubtitleOverlayGeometry.positionReference(style: style, video: bounds, active: .null, bounds: bounds), bounds)
+    }
+
+    func testPictureBitmapDialogueMovesTogetherWithoutResizingArtwork() throws {
+        let bitmap = try XCTUnwrap(CGContext(
+            data: nil, width: 2, height: 2, bitsPerComponent: 8, bytesPerRow: 8,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )?.makeImage())
+        let images = [
+            SubtitleImage(cgImage: bitmap, normalizedRect: CGRect(x: 0.2, y: 0.84, width: 0.6, height: 0.04)),
+            SubtitleImage(cgImage: bitmap, normalizedRect: CGRect(x: 0.2, y: 0.90, width: 0.6, height: 0.04)),
+            SubtitleImage(cgImage: bitmap, normalizedRect: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.1),
+                          controlAvoidance: .fixed)
+        ]
+        let video = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let picture = CGRect(x: 0, y: 150, width: 1920, height: 780)
+        var style = SubtitleStyle.default
+        style.positionReference = .picture
+        let offsets = SubtitleOverlayGeometry.pictureBitmapOffsets(
+            images: images, style: style, video: video, reference: picture, bounds: video,
+            controls: [], sourceAspectRatio: nil
+        )
+        XCTAssertEqual(offsets.count, 2)
+        let offset = try XCTUnwrap(offsets[0])
+        XCTAssertEqual(offsets[1], offset)
+        XCTAssertLessThan(offset, 0)
+        XCTAssertNil(offsets[2])
+        for index in 0...1 {
+            let original = SubtitleOverlayGeometry.bitmapRect(
+                normalizedRect: images[index].normalizedRect, canvasSize: .zero, videoRect: video
+            )
+            XCTAssertTrue(picture.contains(original.offsetBy(dx: 0, dy: offset)))
+        }
+        XCTAssertTrue(SubtitleOverlayGeometry.pictureBitmapOffsets(
+            images: images, style: style, video: video, reference: picture, bounds: video,
+            controls: [picture], sourceAspectRatio: nil
+        ).isEmpty, "Do not move a dialogue group into controls when no clear position exists.")
+        style.positionReference = .screen
+        XCTAssertTrue(SubtitleOverlayGeometry.pictureBitmapOffsets(
+            images: images, style: style, video: video, reference: picture, bounds: video,
+            controls: [], sourceAspectRatio: nil
+        ).isEmpty)
+    }
+    func testPictureBitmapRejectsCollisionWithAnotherImagesFinalControlAvoidancePosition() throws {
+        let bitmap = try XCTUnwrap(CGContext(
+            data: nil, width: 2, height: 2, bitsPerComponent: 8, bytesPerRow: 8,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )?.makeImage())
+        let video = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let picture = CGRect(x: 0, y: 150, width: 1920, height: 780)
+        let images = [640.0, 900.0].map { y in
+            SubtitleImage(cgImage: bitmap, normalizedRect: CGRect(x: 0.2, y: y / 1080, width: 0.6, height: 40.0 / 1080))
+        }
+        var style = SubtitleStyle.default
+        style.positionReference = .picture
+        style.verticalPosition = 320.0 / 780
+        XCTAssertTrue(SubtitleOverlayGeometry.pictureBitmapOffsets(
+            images: images, style: style, video: video, reference: picture, bounds: video,
+            controls: [CGRect(x: 0, y: 650, width: 1920, height: 150)], sourceAspectRatio: nil
+        ).isEmpty)
+    }
+
     func testStretchedBitmapAvoidanceUsesTheSameMappingAsTheRenderedArtwork() throws {
         let bitmap = try XCTUnwrap(CGContext(
             data: nil, width: 2, height: 2, bitsPerComponent: 8, bytesPerRow: 8,
@@ -174,16 +244,58 @@ final class SubtitleOverlayGeometryTests: XCTestCase {
         }
     }
 
-    func testOversizedCaptionsRemainInsideTheTopEdgeWhenThereIsTooLittleRoom() {
+    func testOversizedCaptionsUseThePlatformFallbackWhenThereIsTooLittleRoom() {
         let bounds = CGRect(x: 0, y: 0, width: 844, height: 390)
         let subtitle = CGRect(x: 40, y: 120, width: 760, height: 260)
         let lift = SubtitleOverlayGeometry.upwardOffset(
             for: subtitle, avoiding: CGRect(x: 20, y: 220, width: 800, height: 170),
             in: bounds, clearance: 12
         )
+        #if os(iOS)
+        XCTAssertEqual(lift, 0, "Do not partly lift a caption that still cannot clear the controls.")
+        #else
         XCTAssertEqual(lift, -120)
         XCTAssertEqual(subtitle.minY + lift, 0)
+        #endif
     }
+
+    #if os(iOS)
+    func testMobileAvoidanceRestoresTheOriginalPositionIfALaterObstructionCannotBeCleared() {
+        let bounds = CGRect(x: 0, y: 0, width: 956, height: 440)
+        let lower = CGRect(x: 21, y: 350, width: 914, height: 60)
+        let center = CGRect(x: 300, y: 174, width: 356, height: 92)
+        let subtitle = CGRect(x: 350, y: 240, width: 256, height: 170)
+        for controls in [[lower, center], [center, lower]] {
+            XCTAssertEqual(SubtitleOverlayGeometry.upwardOffset(
+                for: subtitle, avoiding: controls, in: bounds
+            ), 0)
+        }
+        let smaller = CGRect(x: 350, y: 310, width: 256, height: 100)
+        let top = CGRect(x: 300, y: 50, width: 356, height: 120)
+        XCTAssertEqual(SubtitleOverlayGeometry.upwardOffset(
+            for: smaller, avoiding: [lower, center, top], in: bounds
+        ), 0, "Fitting above the middle controls is not enough if another visible control occupies that space.")
+    }
+
+    @MainActor
+    func testMobileCenterTransportLeavesTheGapBelowItAvailableForSubtitles() {
+        let layout = SubtitleControlsLayout()
+        let center = CGRect(x: 300, y: 174, width: 356, height: 92)
+        layout.setFrame(center, for: .centerTransport)
+        layout.setFrame(CGRect(x: 21, y: 350, width: 914, height: 38), for: .timeline)
+        let subtitle = CGRect(x: 350, y: 295, width: 256, height: 40)
+        let bounds = CGRect(x: 0, y: 0, width: 956, height: 440)
+        let lift = SubtitleOverlayGeometry.upwardOffset(for: subtitle, avoiding: layout.frames, in: bounds)
+        XCTAssertEqual(lift, 0, "A caption already in clear space below the center buttons must not move.")
+        XCTAssertEqual(layout.frame(for: .centerTransport), center, "The measured button row remains its actual size.")
+        let overlapping = subtitle.offsetBy(dx: 0, dy: 35)
+        let minimumLift = SubtitleOverlayGeometry.upwardOffset(for: overlapping, avoiding: layout.frames, in: bounds)
+        XCTAssertEqual(overlapping.maxY + minimumLift, 350 - SubtitleOverlayGeometry.controlsClearance)
+        XCTAssertGreaterThan(overlapping.minY + minimumLift, center.maxY)
+        layout.setFrame(nil, for: .centerTransport)
+        XCTAssertEqual(SubtitleOverlayGeometry.upwardOffset(for: subtitle, avoiding: layout.frames, in: bounds), 0)
+    }
+    #endif
 
     func testLetterboxedBitmapUsesDisplaySpaceForControlIntersection() throws {
         let bounds = CGRect(x: 0, y: 0, width: 1920, height: 1080)

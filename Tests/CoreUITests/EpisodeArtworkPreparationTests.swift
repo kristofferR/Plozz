@@ -7,6 +7,45 @@ import XCTest
 
 @MainActor
 final class EpisodeArtworkPreparationTests: XCTestCase {
+    func testContinueWatchingChoicesOnlyExposeSupportedPresentations() {
+        XCTAssertEqual(ContinueWatchingArtworkStyle.allCases.count, 3)
+        XCTAssertEqual(ContinueWatchingArtworkStyle.logoAndArtwork.layout, .landscape)
+        XCTAssertTrue(ContinueWatchingArtworkStyle.logoAndArtwork.showsSeriesArtwork)
+        XCTAssertEqual(ContinueWatchingArtworkStyle.thumbnail.layout, .landscape)
+        XCTAssertFalse(ContinueWatchingArtworkStyle.thumbnail.showsSeriesArtwork)
+        XCTAssertEqual(ContinueWatchingArtworkStyle.portraitPosters.layout, .portrait)
+        XCTAssertTrue(ContinueWatchingArtworkStyle.portraitPosters.showsSeriesArtwork)
+    }
+
+    func testPortraitContinueWatchingUsesPostersWithoutTextlessBackdropsOrEpisodeStills() throws {
+        let poster = try XCTUnwrap(URL(string: "https://example.test/poster.jpg"))
+        let backdrop = try XCTUnwrap(URL(string: "https://example.test/backdrop.jpg"))
+        let still = try XCTUnwrap(URL(string: "https://example.test/episode.jpg"))
+        for kind in [MediaItemKind.movie, .episode] {
+            let item = MediaItem(
+                id: "portrait-\(kind)", title: "Title", kind: kind,
+                posterURL: kind == .episode ? still : poster,
+                seriesPosterURL: kind == .episode ? poster : nil, backdropURL: backdrop,
+                fallbackArtworkURL: backdrop
+            )
+            for preference in ArtworkPreference.allCases {
+                let source = ContinueWatchingArtworkSource(
+                    item: item, style: .poster,
+                    policy: .init(area: .continueWatching, settings: .init(preference: preference))
+                )
+                XCTAssertFalse(source.prefersTextlessBackdrop)
+                XCTAssertNil(source.primaryReference(textlessBackdrop: backdrop))
+                XCTAssertEqual(source.references(textlessBackdrop: backdrop).first, .remote(poster))
+                XCTAssertFalse(source.references(textlessBackdrop: backdrop).contains(.remote(still)))
+                XCTAssertEqual(source.variant, .posterCard)
+                XCTAssertEqual(source.aspectGuard, 0.9)
+                XCTAssertNotEqual(source.identity, ContinueWatchingArtworkSource(
+                    item: item, style: .landscape, policy: source.policy
+                ).identity)
+            }
+        }
+    }
+
     func testContinueWatchingPreparesNetworkShareArtworkWithoutURLConversion() async throws {
         let image = UIGraphicsImageRenderer(size: CGSize(width: 160, height: 90)).image {
             UIColor.green.setFill()

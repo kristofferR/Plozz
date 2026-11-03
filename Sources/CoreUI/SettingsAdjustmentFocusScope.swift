@@ -8,21 +8,45 @@ public enum SettingsMoveCommandDirection {
 #if os(tvOS)
 import UIKit
 
+public enum SettingsAdjustmentRepeatSpeed: Sendable {
+    case standard
+    case fast
+
+    var interval: TimeInterval {
+        switch self {
+        case .standard: 0.08
+        case .fast: 0.03
+        }
+    }
+}
+
+private struct SettingsAdjustmentRepeatSpeedKey: EnvironmentKey {
+    static let defaultValue = SettingsAdjustmentRepeatSpeed.standard
+}
+
+public extension EnvironmentValues {
+    var settingsAdjustmentRepeatSpeed: SettingsAdjustmentRepeatSpeed {
+        get { self[SettingsAdjustmentRepeatSpeedKey.self] }
+        set { self[SettingsAdjustmentRepeatSpeedKey.self] = newValue }
+    }
+}
+
 @MainActor
 public protocol SettingsAdjustmentRemoteInput: AnyObject, HorizontalNavigationInputOwning {
     func beginPress(_ direction: SettingsMoveCommandDirection)
     func stopRepeating()
 }
 
-/// Owns horizontal press/swipe input before native directional focus can consume
-/// it. Up/Down and non-adjustable rows remain under the native focus engine.
+/// Owns adjustment input on one axis without moving native focus to another row.
 public struct SettingsAdjustmentFocusScope<Content: View, Screen: Equatable>: UIViewControllerRepresentable {
+    @Environment(\.settingsAdjustmentRepeatSpeed) private var repeatSpeed
     let content: Content
     let screen: Screen
     let adjustableRow: () -> Int?
     let submenuRow: () -> Int?
     let onMove: (SettingsMoveCommandDirection, Bool) -> Void
     let idealWidth: CGFloat
+    let axis: Axis
 
     public init(
         content: Content,
@@ -30,6 +54,7 @@ public struct SettingsAdjustmentFocusScope<Content: View, Screen: Equatable>: UI
         adjustableRow: @escaping () -> Int?,
         submenuRow: @escaping () -> Int? = { nil },
         idealWidth: CGFloat = SettingsFormMetrics.pageWidth,
+        axis: Axis = .horizontal,
         onMove: @escaping (SettingsMoveCommandDirection, Bool) -> Void
     ) {
         self.content = content
@@ -37,6 +62,7 @@ public struct SettingsAdjustmentFocusScope<Content: View, Screen: Equatable>: UI
         self.adjustableRow = adjustableRow
         self.submenuRow = submenuRow
         self.idealWidth = idealWidth
+        self.axis = axis
         self.onMove = onMove
     }
 
@@ -45,6 +71,8 @@ public struct SettingsAdjustmentFocusScope<Content: View, Screen: Equatable>: UI
         controller.view.backgroundColor = .clear
         controller.safeAreaRegions = []
         controller.screen = screen
+        controller.axis = axis
+        controller.repeatSpeed = repeatSpeed
         controller.adjustableRow = adjustableRow
         controller.submenuRow = submenuRow
         controller.onMove = onMove
@@ -53,6 +81,8 @@ public struct SettingsAdjustmentFocusScope<Content: View, Screen: Equatable>: UI
 
     public func updateUIViewController(_ controller: Controller, context: Context) {
         controller.screen = screen
+        controller.axis = axis
+        controller.repeatSpeed = repeatSpeed
         controller.rootView = hostedContent(environment: context.environment)
         controller.adjustableRow = adjustableRow
         controller.submenuRow = submenuRow
@@ -96,12 +126,22 @@ public struct SettingsAdjustmentFocusScope<Content: View, Screen: Equatable>: UI
                 if oldValue != screen { stopRepeating() }
             }
         }
+        var axis: Axis = .horizontal {
+            didSet {
+                if oldValue != axis { stopRepeating() }
+            }
+        }
+        var repeatSpeed: SettingsAdjustmentRepeatSpeed = .standard {
+            didSet {
+                if oldValue != repeatSpeed { stopRepeating() }
+            }
+        }
         private var heldRow: Int?
         private weak var heldItem: (any UIFocusItem)?
         private var heldDirection: SettingsMoveCommandDirection?
         private var repeatWork: DispatchWorkItem?
         private var repeatGeneration: UInt64 = 0
-        public var ownsHorizontalNavigationInput: Bool { focusedAdjustableRow != nil }
+        public var ownsHorizontalNavigationInput: Bool { axis == .horizontal && focusedAdjustableRow != nil }
 
         public override func viewDidLoad() {
             super.viewDidLoad()
@@ -111,7 +151,7 @@ public struct SettingsAdjustmentFocusScope<Content: View, Screen: Equatable>: UI
             press.finished = { [weak self] in self?.stopRepeating() }
             view.addGestureRecognizer(press)
 
-            let pan = HorizontalPanRecognizer(target: self, action: #selector(swiped(_:)))
+            let pan = DirectionalPanRecognizer(target: self, action: #selector(swiped(_:)))
             pan.allowedPressTypes = []
             pan.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirect.rawValue)]
             pan.delegate = self
@@ -127,10 +167,35 @@ public struct SettingsAdjustmentFocusScope<Content: View, Screen: Equatable>: UI
             super.viewWillDisappear(animated)
         }
 
+        public override func viewDidLayoutSubviews() {
+            super.viewDidLayoutSubviews()
+            guard axis == .vertical, focusedAdjustableRow != nil,
+                  let item = UIFocusSystem.focusSystem(for: view)?.focusedItem else { return }
+            var ancestor = view.superview
+            while let parent = ancestor {
+                if let scroll = parent as? UIScrollView {
+                    var environment: (any UIFocusEnvironment)? = item
+                    while let current = environment {
+                        if let container = current.focusItemContainer {
+                            let frame = container.coordinateSpace.convert(item.frame, to: scroll)
+                            // Moving the focused item does not trigger UIKit's normal focus-scroll handoff.
+                            scroll.scrollRectToVisible(frame.insetBy(dx: 0, dy: -24), animated: false)
+                            return
+                        }
+                        environment = current.parentFocusEnvironment
+                    }
+                    return
+                }
+                ancestor = parent.superview
+            }
+        }
+
         public override func shouldUpdateFocus(in context: UIFocusUpdateContext) -> Bool {
             if owns(context.previouslyFocusedItem) {
                 if adjustableRow?() != nil,
-                   !context.focusHeading.intersection([.left, .right]).isEmpty { return false }
+                   !context.focusHeading.intersection(axis == .horizontal ? [.left, .right] : [.up, .down]).isEmpty {
+                    return false
+                }
                 if submenuRow?() != nil, context.focusHeading.contains(.right) { return false }
             }
             return super.shouldUpdateFocus(in: context)
@@ -154,7 +219,10 @@ public struct SettingsAdjustmentFocusScope<Content: View, Screen: Equatable>: UI
         }
 
         private func accepts(_ direction: SettingsMoveCommandDirection) -> Bool {
-            focusedAdjustableRow != nil || (direction == .right && focusedSubmenuRow != nil)
+            let onAxis = axis == .horizontal
+                ? direction == .left || direction == .right
+                : direction == .up || direction == .down
+            return onAxis && (focusedAdjustableRow != nil || (direction == .right && focusedSubmenuRow != nil))
         }
 
         private func owns(_ item: (any UIFocusItem)?) -> Bool {
@@ -169,6 +237,8 @@ public struct SettingsAdjustmentFocusScope<Content: View, Screen: Equatable>: UI
             switch press.type {
             case .leftArrow: accepts(.left)
             case .rightArrow: accepts(.right)
+            case .upArrow: accepts(.up)
+            case .downArrow: accepts(.down)
             default: false
             }
         }
@@ -182,18 +252,23 @@ public struct SettingsAdjustmentFocusScope<Content: View, Screen: Equatable>: UI
                 return focusedAdjustableRow != nil || focusedSubmenuRow != nil
             }
             let velocity = pan.velocity(in: view)
-            return heldRow == nil && abs(velocity.x) > abs(velocity.y)
-                && accepts(velocity.x < 0 ? .left : .right)
+            let onAxis = axis == .horizontal ? abs(velocity.x) > abs(velocity.y) : abs(velocity.y) > abs(velocity.x)
+            return heldRow == nil && onAxis && accepts(direction(for: velocity))
+        }
+
+        private func direction(for velocity: CGPoint) -> SettingsMoveCommandDirection {
+            axis == .horizontal ? (velocity.x < 0 ? .left : .right) : (velocity.y < 0 ? .up : .down)
         }
 
         @objc private func swiped(_ recognizer: UIPanGestureRecognizer) {
-            let direction: SettingsMoveCommandDirection = recognizer.velocity(in: view).x < 0 ? .left : .right
+            let direction = direction(for: recognizer.velocity(in: view))
             guard recognizer.state == .began, heldRow == nil, accepts(direction) else { return }
             onMove?(direction, false)
         }
 
         public func beginPress(_ direction: SettingsMoveCommandDirection) {
             stopRepeating()
+            guard accepts(direction) else { return }
             if direction == .right, focusedSubmenuRow != nil {
                 onMove?(direction, false)
                 return
@@ -214,7 +289,7 @@ public struct SettingsAdjustmentFocusScope<Content: View, Screen: Equatable>: UI
                       let direction = self.heldDirection else { return }
                 self.onMove?(direction, true)
                 if self.repeatGeneration == generation {
-                    self.scheduleRepeat(after: 0.08)
+                    self.scheduleRepeat(after: self.repeatSpeed.interval)
                 }
             }
             repeatWork = work
@@ -247,7 +322,7 @@ public struct SettingsAdjustmentFocusScope<Content: View, Screen: Equatable>: UI
 
         init() {
             super.init(target: nil, action: nil)
-            allowedPressTypes = [UIPress.PressType.leftArrow, .rightArrow].map {
+            allowedPressTypes = [UIPress.PressType.leftArrow, .rightArrow, .upArrow, .downArrow].map {
                 NSNumber(value: $0.rawValue)
             }
             allowedTouchTypes = []
@@ -256,7 +331,13 @@ public struct SettingsAdjustmentFocusScope<Content: View, Screen: Equatable>: UI
         override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent) {
             guard state == .possible, let press = presses.first else { return }
             state = .began
-            began?(press.type == .leftArrow ? .left : .right)
+            switch press.type {
+            case .leftArrow: began?(.left)
+            case .rightArrow: began?(.right)
+            case .upArrow: began?(.up)
+            case .downArrow: began?(.down)
+            default: break
+            }
         }
 
         override func pressesChanged(_ presses: Set<UIPress>, with event: UIPressesEvent) {}
@@ -281,7 +362,7 @@ public struct SettingsAdjustmentFocusScope<Content: View, Screen: Equatable>: UI
         }
     }
 
-    private final class HorizontalPanRecognizer: UIPanGestureRecognizer {
+    private final class DirectionalPanRecognizer: UIPanGestureRecognizer {
         override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool {
             false
         }

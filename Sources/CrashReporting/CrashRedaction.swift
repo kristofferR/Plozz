@@ -32,6 +32,14 @@ enum CrashRedaction {
                let value = event.context?[category]?["low_memory"] as? Bool {
                 safe["low_memory"] = value
             }
+            if category == "app" {
+                for key in ["in_foreground", "is_active"] {
+                    if let value = event.context?[category]?[key] as? NSNumber,
+                       CFGetTypeID(value) == CFBooleanGetTypeID() {
+                        safe[key] = value.boolValue
+                    }
+                }
+            }
             if !safe.isEmpty { context[category] = safe }
         }
         if let raw = event.context?[CrashPerformanceContext.key],
@@ -69,6 +77,22 @@ enum CrashRedaction {
                 }
             }
             if !counts.isEmpty { context["playlist_import"] = counts }
+        }
+        if event.tags?["report.kind"] == "device-setup" {
+            guard let raw = event.context?["device_setup"],
+                  let bytes = try? JSONSerialization.data(withJSONObject: raw),
+                  let diagnostic = try? JSONDecoder().decode(DeviceSetupDiagnostic.self, from: bytes),
+                  diagnostic.isValid, diagnostic.outcome == .failed else { return nil }
+            context["device_setup"] = SentryCrashReporter.deviceSetupData(diagnostic)
+            event.message = SentryMessage(formatted: "Device setup failed")
+            event.fingerprint = ["device_setup", diagnostic.failureKey]
+            var tags = coarseSetupTags(event.tags ?? [:])
+            tags["report.kind"] = "device-setup"
+            tags["setup.role"] = diagnostic.role.rawValue
+            tags["setup.route"] = diagnostic.route.rawValue
+            tags["setup.stage"] = diagnostic.stage.rawValue
+            tags["setup.failure"] = diagnostic.reason.rawValue
+            event.tags = tags
         }
         if event.tags?["report.kind"] == "silo-setup" {
             guard let raw = event.context?["silo_setup"],

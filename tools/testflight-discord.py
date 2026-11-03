@@ -32,6 +32,8 @@ BUNDLE = "com.thatcube.Plozz"
 GROUP = "Plozz External"
 TESTFLIGHT = "https://testflight.apple.com/join/EKfReNMu"
 PLATFORMS = {"TV_OS": "Apple TV", "IOS": "iPhone and iPad"}
+NOTE_PLATFORMS = {"TV_OS": "tvOS", "IOS": "iOS"}
+DESCRIPTION_LIMIT = 4096
 
 
 def apple_token():
@@ -154,29 +156,9 @@ def inspect_channel(discord):
     channel = discord.call("GET", f"/channels/{CHANNEL}")
     if channel.get("id") != CHANNEL or channel.get("guild_id") != BRIDGE.GUILD or channel.get("type") not in (0, 5):
         raise Error("The announcement channel is unavailable, has the wrong type, or belongs to another server.")
-    member = discord.call("GET", f"/guilds/{BRIDGE.GUILD}/members/{BRIDGE.BOT}")
-    role_ids = {BRIDGE.GUILD, *member["roles"]}
-    roles = discord.call("GET", f"/guilds/{BRIDGE.GUILD}/roles")
-    permissions = 0
-    for role in roles:
-        if role["id"] in role_ids:
-            permissions |= int(role["permissions"])
-    if not permissions & (1 << 3):
-        overwrites = channel.get("permission_overwrites", [])
-        for selected in (
-            [item for item in overwrites if item["type"] == 0 and item["id"] == BRIDGE.GUILD],
-            [item for item in overwrites if item["type"] == 0 and item["id"] in role_ids - {BRIDGE.GUILD}],
-            [item for item in overwrites if item["type"] == 1 and item["id"] == BRIDGE.BOT],
-        ):
-            allow = deny = 0
-            for item in selected:
-                allow |= int(item["allow"])
-                deny |= int(item["deny"])
-            permissions = (permissions & ~deny) | allow
-        required = {"View Channel": 10, "Send Messages": 11, "Embed Links": 14, "Read Message History": 16}
-        missing = [name for name, bit in required.items() if not permissions & (1 << bit)]
-        if missing:
-            raise Error("Plozz bot lacks announcement permissions: " + ", ".join(missing))
+    BRIDGE.require_channel_permissions(discord, channel, {
+        "View Channel": 10, "Send Messages": 11, "Embed Links": 14, "Read Message History": 16,
+    })
     return channel
 
 
@@ -214,6 +196,41 @@ def announcement_catalog(release, catalog, github_releases, github):
     return tagged
 
 
+def with_release_notes(description, entry, platforms, url):
+    parts = []
+    for section in entry["sections"]:
+        first = True
+        for item in section["items"]:
+            text, scope = NOTES.normalized_item(item, entry["id"])
+            visible = [
+                platform for platform in PLATFORMS
+                if platform in platforms and (scope is None or NOTE_PLATFORMS[platform] in scope)
+            ]
+            if not visible:
+                continue
+            prefix = ""
+            if set(visible) != platforms:
+                prefix = f"**{' and '.join(PLATFORMS[platform] for platform in visible)}:** "
+            heading = f"\n\n**{section['category']}**" if first else ""
+            parts.append(f"{heading}\n• {prefix}{text}")
+            first = False
+    if not parts:
+        return description + "\n\nNo changes for this platform in this build."
+    # Discord counts astral characters as two UTF-16 units.
+    units = lambda value: len(value.encode("utf-16-le")) // 2
+    complete = description + "".join(parts)
+    if units(complete) <= DESCRIPTION_LIMIT:
+        return complete
+    notice = f"\n\nNotes shortened to fit Discord. [Read the full release notes]({url})."
+    if units(description + notice) > DESCRIPTION_LIMIT:
+        raise Error("Announcement links exceed Discord's description limit.")
+    for part in parts:
+        if units(description + part + notice) > DESCRIPTION_LIMIT:
+            break
+        description += part
+    return description + notice
+
+
 def announcement(release, catalog, github_releases):
     build, marketing = release["build"], release["marketing"]
     entries = [
@@ -226,7 +243,11 @@ def announcement(release, catalog, github_releases):
     platforms = " and ".join(f"**{label}**" for platform, label in PLATFORMS.items() if platform in release["platforms"])
     description = f"Available now for {platforms}.\n\n[Update in TestFlight]({TESTFLIGHT})"
     if published_release(build, github_releases) is not None:
-        description += f" | [Release notes](https://github.com/{BRIDGE.REPO}/releases/tag/{tag})"
+        url = f"https://github.com/{BRIDGE.REPO}/releases/tag/{tag}"
+        description += f" | [Full release notes]({url})"
+        description = with_release_notes(
+            description, only(entries, "matching tagged release-note entry"), release["platforms"], url,
+        )
     else:
         description += "\nRelease notes are available in TestFlight."
     return {

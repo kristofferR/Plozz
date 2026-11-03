@@ -28,16 +28,8 @@ public struct RuntimeFeatureFlags: Codable, Hashable, Sendable {
     }
 
     public static let productionDefault = RuntimeFeatureFlags(
-        enabled: [.universalWatchlist]
+        enabled: [.universalWatchlist, .wetrakr]
     )
 
-    public static let buildDefault: RuntimeFeatureFlags = {
-        #if DEBUG
-        var flags = productionDefault
-        flags.set(.wetrakr, enabled: true)
-        return flags
-        #else
-        return productionDefault
-        #endif
-    }()
+    public static let buildDefault = productionDefault
 }

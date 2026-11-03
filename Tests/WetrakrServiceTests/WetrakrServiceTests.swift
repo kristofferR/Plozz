@@ -20,12 +20,8 @@ private func store() -> InMemoryTrackerTokenStore {
 final class WetrakrAuthorizationTests: XCTestCase {
     func testBuildRolloutMatchesConfiguration() {
         XCTAssertTrue(RuntimeFeatureFlags.buildDefault.isEnabled(.universalWatchlist))
-        #if DEBUG
         XCTAssertTrue(RuntimeFeatureFlags.buildDefault.isEnabled(.wetrakr))
-        #else
         XCTAssertEqual(RuntimeFeatureFlags.buildDefault, .productionDefault)
-        XCTAssertFalse(RuntimeFeatureFlags.buildDefault.isEnabled(.wetrakr))
-        #endif
     }
 
     func testDefaultConfigurationUsesBuildRollout() {
@@ -33,12 +29,16 @@ final class WetrakrAuthorizationTests: XCTestCase {
             bundle: Bundle(for: Self.self),
             environment: ["WETRAKR_CLIENT_ID": "configured"]
         )
-        #if DEBUG
         XCTAssertEqual(resolved.clientID, "configured")
-        #else
-        XCTAssertFalse(resolved.isConfigured)
-        XCTAssertNil(resolved.clientID)
-        #endif
+        XCTAssertTrue(resolved.isConfigured)
+    }
+
+    func testProductionRolloutEnablesConfiguredIntegration() {
+        XCTAssertTrue(RuntimeFeatureFlags.productionDefault.isEnabled(.wetrakr))
+        XCTAssertTrue(WetrakrConfig.resolved(
+            environment: ["WETRAKR_CLIENT_ID": "configured"],
+            featureFlags: .productionDefault
+        ).isConfigured)
     }
 
     func testConfigurationRejectsUnexpandedSettingsAndUsesEnvironment() {
@@ -51,12 +51,13 @@ final class WetrakrAuthorizationTests: XCTestCase {
     }
 
     @MainActor
-    func testProductionRolloutDisablesSavedConnectionsWithoutRequestsOrErasure() async throws {
-        XCTAssertFalse(RuntimeFeatureFlags.productionDefault.isEnabled(.wetrakr))
-        XCTAssertTrue(RuntimeFeatureFlags.productionDefault.isEnabled(.universalWatchlist))
+    func testExplicitlyDisabledRolloutPreservesSavedConnectionsWithoutRequestsOrErasure() async throws {
+        let flags = RuntimeFeatureFlags(enabled: [.universalWatchlist])
+        XCTAssertFalse(flags.isEnabled(.wetrakr))
+        XCTAssertTrue(flags.isEnabled(.universalWatchlist))
         let disabled = WetrakrConfig.resolved(
             environment: ["WETRAKR_CLIENT_ID": "configured"],
-            featureFlags: .productionDefault
+            featureFlags: flags
         )
         XCTAssertFalse(disabled.isConfigured)
         XCTAssertNil(disabled.clientID)

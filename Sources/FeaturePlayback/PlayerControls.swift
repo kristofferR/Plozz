@@ -41,8 +41,7 @@ struct PlayerOptionsActions {
 ///    Reached by pressing **Up** from the scrub surface; Menu (or the idle
 ///    auto-hide) returns to the video, since nothing sits above them.
 ///  * **Scrub bar** — buffered/played fill + floating trickplay thumbnail.
-///  * **Tab row** — beneath the scrubber; today just Info, later joined by siblings
-///    (Chapters, …).
+///  * **Tab row** — beneath the scrubber; Info and available browsing cards.
 ///  * **Info** — pressing **Down** from the scrub surface (or selecting the tab)
 ///    slides the Info card up from the bottom edge, pushing the Info tab up above
 ///    it, Apple-TV style. While the card is up the track-control row steps aside,
@@ -64,7 +63,7 @@ struct PlayerControls: View {
     let onExitToSurface: () -> Void
 
     enum Category: Hashable {
-        case subtitles, audio, playback, sync, info, cast, episodes, playlist, version
+        case subtitles, audio, playback, sync, info, cast, chapters, episodes, playlist, version
 
         var title: LocalizedStringResource {
             switch self {
@@ -103,6 +102,7 @@ struct PlayerControls: View {
                 )
             case .episodes: return "Episodes"
             case .playlist: return "Playlist"
+            case .chapters: return "Chapters"
             }
         }
 
@@ -117,6 +117,7 @@ struct PlayerControls: View {
             case .cast: return "person.2"
             case .episodes: return "rectangle.stack"
             case .playlist: return "text.line.first.and.arrowtriangle.forward"
+            case .chapters: return "list.number"
             }
         }
     }
@@ -134,6 +135,7 @@ struct PlayerControls: View {
         case castMember(Int)
         case sequenceItem(Int)
         case episodeItem(PlayerEpisodeEntry.ID)
+        case chapter(MediaChapter.ID)
         /// Back out of a cast member's details to the row.
         case castBack
         /// One title in a cast member's credits row, by position.
@@ -150,6 +152,10 @@ struct PlayerControls: View {
         case download   // Trailing "Search for subtitles…" row
         case subBack    // Back control inside an options sub-screen
         case subSync    // Subtitles header Sync (timing) button
+    }
+
+    enum AudioScreen: Equatable {
+        case options, dialogue
     }
 
     /// Sub-screens of the Subtitles panel. `tracks` is the default list; the
@@ -192,6 +198,7 @@ struct PlayerControls: View {
     @State private var openPanel: Category?
     @State private var subtitleScreen: SubtitleScreen = .tracks
     @State private var playbackScreen: PlaybackScreen = .options
+    @State private var audioScreen: AudioScreen = .options
     @FocusState private var focus: FocusSlot?
 
     /// Side margin shared by the controls layer and its trailing options panels.
@@ -319,6 +326,9 @@ struct PlayerControls: View {
         // is nil for Info, so this can't fire for — or retime — the Info reveal.
         .animation(.easeInOut(duration: 0.2), value: optionsPanel)
         .animation(.spring(response: 0.22, dampingFraction: 0.72), value: model.skipGesture.hintVisible)
+        #if os(tvOS)
+        .observingSystemPlaybackAudio(model.systemAudio, isVisible: model.controlsVisible)
+        #endif
         .task {
             // The capture rig asking for a panel it cannot reach without the
             // remote. Set before the player was built, so one read is enough —
@@ -326,6 +336,11 @@ struct PlayerControls: View {
             guard let panel = PlayerScreenshotHook.pendingPanel else { return }
             PlayerScreenshotHook.pendingPanel = nil
             switch panel {
+            case .playback:
+                try? await Task.sleep(for: .milliseconds(600))
+                model.controlsVisible = true
+                model.isPanelOpen = true
+                openPanel = .playback
             case .versions:
                 guard model.versions.isAvailable else { return }
                 model.controlsVisible = true
@@ -353,6 +368,7 @@ struct PlayerControls: View {
         .environment(\.plozzArtworkSettings, model.artworkPolicy.settings)
         .environment(\.plozzArtworkProviders, model.artworkPolicy.providers)
         .environment(\.plozzArtworkArea, .playback)
+        .playerPlatformAppearance()
         .onChange(of: model.controlBarVisible) { _, focused in
             titleVisible = true
             guard focused else {
@@ -414,7 +430,11 @@ struct PlayerControls: View {
             // the reveal. `entryFocusTarget` is non-nil for exactly that window.
             if case let .button(tab)? = slot, Self.usesBottomCard(tab),
                openPanel != tab, !isRestoringCastRow, entryFocusTarget == nil {
-                revealInfoCard(tab)
+                if Self.usesBottomCard(openPanel) {
+                    selectCardTab(focusedTo: slot)
+                } else {
+                    revealInfoCard(tab)
+                }
             }
             // Focus reached the strip above the tab, which only a deliberate Up from
             // the tab itself can do: that's the exit gesture. Acting on where focus
@@ -474,6 +494,7 @@ struct PlayerControls: View {
             model.controlBarActivity &+= 1
             subtitleScreen = .tracks
             playbackScreen = .options
+            audioScreen = .options
             guard let panel else {
                 // Panel fully closed. Reset the measured panel height so the next
                 // open snaps to its natural size instead of morphing from a stale
@@ -482,7 +503,14 @@ struct PlayerControls: View {
                 // Return focus to whatever transport control opened it (skip while
                 // the whole bar is hiding — focus is intentionally cleared then).
                 // Then let the title fade back in after a short beat.
-                if model.controlBarVisible { restoreFocus(panelReturnFocus) }
+                if model.controlBarVisible {
+                    if panelReturnFocus == .button(.audio), !model.hasAudioControls {
+                        if model.trackControlCategories.isEmpty { onExitToSurface() }
+                        else { restoreFocus(initialFocus) }
+                    } else {
+                        restoreFocus(panelReturnFocus)
+                    }
+                }
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(500))
                     if openPanel == nil { titleVisible = true }
@@ -494,6 +522,9 @@ struct PlayerControls: View {
             // curve at the same time, which is exactly the kind of near-miss timing
             // that made the transport look like separate pieces.
             if !Self.usesBottomCard(panel) { titleVisible = false }
+            // Card tabs already own native focus. Re-queuing the old tab can
+            // pull focus backwards after the viewer has moved to its neighbour.
+            guard !Self.usesBottomCard(panel) else { return }
             // (The panel seeds its own height from `cachedPanelHeight`.)
             // Land initial focus on the active/selected row. This MUST be deferred to
             // the next runloop tick: opening a panel simultaneously inserts the panel's
@@ -509,6 +540,9 @@ struct PlayerControls: View {
             // already uses on close. Any one-frame highlight of the engine's pick happens
             // while the panel is still at ~0 opacity (mid fade-in), so it's imperceptible.
             restoreFocus(preferredPanelFocus)
+        }
+        .onChange(of: model.infoCard.chapters.isEmpty) { _, empty in
+            if empty, openPanel == .chapters { closeInfoCard() }
         }
         .plozzRemoteCommands(
             onExit: handleExit,
@@ -647,8 +681,9 @@ struct PlayerControls: View {
             // undone from inside, so fading the block faded the open panel with it.
             // Each piece of chrome hides itself instead (see `chromeHidden`), leaving
             // the menu overlay, which hangs off the buttons, unaffected.
-            // The Info card is a PERMANENT member of the stack, never inserted or
-            // removed. That's the whole trick behind the reveal moving as one unit:
+            // The card's fixed-height stage is a permanent member of the stack.
+            // Its contents mount on first use and then stay mounted while parked.
+            // That's the whole trick behind the reveal moving as one unit:
             // the layout always holds the revealed arrangement (card at the bottom,
             // tab above it), and the resting look is produced purely by translating
             // the cluster down so the card sits just off the bottom edge. Opening it
@@ -904,7 +939,8 @@ struct PlayerControls: View {
     /// clock. A sibling tab therefore switches the card's *content*; it never
     /// mounts a second card, which would reflow the stage and break that.
     static func usesBottomCard(_ category: Category?) -> Bool {
-        category == .info || category == .cast || category == .episodes || category == .playlist
+        category == .info || category == .cast || category == .chapters
+            || category == .episodes || category == .playlist
     }
 
     /// `openPanel` with Info masked out, so the options panels' own animation can be
@@ -991,9 +1027,7 @@ struct PlayerControls: View {
     private static let infoReveal: Animation = .smooth(duration: 0.5)
 
 
-    /// The tab row beneath the scrub bar. Today a single Info tab; siblings
-    /// (Chapters, …) join it here and switch the card below rather than opening
-    /// their own floating panel. Titled, not icon-only — these read as tabs.
+    /// Bottom tabs switch the shared card rather than opening a floating menu.
     private var tabRow: some View {
         HStack(spacing: 20) {
             Button {
@@ -1010,7 +1044,22 @@ struct PlayerControls: View {
             .focused($focus, equals: .button(.info))
             .accessibilityIdentifier("player-tab-info")
             .disabled(!tabFocusable(.info))
-            .onChange(of: focus) { _, slot in selectCardTab(focusedTo: slot) }
+
+            if isTabVisible(.chapters) {
+                Button { toggle(.chapters) } label: {
+                    Text(Category.chapters.title)
+                }
+                .buttonStyle(PlayerTabButtonStyle(
+                    focused: focus == .button(.chapters), selected: openPanel == .chapters
+                ))
+                .reportSubtitleControlsFrame(
+                    in: model.subtitleLayout, region: .tab("chapters"),
+                    isVisible: model.controlsVisible && !model.isScrubbing && !chromeHidden
+                )
+                .focused($focus, equals: .button(.chapters))
+                .accessibilityIdentifier("player-tab-chapters")
+                .disabled(!tabFocusable(.chapters))
+            }
 
             // Hidden entirely when what is playing has no cast: a tab that opens
             // an empty card is worse than an absent one, and `.disabled` alone
@@ -1154,6 +1203,7 @@ struct PlayerControls: View {
     private func isTabVisible(_ tab: Category) -> Bool {
         switch tab {
         case .cast: !model.infoCard.cast.isEmpty
+        case .chapters: player != nil && !model.infoCard.chapters.isEmpty
         case .episodes: player?.episodeBrowser != nil
         case .playlist: player?.playlistContext != nil
         default: true
@@ -1189,7 +1239,7 @@ struct PlayerControls: View {
                     close: { openPanel = nil }, backRequest: panelBackRequest,
                     maximumHeight: max(0, availableHeight - Self.horizontalMargin
                         - (styleEditing ? Self.horizontalMargin : menuBottomInset)),
-                    playbackScreen: $playbackScreen
+                    playbackScreen: $playbackScreen, audioScreen: $audioScreen
                 )
                 .reportSubtitleControlsFrame(
                     in: model.subtitleLayout, region: .menu, isVisible: model.controlsVisible && !styleEditing
@@ -1302,7 +1352,12 @@ struct PlayerControls: View {
     /// one.
     @ViewBuilder
     private var cardContent: some View {
-        if (parkedCardTab == .playlist || parkedCardTab == .episodes), let player {
+        if parkedCardTab == .chapters, let player {
+            PlayerChapterPanel(model: model, spoilerSettings: player.spoilerSettings, focus: $focus) {
+                player.seekToChapter($0)
+                closeInfoCard()
+            }
+        } else if (parkedCardTab == .playlist || parkedCardTab == .episodes), let player {
             PlayerSequencePanel(
                 player: player,
                 source: parkedCardTab == .playlist ? .playlist : .episodes,
@@ -1362,9 +1417,16 @@ struct PlayerControls: View {
     }
 
     private var infoCard: some View {
-        cardContent
-            .colorScheme(.dark)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        Group {
+            #if os(tvOS)
+            PlayerControlsCardStage(isPresented: infoMode) {
+                cardContent
+            }
+            #else
+            cardContent
+            #endif
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// Move between card tabs by *moving focus*, with no press needed — the
@@ -1441,8 +1503,8 @@ struct PlayerControls: View {
     }
 
     /// The focus target a freshly-opened panel should land on: the active/selected
-    /// row for the track lists, the first available delay row for Sync, the tab
-    /// itself for Info, and the right control for each Subtitles sub-screen. Deferred
+    /// row for the track lists, the first available delay row for Sync,
+    /// and the right control for each Subtitles sub-screen. Deferred
     /// onto `focus` in `onChange(of: openPanel)` via `restoreFocus`.
     private var preferredPanelFocus: FocusSlot? {
         guard let panel = openPanel else { return nil }
@@ -1489,16 +1551,22 @@ struct PlayerControls: View {
         let subtitle: Text?
         let isSelected: Bool
         let isToggle: Bool
+        var isUpdating: Bool = false
+        var startsSection: Bool = false
+        var marqueeTitle: Bool = false
+        var submenu: PlayerOptionsRowSpec?
         var isExternal: Bool = false
         var facts: Text?
         var titleLineLimit: Int? = 1
+        var versionPresentation: MediaVersion.PickerPresentation?
         let action: () -> Void
     }
 
     private func handleExit() {
         // Back returns from a submenu before closing its parent panel.
         if (openPanel == .subtitles && subtitleScreen != .tracks)
-            || (openPanel == .playback && playbackScreen != .options) {
+            || (openPanel == .playback && playbackScreen != .options)
+            || (openPanel == .audio && audioScreen != .options) {
             panelBackRequest &+= 1
             return
         }
@@ -1614,6 +1682,31 @@ struct PlayerControls: View {
             : .easeOut(duration: 0.2).delay(0.45)
     }
 }
+
+#if os(tvOS)
+/// Reserve the card's layout without initializing its optional content on transport entry.
+struct PlayerControlsCardStage<Content: View>: View {
+    let isPresented: Bool
+    @ViewBuilder var content: () -> Content
+    @State private var hasPresented = false
+
+    var body: some View {
+        Group {
+            if hasPresented || isPresented {
+                content().transition(.identity)
+            } else {
+                Color.clear
+                    .frame(height: InfoPanelView.cardHeight)
+                    .accessibilityHidden(true)
+                    .transition(.identity)
+            }
+        }
+        .onChange(of: isPresented, initial: true) { _, presented in
+            if presented { hasPresented = true }
+        }
+    }
+}
+#endif
 
 extension PlayerControlsModel {
     var subtitleTrackListFocus: PlayerControls.FocusSlot {

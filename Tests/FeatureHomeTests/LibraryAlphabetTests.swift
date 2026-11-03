@@ -270,6 +270,28 @@ final class LibraryAlphabetTests: XCTestCase {
         XCTAssertEqual(vm.letterEntries.count, 2)
     }
 
+    func testUnsupportedIndexHidesControlsAndClearsPriorFailureWithoutHidingTitles() async {
+        let source = provider()
+        source.alphabetError = .serverUnreachable
+        let vm = model(source)
+        await vm.loadFirstPage()
+        await waitForIndex(vm)
+        XCTAssertNotNil(vm.alphabet.message)
+
+        source.alphabetError = nil
+        source.alphabetEntries = []
+        vm.retryLetterIndex()
+        await waitForIndex(vm)
+
+        XCTAssertNil(vm.alphabet.message)
+        XCTAssertFalse(vm.alphabet.isVisible)
+        XCTAssertFalse(vm.showsLetterRail)
+        XCTAssertEqual(vm.totalCount, 100)
+        XCTAssertEqual(vm.loadedCount, 10)
+        await vm.itemAppeared(at: 70)
+        XCTAssertNotNil(vm.item(at: 70))
+    }
+
     func testFailedLandingPageNeverPublishesScrollDestination() async {
         let source = provider()
         source.failAtStartIndex = 70

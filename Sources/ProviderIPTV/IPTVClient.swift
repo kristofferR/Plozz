@@ -2,9 +2,10 @@ import CoreModels
 import CoreNetworking
 import CryptoKit
 import Foundation
+import os
 
 actor IPTVClient {
-    private static let playlistCatalogScope = "playlist-v4"
+    private static let playlistCatalogScope = "playlist-v5"
     let credential: IPTVCredential
     private let http: IPTVHTTP
     private let artworkSecrets: [String]
@@ -14,17 +15,29 @@ actor IPTVClient {
     private var refreshHasBackgroundOwner = false
     private var refreshRetryAfter: [String: Date] = [:]
     private var refreshWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+    private let awaitsLegacyGuideDiscovery: Bool
+    private var guideDiscoveryResult: Result<Void, Error>?
     private var authenticatedAt: Date?
     private var liveExtension = "ts"
     private var cachedGuide: (url: URL, data: Data, expires: Date)?
+    private var guideCacheExpiry: Task<Void, Never>?
+    private var guideCacheGeneration = UUID()
+    var cachedGuideByteCount: Int { cachedGuide?.data.count ?? 0 }
+    private final class GuideRefreshState {
+        weak var scope: ServerLiveTVGuideRefreshScope?
+        var missingURLs = Set<URL>()
+        var rejectedURLs: [URL: LiveTVSourceImportError] = [:]
+
+        init(scope: ServerLiveTVGuideRefreshScope) { self.scope = scope }
+    }
+    private var guideRefreshes: [ObjectIdentifier: GuideRefreshState] = [:]
     private let progress: @Sendable (IPTVImportProgress) -> Void
     var pendingCatalogRequestCount: Int { refreshWaiters.count }
     private var didReclaimJournal = false
 
     private func reclaimJournalOnce() {
         guard !didReclaimJournal else { return }
-        didReclaimJournal = true
-        catalog.reclaimJournal()
+        didReclaimJournal = catalog.reclaimJournal()
     }
 
     init(
@@ -36,13 +49,17 @@ actor IPTVClient {
             + [credential.password].filter { !$0.isEmpty }
         self.progress = progress
         http = IPTVHTTP(configuration: configuration, sensitiveValues: [credential.password])
-        let directory = directory ?? FileManager.default.urls(
-            for: credential.mode == .file ? .applicationSupportDirectory : .cachesDirectory, in: .userDomainMask
-        )[0].appendingPathComponent("IPTVCatalogs", isDirectory: true)
+        let directory = directory ?? (credential.mode == .file
+            ? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("IPTVCatalogs", isDirectory: true)
+            : IPTVCatalogStorage.cacheDirectory)
         catalog = try IPTVCatalog(
             url: directory.appendingPathComponent(credential.identity.uuidString + ".sqlite"),
             key: credential.catalogKey
         )
+        awaitsLegacyGuideDiscovery = try credential.mode == .playlist
+            && !credential.automaticallyDiscoversGuides && credential.explicitGuideURLs.isEmpty
+            && catalog.state(Self.playlistCatalogScope) == nil
     }
 
     func authenticate() async throws {
@@ -54,7 +71,8 @@ actor IPTVClient {
             return
         }
         if credential.mode == .playlist {
-            let (bytes, response) = try await http.bytes(url: credential.address, headers: credential.headers)
+            let url = GoogleDrivePlaylistURL.downloadURL(for: credential.address)
+            let (bytes, response) = try await http.bytes(url: url, headers: credential.headers(for: url))
             defer { bytes.task.cancel() }
             var parser = M3UPlaylistParser(
                 baseURL: response.url ?? credential.address, permitsAuthenticationHeaders: true
@@ -103,7 +121,10 @@ actor IPTVClient {
             // Freshness controls revalidation, not availability of committed data.
             // Missing or old-schema catalogues must still finish their first import.
             if !force, let committedAt = try catalogCommittedAt(scope) {
-                if Date().timeIntervalSince(committedAt) >= 1_800, refresh == nil,
+                let needsGuideDiscovery = try credential.mode == .playlist
+                    && !credential.automaticallyDiscoversGuides && credential.explicitGuideURLs.isEmpty
+                    && catalog.state(Self.playlistCatalogScope) == nil
+                if needsGuideDiscovery || Date().timeIntervalSince(committedAt) >= 1_800, refresh == nil,
                    refreshRetryAfter[scope].map({ $0 <= Date() }) != false {
                     startRefresh(library, scope: scope, background: true)
                 }
@@ -156,6 +177,9 @@ actor IPTVClient {
                 HandoffDiagnostics.emit("IPTV catalogRefresh failed reason=\(reason) elapsed=\(started.duration(to: .now))")
                 result = .failure(error)
             }
+            if awaitsLegacyGuideDiscovery, scope == Self.playlistCatalogScope {
+                guideDiscoveryResult = result
+            }
             self.refresh = nil
             self.refreshScope = nil
             self.refreshHasBackgroundOwner = false
@@ -183,7 +207,10 @@ actor IPTVClient {
     }
 
     private func catalogCommittedAt(_ scope: String) throws -> Date? {
-        guard let raw = try catalog.state(scope), let time = TimeInterval(raw), time.isFinite else { return nil }
+        // v4 channels remain usable while the retired guide opt-out is refreshed in the background.
+        var raw = try catalog.state(scope)
+        if raw == nil, scope == Self.playlistCatalogScope { raw = try catalog.state("playlist-v4") }
+        guard let raw, let time = TimeInterval(raw), time.isFinite else { return nil }
         return Date(timeIntervalSince1970: time)
     }
 
@@ -214,7 +241,10 @@ actor IPTVClient {
         diagnostic?.advance(to: credential.mode == .playlist ? .playlist
             : library == "movies" ? .movies : library == "series" ? .series : .channels)
         try catalog.beginImport()
-        defer { catalog.discardImport() }
+        defer {
+            catalog.discardImport()
+            didReclaimJournal = false
+        }
         if credential.mode == .playlist {
             try await importPlaylist()
         } else {
@@ -315,7 +345,8 @@ actor IPTVClient {
             origin = credential.address
             bytes = nil
         } else {
-            let response = try await http.bytes(url: credential.address, headers: credential.headers)
+            let url = GoogleDrivePlaylistURL.downloadURL(for: credential.address)
+            let response = try await http.bytes(url: url, headers: credential.headers(for: url))
             bytes = response.0
             origin = response.1.url ?? credential.address
         }
@@ -377,7 +408,7 @@ actor IPTVClient {
             progress(IPTVImportProgress(stage: .playlist, entries: count))
             // Addresses are kept in a sealed catalogue record, never plaintext state.
             let guides = credential.explicitGuideURLs.isEmpty
-                ? (credential.automaticallyDiscoversGuides ? result.declaredGuideURLs : []) : credential.explicitGuideURLs
+                ? result.declaredGuideURLs : credential.explicitGuideURLs
             for (index, guide) in guides.prefix(32).enumerated() {
                 try catalog.insert(IPTVRecord(
                     item: MediaItem(id: String(format: "guide:%02d", index), title: "", kind: .unknown),
@@ -526,6 +557,31 @@ actor IPTVClient {
         return try committedLiveChannels()
     }
 
+    func guideChannels() async throws -> [IPTVProvider.IPTVGuideChannel] {
+        try await ensureCatalog("live")
+        try catalog.execute("BEGIN")
+        do {
+            var result: [IPTVProvider.IPTVGuideChannel] = []
+            while true {
+                try Task.checkCancellation()
+                let page = try catalog.records(where: "live = 1", values: [], start: result.count, limit: 1_000)
+                guard result.count + page.count <= 100_000 else { throw LiveTVSourceImportError.guideTooLarge }
+                result += page.map {
+                    IPTVProvider.IPTVGuideChannel(
+                        id: $0.item.id, name: $0.item.title, guideID: $0.guideID,
+                        guideName: $0.guideName, country: $0.guideCountry
+                    )
+                }
+                if page.count < 1_000 { break }
+            }
+            try catalog.execute("COMMIT")
+            return result
+        } catch {
+            try catalog.execute("ROLLBACK")
+            throw error
+        }
+    }
+
     func cachedLiveTVCatalog() throws -> ServerLiveTVCatalogSnapshot? {
         let scope = credential.mode == .xtream ? "live" : Self.playlistCatalogScope
         let committed = credential.mode == .file
@@ -598,7 +654,7 @@ actor IPTVClient {
 
     func guideURLs() async throws -> [URL] {
         if !credential.explicitGuideURLs.isEmpty { return credential.explicitGuideURLs }
-        if credential.mode == .xtream { return [try endpoint(file: "xmltv.php")] }
+        if let url = try xtreamGuideURL() { return [url] }
         try await ensureCatalog("live")
         let guides = try catalog.records(where: "kind = ?", values: [MediaItemKind.unknown.rawValue], order: "id", limit: 32)
             .compactMap(\.streamURL)
@@ -608,9 +664,25 @@ actor IPTVClient {
         return guides
     }
 
+    func xtreamGuideURL() throws -> URL? {
+        credential.mode == .xtream ? try endpoint(file: "xmltv.php") : nil
+    }
+
     func hasGuideSource() async throws -> Bool {
         if credential.mode == .xtream || !credential.explicitGuideURLs.isEmpty { return true }
         try await ensureCatalog("live")
+        return try catalog.count(where: "kind = ?", values: [MediaItemKind.unknown.rawValue]) > 0
+    }
+
+    func completeGuideDiscovery() async throws -> Bool? {
+        guard awaitsLegacyGuideDiscovery else { return nil }
+        if refresh != nil, refreshScope == Self.playlistCatalogScope {
+            try await waitForRefresh()
+        } else {
+            guard let guideDiscoveryResult else { return nil }
+            try guideDiscoveryResult.get()
+        }
+        try Task.checkCancellation()
         return try catalog.count(where: "kind = ?", values: [MediaItemKind.unknown.rawValue]) > 0
     }
 
@@ -630,40 +702,188 @@ actor IPTVClient {
         }
     }
 
+    private func currentGuideRefresh() -> GuideRefreshState? {
+        guideRefreshes = guideRefreshes.filter { $0.value.scope != nil }
+        guard let scope = ServerLiveTVGuideRefreshScope.current else { return nil }
+        let key = ObjectIdentifier(scope)
+        let state = guideRefreshes[key] ?? GuideRefreshState(scope: scope)
+        guideRefreshes[key] = state
+        return state
+    }
+
     func guideData(from url: URL) async throws -> Data {
-        if let cachedGuide, cachedGuide.url == url, cachedGuide.expires > Date() {
-            IPTVGuideDiagnostics.request?.cacheHit(bytes: cachedGuide.data.count)
-            return cachedGuide.data
+        try await guideDocument(from: url, retainsRawResponse: true).data
+    }
+
+    func guideDocument(from url: URL, retainsRawResponse: Bool = false) async throws -> XMLTVDownloadedDocument {
+        try Task.checkCancellation()
+        let refresh = currentGuideRefresh()
+        if refresh?.missingURLs.contains(url) == true {
+            IPTVGuideDiagnostics.request?.reuseGuideFailure()
+            throw AppError.notFound
         }
-        let (bytes, response) = try await http.bytes(url: url, headers: credential.guideHeaders(for: url))
+        if let failure = refresh?.rejectedURLs[url] {
+            IPTVGuideDiagnostics.request?.reuseGuideFailure()
+            throw failure
+        }
+        do {
+            var attempt = 0
+            while true {
+                let retryAfter = OSAllocatedUnfairLock<TimeInterval?>(initialState: nil)
+                do {
+                    return try await downloadGuideData(from: url, retainsRawResponse: retainsRawResponse) { response in
+                        let delay = HTTPDate.retryAfter(response.value(forHTTPHeaderField: "Retry-After"))
+                        retryAfter.withLock { $0 = delay }
+                    }
+                } catch {
+                    try Task.checkCancellation()
+                    guard let delay = Self.guideRetryDelay(
+                        after: error, attempt: attempt, retryAfter: retryAfter.withLock({ $0 })
+                    ) else { throw error }
+                    attempt += 1
+                    PlozzLog.networking.info("IPTV_GUIDE event=retry attempt=\(attempt) delaySeconds=\(delay)")
+                    try await Task.sleep(for: .seconds(delay))
+                }
+            }
+        } catch AppError.notFound {
+            try Task.checkCancellation()
+            refresh?.missingURLs.insert(url)
+            throw AppError.notFound
+        } catch LiveTVSourceImportError.guideTooLarge {
+            try Task.checkCancellation()
+            refresh?.rejectedURLs[url] = .guideTooLarge
+            throw LiveTVSourceImportError.guideTooLarge
+        }
+    }
+
+    static func guideRetryDelay(after error: any Error, attempt: Int, retryAfter: TimeInterval?) -> TimeInterval? {
+        guard (0..<2).contains(attempt) else { return nil }
+        let transient: Bool
+        switch error {
+        case AppError.rateLimited: transient = true
+        case IPTVError.httpStatus(let status): transient = [408, 500, 502, 503, 504].contains(status)
+        default:
+            let error = error as NSError
+            transient = error.domain == NSURLErrorDomain
+                && [NSURLErrorTimedOut, NSURLErrorNetworkConnectionLost, NSURLErrorCannotConnectToHost].contains(error.code)
+        }
+        guard transient else { return nil }
+        if let retryAfter {
+            guard retryAfter.isFinite, retryAfter <= 10 else { return nil }
+            return max(1, retryAfter)
+        }
+        return Double(1 << attempt)
+    }
+
+    func discardInvalidGuideData(from url: URL, failure: LiveTVSourceImportError) {
+        guard failure == .invalidGuide || failure == .guideTooLarge else { return }
+        // Parser size failures can depend on the selected channels/window's
+        // retained rows. They must not reject another batch using the same URL.
+        if failure == .invalidGuide { currentGuideRefresh()?.rejectedURLs[url] = failure }
+        guard cachedGuide?.url == url else { return }
+        clearGuideCache()
+    }
+
+    private func downloadGuideData(
+        from url: URL, retainsRawResponse: Bool,
+        receivedResponse: @escaping @Sendable (HTTPURLResponse) -> Void
+    ) async throws -> XMLTVDownloadedDocument {
+        if retainsRawResponse, let cachedGuide, cachedGuide.url == url, cachedGuide.expires > Date() {
+            IPTVGuideDiagnostics.request?.cacheHit(bytes: cachedGuide.data.count)
+            return XMLTVDownloadedDocument(data: cachedGuide.data, expiresAt: cachedGuide.expires, permitsPersistence: true)
+        }
+        let (bytes, response) = try await http.bytes(
+            url: url, headers: credential.guideHeaders(for: url), guideRequest: true,
+            receivedResponse: receivedResponse
+        )
         defer { bytes.task.cancel() }
-        let limit = 256 * 1_024 * 1_024
+        let progress = ServerLiveTVGuideProgress.report
+        // URLSession may decode Content-Encoding before yielding bytes.
+        let encoding = response.value(forHTTPHeaderField: "Content-Encoding")?.lowercased()
+        let total = (encoding == nil || encoding == "identity") && response.expectedContentLength > 0
+            ? Int(exactly: response.expectedContentLength) : nil
+        progress?(.init(stage: .downloading, total: total))
+        var lastProgress = ContinuousClock.now
+        let limit = XMLTVResourceLimits.expandedBytes
         guard response.expectedContentLength <= limit else { throw LiveTVSourceImportError.guideTooLarge }
-        var data = Data()
+        let writer = try TemporaryMappedData.Writer(maximumBytes: limit)
+        var buffer = Data()
+        buffer.reserveCapacity(65_536)
+        var received = 0
+        var payloadLimit = limit
         defer {
-            IPTVHTTP.performanceMetrics?.record(bytes: data.count)
-            IPTVGuideDiagnostics.request?.consumed(data.count)
+            IPTVHTTP.performanceMetrics?.record(bytes: received)
+            IPTVGuideDiagnostics.request?.consumed(received)
         }
         for try await byte in bytes {
-            guard data.count < limit else { throw LiveTVSourceImportError.guideTooLarge }
-            data.append(byte)
-            if data.count.isMultiple(of: 65_536) { try Task.checkCancellation() }
+            guard received < payloadLimit else { throw LiveTVSourceImportError.guideTooLarge }
+            buffer.append(byte)
+            received += 1
+            if received == 2, buffer.starts(with: [0x1f, 0x8b]) {
+                payloadLimit = XMLTVResourceLimits.compressedBytes
+                guard response.expectedContentLength <= payloadLimit else {
+                    throw LiveTVSourceImportError.guideTooLarge
+                }
+            }
+            if buffer.count == 65_536 {
+                try writer.append(buffer)
+                buffer.removeAll(keepingCapacity: true)
+                if ContinuousClock.now - lastProgress >= .milliseconds(250) {
+                    progress?(.init(stage: .downloading, completed: received, total: total))
+                    lastProgress = .now
+                }
+            }
         }
         try Task.checkCancellation()
+        try writer.append(buffer)
+        let data = try writer.finish()
+        progress?(.init(stage: .downloading, completed: received, total: total))
         let directives = (response.value(forHTTPHeaderField: "Cache-Control") ?? "").lowercased()
             .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         let maxAge = directives.first { $0.hasPrefix("max-age=") }
             .flatMap { Double($0.dropFirst(8).trimmingCharacters(in: CharacterSet(charactersIn: "\""))) }
         let duration = min(60, maxAge.flatMap { $0.isFinite ? max(0, $0) : nil } ?? 60)
-        if data.count <= 16 * 1_024 * 1_024, !directives.contains("no-store"), !directives.contains("no-cache") {
+        clearGuideCache()
+        if retainsRawResponse, duration > 0, !directives.contains("no-store"), !directives.contains("no-cache") {
             cachedGuide = (url, data, Date().addingTimeInterval(duration))
-        } else { cachedGuide = nil }
-        return data
+            let generation = guideCacheGeneration
+            guideCacheExpiry = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(duration)) }
+                catch is CancellationError { return }
+                catch {
+                    PlozzLog.networking.error("IPTV guide cache expiry wait failed")
+                }
+                await self?.expireGuideCache(generation: generation)
+            }
+        }
+        try Task.checkCancellation()
+        return XMLTVDownloadedDocument(
+            data: data, expiresAt: Date().addingTimeInterval(directives.contains("no-cache") ? 0 : duration),
+            permitsPersistence: !directives.contains("no-store")
+        )
+    }
+
+    private func expireGuideCache(generation: UUID) {
+        guard generation == guideCacheGeneration else { return }
+        clearGuideCache()
+    }
+
+    private func clearGuideCache() {
+        guideCacheExpiry?.cancel()
+        guideCacheExpiry = nil
+        guideCacheGeneration = UUID()
+        cachedGuide = nil
+    }
+
+    func invalidateGuideCache() {
+        clearGuideCache()
+        guideRefreshes.removeAll()
     }
 
     func cancel() {
         refresh?.cancel()
-        cachedGuide = nil
+        clearGuideCache()
+        guideRefreshes.removeAll()
         http.cancel()
     }
 

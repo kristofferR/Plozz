@@ -5,6 +5,72 @@ import XCTest
 @testable import FeatureLiveTVCore
 
 final class LiveTVSourceLoaderTests: XCTestCase {
+    func testDriveViewerAndLegacyLinksUseDownloadEndpointAndRetainCachePolicy() async throws {
+        for address in [
+            "https://drive.google.com/file/d/fixture/view?usp=sharing",
+            "https://drive.google.com/uc?id=fixture&export=download"
+        ] {
+            let original = try XCTUnwrap(URL(string: address))
+            let download = try XCTUnwrap(URL(string:
+                "https://drive.usercontent.google.com/download?id=fixture&export=download"
+            ))
+            LoaderProtocol.state.register(download, [
+                .init(status: 200, headers: ["ETag": "fixture", "Cache-Control": "max-age=0"], body: playlist),
+                .init(status: 304)
+            ])
+            defer { LoaderProtocol.state.remove(download) }
+            let loader = loader()
+            let first = try await loader.loadPlaylist(from: original)
+            let second = try await loader.loadPlaylist(from: original)
+            XCTAssertEqual(first.channels.count, 1)
+            XCTAssertEqual(first.channels, second.channels)
+            let requests = LoaderProtocol.state.requests(download)
+            XCTAssertEqual(requests.count, 2)
+            XCTAssertEqual(requests.last?.value(forHTTPHeaderField: "If-None-Match"), "fixture")
+            XCTAssertTrue(LoaderProtocol.state.requests(original).isEmpty)
+        }
+    }
+
+    func testDriveDownloadHTMLIsRejectedWithoutFollowingConfirmationLinks() async throws {
+        let original = try XCTUnwrap(URL(string: "https://drive.google.com/open?id=fixture"))
+        let download = try XCTUnwrap(URL(string:
+            "https://drive.usercontent.google.com/download?id=fixture&export=download"
+        ))
+        LoaderProtocol.state.register(download, [.init(
+            status: 200, headers: ["Content-Type": "text/html"],
+            body: Data("<html><a href=\"?confirm=t\">Download anyway</a></html>".utf8)
+        )])
+        defer { LoaderProtocol.state.remove(download) }
+        do {
+            _ = try await loader().loadPlaylist(from: original)
+            XCTFail("An HTML download page is not a channel playlist.")
+        } catch {
+            XCTAssertEqual(error as? LiveTVSourceImportError, .invalidPlaylist)
+        }
+        XCTAssertEqual(LoaderProtocol.state.requests(download).count, 1)
+    }
+
+    func testProviderMetadataLoadsAsChannelsRatherThanOneDirectStream() async throws {
+        let url = fixtureURL()
+        let body = Data("""
+        #EXTM3U
+        #EXT-X-SESSION-DATA:DATA-ID="com.xui.1_5_5r2"
+        #EXTINF:-1,One
+        https://example.test/one.m3u8
+        #EXTINF:-1,Two
+        https://example.test/two.ts
+        """.utf8)
+        LoaderProtocol.state.register(url, [.init(
+            status: 200, headers: ["Content-Type": "application/octet-stream"], body: body
+        )])
+        defer { LoaderProtocol.state.remove(url) }
+        let imported = try await loader().loadPlaylist(from: url)
+        XCTAssertEqual(imported.channels.map(\.name), ["One", "Two"])
+        XCTAssertEqual(imported.entryCount, 2)
+        XCTAssertEqual(imported.skippedEntryCount, 0)
+        XCTAssertEqual(LoaderProtocol.state.requests(url).count, 1)
+    }
+
     func testRequestsDoNotInheritSessionCookiesOrStoredCredentials() async throws {
         let url = fixtureURL()
         let configuration = URLSessionConfiguration.ephemeral
@@ -222,6 +288,40 @@ final class LiveTVSourceLoaderTests: XCTestCase {
         let result = try await loader().loadPlaylist(from: url)
         XCTAssertEqual(result.channels.count, 1)
         XCTAssertEqual(result.channels.first?.streamURL, url)
+    }
+
+    func testMalformedGuideDoesNotPoisonTheResponseCache() async throws {
+        for indexed in [false, true] {
+            let url = fixtureURL()
+            LoaderProtocol.state.register(url, [
+                .init(status: 200, headers: ["Cache-Control": "max-age=3600", "ETag": "invalid"],
+                      body: Data("<html>login</html>".utf8)),
+                .init(status: 200, headers: ["Cache-Control": "max-age=3600"], body: Data("<tv/>".utf8))
+            ])
+            defer { LoaderProtocol.state.remove(url) }
+            let fixture = try CacheFixture()
+            defer { fixture.removeOwnedFiles() }
+            let loader = loader()
+            func load() async throws -> LiveTVGuideImport {
+                if indexed {
+                    return try await loader.loadIndexedGuide(
+                        from: url, sourceID: "guide", channels: [], now: Date(),
+                        cache: fixture.cache, lookbackDays: 1, lookaheadDays: 7
+                    )
+                }
+                return try await loader.loadGuide(from: url, channels: [], now: Date())
+            }
+            do {
+                _ = try await load()
+                XCTFail("An HTML response is not a valid guide")
+            } catch { XCTAssertEqual(error as? LiveTVSourceImportError, .invalidGuide) }
+            _ = try await load()
+            _ = try await load()
+            let requests = LoaderProtocol.state.requests(url)
+            XCTAssertEqual(requests.count, 2, "indexed: \(indexed)")
+            XCTAssertNil(requests.last?.value(forHTTPHeaderField: "If-None-Match"),
+                         "Rejected bytes must not be revalidated as usable XMLTV")
+        }
     }
 
     private func loader() -> LiveTVSourceLoader {

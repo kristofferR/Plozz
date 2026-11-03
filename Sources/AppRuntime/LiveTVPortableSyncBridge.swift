@@ -1002,9 +1002,12 @@ actor LiveTVPortableLibraryPreparation {
         definitions: [LibraryChannelDefinition], snapshots: [LibraryChannelSnapshot]
     ) throws -> LiveTVPortableLibraryExport {
         try Task.checkCancellation()
-        if let cachedExport, cachedExport.state.definitions == definitions,
-           cachedExport.state.snapshots == snapshots {
-            return cachedExport
+        if let cachedExport, cachedExport.state.snapshots == snapshots,
+           cachedExport.state.definitions.first?.profileID == definitions.first?.profileID {
+            if cachedExport.state.definitions == definitions { return cachedExport }
+            let export = try cachedExport.replacingDefinitions(definitions)
+            self.cachedExport = export
+            return export
         }
         let export = try makeExport(definitions, snapshots)
         cachedExport = export

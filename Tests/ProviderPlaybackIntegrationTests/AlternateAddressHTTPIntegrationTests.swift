@@ -87,9 +87,10 @@ final class AlternateAddressHTTPIntegrationTests: XCTestCase {
 
         _ = try registry.provider(for: .init(session: updated.session(token: token),
             accountID: updated.id, credentialRevision: updated.credentialRevision))
+        let expectedLibraryIDs = kind.usesMediaBrowserAPI ? ["movies", "\(kind.rawValue):collections"] : ["movies"]
         if !cold {
             let libraries = try await provider.libraries()
-            XCTAssertEqual(libraries.map(\.id), ["movies"])
+            XCTAssertEqual(libraries.map(\.id), expectedLibraryIDs)
             let initialRequests = await primary.requests
             XCTAssertTrue(initialRequests.contains {
                 $0.target.contains("libraries") || $0.target.contains("/Views") || $0.target.contains("/sections")
@@ -97,7 +98,7 @@ final class AlternateAddressHTTPIntegrationTests: XCTestCase {
         }
         await primary.stop()
         let libraries = try await provider.libraries()
-        XCTAssertEqual(libraries.map(\.id), ["movies"])
+        XCTAssertEqual(libraries.map(\.id), expectedLibraryIDs)
         let requests = await alternate.requests
         XCTAssertTrue(requests.contains { $0.target.hasPrefix("/inside/") && $0.headers.values.contains(where: { $0.contains("account-token") }) })
         let publicProbes = requests.filter {

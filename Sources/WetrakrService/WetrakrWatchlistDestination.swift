@@ -3,8 +3,10 @@ import CoreNetworking
 import CoreTrackerAuth
 import Foundation
 
-public actor WetrakrWatchlistDestination: WatchlistDestination, WatchlistReconciliationScopedApplying {
+public actor WetrakrWatchlistDestination: WatchlistBatchApplying {
     public nonisolated let id = WatchlistDestinationID(rawValue: "wetrakr")!
+    public nonisolated let maximumBatchSize = 50
+    public nonisolated let writePolicyVersion = 1
     public nonisolated let capabilities = WatchlistDestinationCapabilities(
         readable: true, writable: true, removable: true, bindingRequirement: .globalExternalIdentity,
         globalIdentityNamespaces: [.imdb, .tmdb, .tvdb, .trakt, .aniList, .myAnimeList, .aniDB, .wetrakr]
@@ -159,33 +161,139 @@ public actor WetrakrWatchlistDestination: WatchlistDestination, WatchlistReconci
         _ desiredState: WatchlistDesiredState, to binding: WatchlistDestinationBinding,
         expectedReconciliationScope: String
     ) async throws {
-        try await operations.run { [self] in
+        let outcomes = try await apply(
+            desiredState, to: [binding], idempotencyKey: UUID().uuidString,
+            expectedReconciliationScope: expectedReconciliationScope
+        )
+        guard let outcome = outcomes.first else { throw AppError.invalidResponse }
+        try outcome.get()
+    }
+
+    public func apply(
+        _ desiredState: WatchlistDesiredState, to bindings: [WatchlistDestinationBinding],
+        idempotencyKey: String, expectedReconciliationScope: String
+    ) async throws -> [Result<Void, WatchlistDestinationError>] {
+        guard !bindings.isEmpty, bindings.count <= maximumBatchSize else {
+            throw WatchlistDestinationError.permanent
+        }
+        return try await operations.run { [self] in
             try await mapped {
-                try await self.write(desiredState, binding: binding, scope: expectedReconciliationScope)
+                try await self.write(
+                    desiredState, bindings: bindings, idempotencyKey: idempotencyKey,
+                    scope: expectedReconciliationScope
+                )
             }
         }
     }
 
-    private func write(_ state: WatchlistDesiredState, binding: WatchlistDestinationBinding, scope: String) async throws {
+    private struct PlanningItem {
+        let kind: MediaItemKind
+        let item: WetrakrTrackingBody.Item
+        var indices: [Int]
+    }
+
+    private func planningItem(_ binding: WatchlistDestinationBinding) throws -> PlanningItem {
         guard binding.destinationID == id, let bytes = Data(base64Encoded: binding.opaqueValue),
               let value = try? JSONDecoder().decode(Binding.self, from: bytes),
               value.kind == .movie || value.kind == .series else { throw WatchlistDestinationError.permanent }
-        let version = generation.current
-        let token = try await accessToken(scope: scope, generation: version)
         let ids = WetrakrIDs.from(Dictionary(value.ids.map {
             ($0.namespace.rawValue.lowercased(), $0.value)
         }, uniquingKeysWith: { first, _ in first }))
         let nativeID = value.ids.first(where: { $0.namespace == .wetrakr })
             .flatMap { Int($0.value) }.flatMap { $0 > 0 ? $0 : nil }
-        guard nativeID != nil || !ids.externalIDs.isEmpty else { throw WatchlistDestinationError.permanent }
+        guard nativeID != nil || !ids.externalIDs.isEmpty else { throw WatchlistDestinationError.unsupportedIdentity }
         let item = WetrakrTrackingBody.Item(id: nativeID, ids: nativeID == nil ? ids : nil, status: "planning")
-        let body = value.kind == .movie ? WetrakrTrackingBody(movies: [item]) : WetrakrTrackingBody(shows: [item])
+        return PlanningItem(kind: value.kind, item: item, indices: [])
+    }
+
+    private func write(
+        _ state: WatchlistDesiredState, bindings: [WatchlistDestinationBinding],
+        idempotencyKey: String, scope: String
+    ) async throws -> [Result<Void, WatchlistDestinationError>] {
+        let version = generation.current
+        let token = try await accessToken(scope: scope, generation: version)
+        let entries = try await fetch()
         try check(scope: scope, version: version)
-        try await client.tracking(
-            body, remove: state == .absent, idempotencyKey: UUID().uuidString, accessToken: token
+        var outcomes: [Result<Void, WatchlistDestinationError>] = Array(
+            repeating: .failure(.permanent), count: bindings.count
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        var grouped: [String: PlanningItem] = [:]
+        var unchanged = 0
+        for (index, binding) in bindings.enumerated() {
+            let prepared: PlanningItem
+            do { prepared = try planningItem(binding) }
+            catch let error as WatchlistDestinationError {
+                outcomes[index] = .failure(error)
+                continue
+            }
+            let sameKind = entries.filter { $0.kind == prepared.kind }
+            let matching = sameKind.filter { entry in
+                if let nativeID = prepared.item.id {
+                    return entry.externalIDs.contains {
+                        $0.namespace == .wetrakr && $0.value == String(nativeID)
+                    }
+                }
+                return WetrakrTrackingResult.matches(
+                    prepared.item.ids?.externalIDs ?? [], entry.externalIDs
+                )
+            }
+            let absent = matching.isEmpty && sameKind.allSatisfy { entry in
+                if prepared.item.id != nil { return true }
+                // Missing catalogue IDs cannot prove absence. Let the service
+                // resolve such removals instead of silently dropping them.
+                return (prepared.item.ids?.externalIDs ?? []).allSatisfy { expected in
+                    entry.externalIDs.contains {
+                        $0.namespace == expected.namespace && $0.value != expected.value
+                    }
+                }
+            }
+            if (state == .present && matching.count == 1) || (state == .absent && absent) {
+                outcomes[index] = .success(())
+                unchanged += 1
+                continue
+            }
+            let key = prepared.kind.rawValue + ":" + (try encoder.encode(prepared.item)).base64EncodedString()
+            if grouped[key] != nil {
+                grouped[key]?.indices.append(index)
+            } else {
+                var item = prepared
+                item.indices = [index]
+                grouped[key] = item
+            }
+        }
+        let sorted = grouped.keys.sorted().compactMap { grouped[$0] }
+        let movies = sorted.filter { $0.kind == .movie }
+        let shows = sorted.filter { $0.kind == .series }
+        let pending = movies + shows
+        guard !pending.isEmpty else {
+            await client.gate.planningBatch(items: bindings.count, unchanged: unchanged, outcomes: outcomes)
+            return outcomes
+        }
+        let body = WetrakrTrackingBody(
+            movies: movies.isEmpty ? nil : movies.map(\.item),
+            shows: shows.isEmpty ? nil : shows.map(\.item)
+        )
+        // A retry can omit titles proven present by a fresh read. Couple the key
+        // to that exact remaining payload, not merely the original queue batch.
+        let key = WatchlistReconciliationIdentity.credential(
+            idempotencyKey + "\u{0}" + (try encoder.encode(body)).base64EncodedString()
         )
         try check(scope: scope, version: version)
         cache = nil
+        let result = try await client.trackingResult(
+            body, remove: state == .absent, idempotencyKey: key, accessToken: token
+        )
+        try check(scope: scope, version: version)
+        let applied = try result.planningOutcomes(
+            movies: movies.map(\.item), shows: shows.map(\.item), removing: state == .absent
+        )
+        for (item, outcome) in zip(pending, applied) {
+            for index in item.indices { outcomes[index] = outcome }
+        }
+        await client.gate.planningBatch(items: bindings.count, unchanged: unchanged, outcomes: outcomes)
+        return outcomes
     }
 
     private struct Binding: Codable { let kind: MediaItemKind; let ids: [WatchlistExternalID] }
@@ -235,7 +343,7 @@ public actor WetrakrWatchlistDestination: WatchlistDestination, WatchlistReconci
         catch let error as WatchlistDestinationError { throw error }
         catch AppError.unauthorized { throw WatchlistDestinationError.authenticationRequired }
         catch AppError.rateLimited(let delay) { throw WatchlistDestinationError.rateLimited(retryAfter: delay) }
-        catch AppError.notFound { throw WatchlistDestinationError.permanent }
+        catch AppError.notFound { throw WatchlistDestinationError.unsupportedIdentity }
         catch WetrakrError.itemRejected { throw WatchlistDestinationError.permanent }
         catch { throw WatchlistDestinationError.transient }
     }

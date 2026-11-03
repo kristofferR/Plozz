@@ -46,6 +46,8 @@ public struct MediaCardPlaybackIndicators: View {
     @Environment(\.plozzMetrics) private var metrics
     @Environment(\.plozzWatchStatusIndicator) private var watchStatusIndicator
     @Environment(\.plozzShowsUnwatchedEpisodeCount) private var showsUnwatchedEpisodeCount
+    @Environment(\.plozzShowsProgressBars) private var showsProgressBars
+    @Environment(\.plozzEpisodeCountBadgeStyle) private var episodeCountStyle
     /// Whether an unowned title can be requested, or is merely flagged as absent.
     @Environment(\.plozzSeerConnected) private var seerConnected
     /// Published by the hosting card so this chrome can settle back at rest and
@@ -188,7 +190,7 @@ public struct MediaCardPlaybackIndicators: View {
     }
 
     private var showsProgressBar: Bool {
-        MediaPlaybackIndicatorPresentation.showsProgress(for: playback)
+        showsProgressBars && MediaPlaybackIndicatorPresentation.showsProgress(for: playback)
     }
 
     /// Any chrome along the card's bottom edge that needs the artwork darkened
@@ -242,10 +244,10 @@ public struct MediaCardPlaybackIndicators: View {
 
     private func episodeCountBadge(_ count: Int) -> some View {
         MediaEpisodeCountBadge(
-            count: count, indicator: watchStatusIndicator, size: metrics.watchedBadgeSize,
+            count: count, style: episodeCountStyle, size: metrics.watchedBadgeSize,
             cornerRadius: artworkCornerRadius ?? metrics.posterArtworkCornerRadius
         )
-        .padding(watchStatusIndicator == .watched ? floatingBadgeInset : 0)
+        .padding(episodeCountStyle == .floating ? floatingBadgeInset : 0)
         .accessibilityLabel(Text("Unwatched episodes: \(count)"))
     }
 
@@ -345,7 +347,7 @@ enum NativePosterIndicators: View, Equatable {
                 showsEpisodeCount: showsEpisodeCount, seerConnected: seerConnected
             ) != nil
         case let .episode(isWatched, hasProgress, isVisible, style, _, _):
-            return isVisible && (style == .watched ? isWatched : !isWatched && !hasProgress)
+            return isVisible && style != .hidden && (style == .watched ? isWatched : !isWatched && !hasProgress)
         }
     }
 
@@ -366,6 +368,8 @@ enum NativePosterIndicators: View, Equatable {
                         if !isWatched && !hasProgress {
                             MediaUnwatchedCorner(size: flagSize)
                         }
+                    case .hidden:
+                        EmptyView()
                     }
                 }
             }
@@ -373,10 +377,10 @@ enum NativePosterIndicators: View, Equatable {
     }
 }
 
-enum MediaWatchIndicatorStyle {
+public enum MediaWatchIndicatorStyle {
     /// The badge and flag fill. Fixed sRGB values rather than system colours so
     /// the mark looks the same in every theme and appearance.
-    static func fill(_ color: WatchIndicatorColor) -> Color {
+    public static func fill(_ color: WatchIndicatorColor) -> Color {
         switch color {
         case .white: .white
         case .blue: Color(red: 0.04, green: 0.52, blue: 1.0)
@@ -390,7 +394,7 @@ enum MediaWatchIndicatorStyle {
     }
 
     /// The check glyph over `fill(_:)`: dark on the light fills, white otherwise.
-    static func foreground(_ color: WatchIndicatorColor) -> Color {
+    public static func foreground(_ color: WatchIndicatorColor) -> Color {
         switch color {
         case .white, .yellow, .orange, .green: Color(white: 0.13)
         case .blue, .red, .pink, .purple: .white
@@ -441,7 +445,7 @@ struct MediaUnwatchedCorner: View {
 
 struct MediaEpisodeCountBadge: View {
     let count: Int
-    let indicator: WatchStatusIndicator
+    let style: EpisodeCountBadgeStyle
     let size: CGFloat
     let cornerRadius: CGFloat
     @Environment(\.nativePosterIndicatorLayer) private var nativeIndicatorLayer
@@ -457,8 +461,8 @@ struct MediaEpisodeCountBadge: View {
     }
 
     @ViewBuilder var body: some View {
-        switch indicator {
-        case .watched:
+        switch style {
+        case .floating:
             if nativeIndicatorLayer != .background {
                 digits
                     .padding(.horizontal, 12 * scale)
@@ -470,7 +474,7 @@ struct MediaEpisodeCountBadge: View {
                     }
                     .shadow(color: .black.opacity(0.2), radius: 3 * scale, y: scale)
             }
-        case .unwatched:
+        case .attached:
             let height = 52 * scale
             let width = max(48, 24 + CGFloat(String(count).count) * 16) * scale
             let radius = min(cornerRadius, height / 2)
@@ -514,7 +518,7 @@ public struct MediaPlaybackIndicatorState: Equatable, Sendable {
     public init(_ item: MediaItem) {
         kind = item.kind
         isPlayed = item.isPlayed
-        playedPercentage = item.playedPercentage
+        playedPercentage = item.playedPercentage ?? item.resumeProgressFraction
         unwatchedEpisodeCount = item.unwatchedEpisodeCount
         resumePosition = item.resumePosition
         // Same shared classifier the corner mark and the detail page use, so a card
@@ -561,6 +565,8 @@ enum MediaPlaybackIndicatorPresentation {
             return showsWatchedBadge(for: item, hidesStatus: hidesStatus) ? .watched : nil
         case .unwatched:
             return showsUnwatchedFlag(for: item, hidesStatus: hidesStatus) ? .unwatched : nil
+        case .hidden:
+            return nil
         }
     }
 

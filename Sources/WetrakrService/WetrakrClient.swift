@@ -137,6 +137,14 @@ actor WetrakrRequestGate {
         PlozzLog.networking.debug(line)
         HandoffDiagnostics.emit(line)
     }
+
+    func planningBatch(
+        items: Int, unchanged: Int, outcomes: [Result<Void, WatchlistDestinationError>]
+    ) {
+        let succeeded = outcomes.filter { if case .success = $0 { return true }; return false }.count
+        let unresolved = outcomes.filter { if case .failure(.unsupportedIdentity) = $0 { return true }; return false }.count
+        emit("planning batch items=\(items) unchanged=\(unchanged) confirmed=\(succeeded) unresolved=\(unresolved) failed=\(items - succeeded - unresolved)")
+    }
 }
 
 struct WetrakrClient: Sendable {

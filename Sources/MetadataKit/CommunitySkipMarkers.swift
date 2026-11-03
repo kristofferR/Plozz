@@ -281,13 +281,16 @@ enum TheIntroDBClient {
         return components?.url
     }
 
-    static func segments(for query: CommunitySkipMarkerQuery) async -> [MediaSegment] {
+    static func segments(
+        for query: CommunitySkipMarkerQuery,
+        session: URLSession = MetadataHTTP.session
+    ) async -> [MediaSegment] {
         guard !Task.isCancelled else { return [] }
         guard let url = url(for: query) else {
             PlozzLog.playback.debug("TheIntroDB lookup omitted: unsupported identity, episode order or coordinates")
             return []
         }
-        let result = await MetadataHTTP.getWithStatus(Response.self, url: url)
+        let result = await MetadataHTTP.getWithStatus(Response.self, url: url, session: session)
         guard !Task.isCancelled else { return [] }
         guard let response = result.value else {
             if !result.reachable {

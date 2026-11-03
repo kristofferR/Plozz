@@ -61,6 +61,10 @@ struct LibraryHeldScrollFixture: View {
             ProcessInfo.processInfo.arguments.contains("--borderless") ? .borderless : .framed
         )
         .environment(\.plozzMetrics, .standard)
+        .environment(\.plozzNavigationContentInset,
+                     ProcessInfo.processInfo.arguments.contains("--library-alignment-pinned-sidebar") ? 64 : 0)
+        .environment(\.plozzPinnedSidebarActive,
+                     ProcessInfo.processInfo.arguments.contains("--library-alignment-pinned-sidebar"))
         .environment(\.themePalette, .dark)
         .environment(\.colorScheme, .dark)
         .mediaItemActionHandler(actions)

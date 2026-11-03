@@ -235,17 +235,30 @@ class ExtractionFreshnessTests(unittest.TestCase):
                 with self.assertRaises(freshness.FreshnessError):
                     self.receipt.record(self.receipt.inputs())
 
-    def test_dirty_or_replaced_checkout_invalidates_even_with_same_package_lock(self):
+    def test_package_status_uses_a_longer_bounded_budget_than_metadata(self):
+        checkout = self.workspace / "checkouts/Dependency"
+        checkout.mkdir(parents=True)
+        with patch.object(freshness.subprocess, "check_output", side_effect=[b"", b"pin-one"]) as run:
+            freshness.package_workspace_fingerprint(self.root, self.workspace)
+        status, head = run.call_args_list
+        self.assertEqual(status.args[0], ("git", "status", "--porcelain", "--untracked-files=all"))
+        self.assertEqual(status.kwargs["timeout"], 120)
+        self.assertEqual(head.args[0], ("git", "rev-parse", "HEAD"))
+        self.assertEqual(head.kwargs["timeout"], 30)
+
+    def test_dirty_replaced_or_timed_out_checkout_invalidates_even_with_same_package_lock(self):
         checkout = self.workspace / "checkouts/Dependency"
         checkout.mkdir(parents=True)
         original = freshness.command
-        state = {"dirty": False, "head": "pin-one"}
-        def command(root, *args):
+        state = {"dirty": False, "head": "pin-one", "timeout": False}
+        def command(root, *args, timeout=30):
             if root == checkout:
                 if args[1] == "status":
+                    if state["timeout"]:
+                        raise subprocess.TimeoutExpired(args, timeout)
                     return b" M Source.swift\n" if state["dirty"] else b""
                 return state["head"].encode()
-            return original(root, *args)
+            return original(root, *args, timeout=timeout)
         with patch.object(freshness, "command", side_effect=command):
             self.record()
             state["dirty"] = True
@@ -254,6 +267,11 @@ class ExtractionFreshnessTests(unittest.TestCase):
             self.assertTrue(self.matches())
             state["head"] = "pin-two"
             self.assertFalse(self.matches())
+            state["head"] = "pin-one"
+            state["timeout"] = True
+            self.assertFalse(self.matches())
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.record()
 
     def test_parent_push_hook_environment_does_not_redirect_dependency_git(self):
         checkout = self.workspace / "checkouts/Dependency"

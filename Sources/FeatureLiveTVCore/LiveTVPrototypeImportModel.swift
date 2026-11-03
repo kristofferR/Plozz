@@ -1303,10 +1303,6 @@ public final class LiveTVPrototypeImportModel {
         }.map { ($0.id, $0.source.url) })
         guideSources.removeAll { oldDiscoveredIDs.contains($0.id) }
         enabledSourceIDs.subtract(oldDiscoveredIDs)
-        guard source.discoversPlaylistGuides else {
-            for id in oldDiscoveredIDs { cachedGuides[id] = nil; cachedGuideWindows[id] = nil }
-            return
-        }
         for (index, url) in playlist.declaredGuideURLs.enumerated() {
             guard !source.guideURLs.contains(where: { LiveTVPlaylistSource.guideURLsShareIdentity($0, url) }) else { continue }
             guard !guideSources.contains(where: { $0.playlistSourceID == source.id && $0.source.url == url }) else { continue }

@@ -40,9 +40,108 @@ session persistence.
   removal still requires confirmation, and the original address cannot be removed.
   The add action uses a native title-and-icon label so the group's muted row-icon
   color cannot override the prominent button's contrasting foreground.
+- **Source entry points** — both platforms use **Sources** for the device's
+  connected accounts and **Add Source** for the general provider chooser, using
+  `SettingsCopy` for shared labels. Mobile Home and Settings do not have a
+  separate network-share shortcut: **Media Share** is one of the chooser's
+  provider choices. Profile Libraries retains its add action even with connected
+  sources, with device-wide scope made explicit. First-run provider choices,
+  provider-specific reconnects, additional-user sign-in, and device transfer
+  remain distinct flows. **TV Sources / Add TV Source** names the narrower
+  profile-scoped channel setup; its general connection action still opens
+  **Add Source**.
+- **Mobile server onboarding** — `AppShelliOS.AddServerView` starts with the
+  same provider choices as first-run setup, then uses native navigation to
+  discovery and sign-in. Seeded server/user, synced-server, and IPTV reconnect
+  routes skip the chooser. Saved and discovered servers open sign-in directly;
+  manual addresses still pass through `ServerPickerViewModel` validation.
+  `ServerOnboardingPage` keeps mobile discovery, Quick Connect, password, and
+  Plex screens scrollable and width-capped on iPhone and iPad. Plex keeps browser
+  linking and manual codes, preselects owned servers, and adds only the checked
+  servers after Continue. Empty selection cannot continue. Leaving the server
+  selection asks for confirmation, and leaving authentication cancels its work.
+  Mobile primary and secondary page actions use `plozzPageActionButton`, with matching
+  20-point page insets and a 640-point content cap across the server flows.
+  Welcome, Add Source, Silo, and IPTV page actions share `plozzPageActionLabel`
+  inside native large buttons, including alternative sign-in methods.
+  The mobile navigation owner supplies top-leading Cancel at the modal root
+  and Back on subsequent steps. Silo and IPTV suppress their standalone
+  in-content cancellation when hosted in that flow; leaving a step cancels its
+  authentication/import work. Plex preserves its selection-loss confirmation
+  for both root Cancel and pushed Back.
+  Silo uses a matching secondary button to reveal another-device instructions
+  and a short code-verification reminder below its browser action.
+  Mobile link codes use the shared mobile code size without an enclosing
+  settings card, and the code tile uses the shared theme-aware group surface
+  instead of a dark overlay. The shared `LinkCodeExpiryCountdown` sits beside the code when
+  it fits, stacking below at narrow widths or larger text sizes; its neutral
+  mobile tint turns orange near expiry. TV retains its existing layout and tint.
+  Shared Silo and IPTV retain their setup behavior and tvOS layout; media shares
+  retain their native form flow.
+
+Mobile interaction tests use deterministic transport fixtures for navigation,
+retry, cancellation, and selection coverage. `LiveMobileServerOnboardingTests`
+is opt-in through `PLOZZ_ONBOARDING_LIVE_HELPER`, a caller-owned loopback URL.
+The helper serves `GET connection/{jellyfin,emby}` with non-secret `baseURL` and
+`username` fields, and accepts `POST approve-jellyfin` with a `code` field to
+approve the displayed Quick Connect request. It must use dedicated authorized
+test identities and keep credentials in memory, outside launch arguments,
+XCTest logs, and attachments. These tests use real validation/authentication
+and an isolated in-memory account store; they never run against live servers
+in the default suite.
 
 ## Invariants
 
+- **Managed-server recovery does not require removal.** Plex, Jellyfin, Emby,
+  and Silo expose Sign In Again from server settings and rejected library loads.
+  Recovery uses the provider's existing link, password, Quick Connect, or pairing
+  flow and requires the original server/user (and Silo profile). It preserves
+  the exact account ID and selections, refuses stale or removed accounts, and
+  rechecks profile authorization before saving. An unsuccessful save stays in
+  sign-in with Retry/Cancel instead of claiming success or dismissing.
+  IPTV authentication failures open its existing connection editor. Network
+  failures retain Retry and do not discard credentials or send file shares
+  through a media-server sign-in flow.
+- **Recovery uses the shared screen treatment.** Plex gate failures and managed
+  account sign-in errors use `RecoveryScreen`, also used by playback failures,
+  with `ProviderBrandMark` and native `plozzActionButton` controls. The provider
+  heading, affected name and error remain distinct. Account recovery inherits
+  the browsing theme rather than playback's dark-only policy. Actions adapt to
+  width, stacked mobile actions fill the card's content width, all content
+  scrolls at large text sizes, and TV entry focuses Sign In
+  Again (or Retry when a sign-in attempt failed).
+  On TV, managed account recovery owns the shared opaque dialog surface through
+  the link-code phase too; the covered Settings error must not show through
+  behind the QR code or instructions.
+- **Plex account recovery stays inside the profile gate.** A rejected Home-user
+  list request means the saved account needs sign-in, not that the server is
+  offline or the user's Home PIN is wrong. Failed activations offer Sign In Again
+  on both platforms, using Plex's hosted link flow (including MFA). Recovery
+  accepts only the original Plex login and server and replaces that exact saved
+  account under a compare-and-swap. Account IDs, selections, alternate addresses,
+  profile bindings, and library preferences survive. Removed/replaced accounts,
+  cancelled linking, and superseded profile activations cannot commit credentials.
+  Linking does not unlock a Home user: current PIN protection is checked again.
+  Cancelling returns to the unresolved gate without exposing the owner's content.
+- **Repeat sign-ins reuse the exact server/user connection.** Authentication
+  matches provider, backend server ID, and authenticated user ID under the account
+  store's mutation lock. Existing account IDs, creation order, approved alternate
+  addresses, and enabled/disabled selections survive reconnecting, including older
+  randomly identified accounts. Fresh credentials replace the existing credential;
+  unchanged credentials keep their revision. Server names, addresses, and library
+  overlap are not identities. Different users on the same server remain separate,
+  and Plex Home bindings remain attached to their existing Plozz profiles.
+  Already-saved duplicates are not silently deleted or merged.
+- **Public discovery retains the canonical API address.** Jellyfin/Emby may
+  upgrade HTTP to HTTPS on the same hostname or redirect within the same origin,
+  preserving the final reverse-proxy prefix. Public requests carry no credentials;
+  authenticated redirects remain same-origin only. Sign-in retains the resolved
+  address and uses it for the user avatar. The launch metadata refresher repairs
+  older saved addresses only when the public server ID matches. Its metadata-only
+  compare-and-swap cannot revive a removed account or overwrite a concurrent
+  credential/address change. Account IDs, credential revisions, alternate
+  addresses and active selection remain unchanged. Connection-scope updates
+  refresh retained providers and trigger library/Home reloads on both platforms.
 - **Alternate addresses belong to one local sign-in.** `ServerAddressesModel`
   verifies Jellyfin/Emby public server IDs and Plex machine identifiers without
   sending saved credentials. Silo uses fresh native device pairing and matches
@@ -60,12 +159,43 @@ session persistence.
   than invalidating every provider and losing active Silo grants.
 - **Tokens NEVER leave the Keychain.** Never written to `UserDefaults`,
   never logged. `AccountStore` is split-storage by design.
+- **One Plex Home authorization across servers.** During one profile activation,
+  a successful Home-user PIN authenticates that Plex login/user once. Other enabled
+  servers with the same Plex account user ID and Home-user UUID reuse its in-memory
+  cloud token and resolve their own server access tokens. No PIN is retained or
+  replayed. Sharing is limited to the account credentials, bindings, and source
+  generations captured for that activation; cancellation, manual activation,
+  disabled sources, credential replacement, and changed identities cannot reuse
+  stale proof. Distinct Plex logins or different Home users remain independent.
+  Opt-in automatic startup reconstructs sharing only for the saved session's
+  validated accounts. Re-enabling a sibling server can reuse an enabled user's
+  authorization; disabling the last authorized source still removes that proof.
+- **IPTV cache cleanup uses the complete household inventory.** Background
+  maintenance runs at startup and after account mutations on both platforms.
+  It preserves disabled/profile-unselected accounts and fails closed on missing,
+  malformed, or unreadable credentials or a missing household account record.
+  An explicitly persisted empty list is distinct from a record that has not yet
+  been promoted from the per-user Keychain. tvOS maintenance does not use a per-user
+  Keychain fallback to authorize deletion. Removed/replaced catalogues are reclaimed
+  only after their final SQLite connection closes and a fresh inventory confirms
+  that no saved account references them. Unowned legacy cache files need a 24-hour
+  grace period; recent setup files remain protected until sign-in is persisted.
+  Maintenance only scans the IPTV cache directory, never imported playlist
+  snapshots in Application Support, watch state, or sync data. Saved journals are
+  recovered through SQLite off the main thread, with busy readers left intact;
+  failed/cancelled imports also reclaim journals after rollback.
 - **Pure state machine.** `SessionStateMachine` has no I/O — all side
   effects live in the services it produces events for.
 - **Provider-appropriate sign-in.** Jellyfin uses Quick Connect or password,
   Emby uses password, and Plex uses Link.
 - **Always cancellable.** Every flow must be Cancel-able from the remote
   without leaking polling tasks.
+- **Connection reports distinguish validation from sign-in.** Password sign-in
+  and Quick Connect add bounded `ServerConnectionDiagnostics` records to the
+  existing explicit diagnostic submission. Quick Connect records begin/approval
+  stages rather than one journal entry per poll. Cancelled work is excluded;
+  usernames, passwords, codes, tokens, server addresses, and response bodies
+  are never retained by this journal.
 - **IPTV editor removal captures row identity first.** Guide/header removal
   actions capture the row's ID before mutating its collection. Reading a bound
   row from inside `removeAll` can overlap the collection's exclusive write
@@ -79,10 +209,13 @@ session persistence.
   catalog. Blank/comment-only responses without a playlist header, invalid content
   such as a web page, and playlists containing only unusable entries still fail
   setup without creating an account. Imported files remain device-local snapshots.
-- **IPTV setup keeps optional configuration behind a disclosure.** Playlist
-  authentication, guides, and request headers live under Advanced options;
-  required Xtream credentials stay in Connection. Existing advanced settings
-  start expanded, and collapsing never clears or disables them. The HTTP warning
+- **IPTV setup discovers guides automatically.** The basic form exposes one
+  optional EPG URL; leaving it empty uses the provider's guide. Custom guide URLs
+  keep priority and are never overwritten by automatic discovery. There is no
+  separate discovery toggle, including when reconnecting an old account.
+  Playlist authentication, additional guides, and request headers live under
+  Advanced options; required Xtream credentials stay in Connection. Existing
+  advanced settings start expanded, and collapsing never clears or disables them. The HTTP warning
   appears only for an entered playlist/server or guide address using HTTP.
   Form controls share body typography and contained settings-row focus styling;
   only Connect and Cancel use the shared action-pill style. Section headings and
@@ -173,6 +306,9 @@ the source verifies current protection and requires its PIN before content acces
 neither old credentials nor an in-flight response can authorize it. Hiding libraries
 within an enabled source does not waive authentication. Separate Plozz Profile Locks
 and Kids Profile exit gates are unchanged.
+Both profile pickers use this same source membership for their lock indicators,
+including before a profile is selected; a disabled Plex source alone does not
+mark a Silo, Jellyfin, or other non-Plex profile as locked.
 
 `AppRuntime.AutomaticSignInStore` retains one session in a non-synchronizable,
 ThisDeviceOnly Keychain item (per Apple TV system user). It stores authenticated
@@ -191,8 +327,21 @@ Only the startup entry point can restore this session, once per process. Manual
 profile activation discards startup unlock credit and Plex overrides, so switching
 back to a protected Plex Home user still requires their PIN, including two Plozz
 profiles mapped to the same Plex user. Local Profile Locks and Kids Profile exit
-gates remain in force for manual switching. Disabling automatic sign-in removes
-the stored session without changing any PIN; sign-out invalidates it.
+gates remain in force for manual switching. Local unlock proof expires on every
+active-profile change, not just process exit; async verification must still match
+the original request, selection generation and lock before granting entry.
+On tvOS, Automatically Sign In also bypasses the return picker. With it off,
+selection is required on every return if any profile has a local or Plex PIN,
+after five minutes away for multiple unprotected profiles, and not on warm
+returns for one unprotected profile. This timing is derived, not configurable.
+Expiry revokes live PIN proof. Foreground reauthorization retains the same
+viewer's credentials behind an opaque input-blocking gate so unchanged tokens do
+not reset browsing identity. It still checks current Plex protection, never
+replays old PIN proof, and retains the gate on cancellation or network failure.
+Different-profile selection continues to clear credentials normally. Player
+exemptions and navigation retention are described in `FeatureProfiles/README.md`.
+Disabling automatic sign-in removes the stored session without changing any PIN;
+sign-out invalidates it.
 Every unresolved Plex binding verifies current Home-user protection before entry,
 even if its last saved status said no PIN. Removing and later re-adding a Plex PIN
 must therefore prompt on the next manual switch. Old unprotected token-cache
@@ -208,10 +357,12 @@ using the owner's credential alone is not proof of PIN removal or PIN knowledge.
 Legacy bindings without a verified protection marker cannot restore unprotected
 cached tokens or automatic-sign-in sessions until they are revalidated.
 Verification is not PIN entry: both shells show a neutral loading state while
-checking and a retryable error when protection cannot be determined. The PIN
-heading, identity badge, and keypad are instantiated only after Plex explicitly
-confirms that the selected Home user is protected. An unprotected user never
-passes through a PIN screen, including while its authorization cover dismisses.
+checking and a retryable error when protection cannot be determined. The
+Plex PIN heading and keypad are instantiated only after Plex explicitly confirms
+that the selected Home user is protected. A local Plozz PIN already entered
+remains visible and disabled during chained verification, rather than disappearing
+while its matching PIN authenticates with Plex. An unprotected Plex-only user
+never passes through a PIN screen, including while its authorization cover dismisses.
 Plex's account-password flag (`hasPassword`) is not Home PIN protection; only
 the explicit `protected` field establishes that requirement.
 Plex rejecting a PIN-less switch leaves a retryable authentication error, not a

@@ -25,6 +25,83 @@ public enum PlozzRailTitle {
     }
 }
 
+private struct MediaRowHeaderTrailingInsetKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
+public extension EnvironmentValues {
+    /// Title-safe space restored by a page whose artwork ignores the trailing safe area.
+    var mediaRowHeaderTrailingInset: CGFloat {
+        get { self[MediaRowHeaderTrailingInsetKey.self] }
+        set { self[MediaRowHeaderTrailingInsetKey.self] = newValue }
+    }
+}
+
+public struct MediaRowHeader: View {
+    private let title: Text
+    private let leadingInset: CGFloat
+    private let onSeeAll: (() -> Void)?
+    private let onFocusEntered: (() -> Void)?
+    @FocusState private var seeAllFocused: Bool
+    @Environment(\.plozzMetrics) private var metrics
+    @Environment(\.redactionReasons) private var redactionReasons
+    @Environment(\.themePalette) private var palette
+    @Environment(\.plozzNavigationContentInset) private var navigationContentInset
+    @Environment(\.mediaRowHeaderTrailingInset) private var trailingInset
+
+    public init(
+        title: Text, leadingInset: CGFloat = PlozzTheme.Metrics.screenPadding,
+        onSeeAll: (() -> Void)? = nil, onFocusEntered: (() -> Void)? = nil
+    ) {
+        self.title = title
+        self.leadingInset = leadingInset
+        self.onSeeAll = onSeeAll
+        self.onFocusEntered = onFocusEntered
+    }
+
+    public var body: some View {
+        Group {
+            if let onSeeAll {
+                HStack {
+                    heading
+                    Spacer()
+                    Button("See all", action: onSeeAll)
+                        .font(.callout)
+                        .plozzActionButton(role: .secondary)
+                        .focused($seeAllFocused)
+                        .onChange(of: seeAllFocused) { _, focused in
+                            if focused { onFocusEntered?() }
+                        }
+                }
+                .padding(.trailing, leadingInset + trailingInset)
+            } else {
+                heading
+            }
+        }
+        .accessibilityIdentifier("media-row-title")
+        .padding(.leading, leadingInset + navigationContentInset)
+        .modifier(PlozzRowTitlePosition())
+    }
+
+    private var heading: some View {
+        let header = title.font(PlozzRailTitle.font(sectionHeaderFontSize: metrics.sectionHeaderFontSize))
+        return Group {
+            if redactionReasons.contains(.placeholder) {
+                header
+                    .hidden()
+                    .overlay(alignment: .leading) {
+                        Capsule(style: .continuous)
+                            .fill(palette.fill)
+                            .frame(width: 220, height: 26)
+                    }
+                    .shimmering()
+            } else {
+                header
+            }
+        }
+    }
+}
+
 public struct MediaRowView: View {
     public enum Presentation: Equatable, Sendable {
         case poster
@@ -55,6 +132,7 @@ public struct MediaRowView: View {
     /// name (provider content), and only the caller knows which. `nil` renders no
     /// heading (previously spelled as an empty string).
     private let title: Text?
+    private let onSeeAll: (() -> Void)?
     private let loadingPlaceholderCount: Int
     /// Gives the first pending Home row a visible waiting destination. Other
     /// skeletons stay inert; data arriving below must not choose initial focus.
@@ -127,11 +205,12 @@ public struct MediaRowView: View {
     @Environment(\.plozzCardCaptionsHidden) private var captionsHidden
     @Environment(\.plozzCardStyle) private var cardStyle
     @Environment(\.plozzArtworkPolicy) private var presentationArtworkPolicy
-    @Environment(\.plozzRowTitleTightening) private var titleTightening
     /// Keeps branch-specific masking completely out of native navigation styles.
     @Environment(\.plozzPinnedSidebarActive) private var pinnedSidebarActive
     #if os(tvOS)
+    @Environment(\.mediaRowHeaderTrailingInset) private var pageTrailingSafeInset
     @State private var portraitViewportWidth: CGFloat = 0
+    @State private var trailingSafeInset: CGFloat = 0
     #endif
 
     /// Extra scroll margin beyond the fade, so a FOCUSED card — which grows
@@ -140,6 +219,18 @@ public struct MediaRowView: View {
     /// the moment it takes focus, which is the symptom this exists to prevent.
     private var focusLiftAllowance: CGFloat { 28 }
     private let onSelect: (MediaItem) -> Void
+    #if os(iOS)
+    private var onSelectArtwork: ((MediaItem, MediaArtworkZoomSource) -> Void)?
+
+    public func artworkNavigation(
+        _ action: ((MediaItem, MediaArtworkZoomSource) -> Void)?
+    ) -> Self {
+        var copy = self
+        copy.onSelectArtwork = action
+        return copy
+    }
+    #endif
+    private let onPlay: ((MediaItem) -> Void)?
     /// When `true`, selecting a card starts playback immediately, so its cards
     /// show the resume chip (play glyph + progress bar + time). Threaded to
     /// `PosterCardView.playsOnSelect`.
@@ -172,7 +263,6 @@ public struct MediaRowView: View {
     private let itemByID: [String: MediaItem]
 
     @Environment(\.plozzMetrics) private var metrics
-    @Environment(\.themePalette) private var palette
     @State private var activity = MediaRowActivity()
     /// The card focus was on when this row's page was covered — see `isCovered`.
     @State private var coveredFocusID: String?
@@ -183,6 +273,15 @@ public struct MediaRowView: View {
     @State private var alignedEntryTarget: String?
     @PlozzCardFocus private var loadingCardFocused: Bool
     @State private var tracksLoadingFocus: Bool
+    private var onBrowse: (() -> Void)?
+    private var usesRowBrowsing = false
+
+    public func browsingRow(_ action: (() -> Void)?) -> Self {
+        var copy = self
+        copy.onBrowse = action
+        copy.usesRowBrowsing = true
+        return copy
+    }
 
     public init(
         title: Text?,
@@ -212,6 +311,8 @@ public struct MediaRowView: View {
         showsResumeChip: Bool = false,
         liveChannels: [HomeLiveTVChannel] = [],
         onLiveChannelFocused: ((HomeLiveTVChannel) -> Void)? = nil,
+        onPlay: ((MediaItem) -> Void)? = nil,
+        onSeeAll: (() -> Void)? = nil,
         onSelect: @escaping (MediaItem) -> Void
     ) {
         self.init(
@@ -242,6 +343,8 @@ public struct MediaRowView: View {
             showsResumeChip: showsResumeChip,
             liveChannels: liveChannels,
             onLiveChannelFocused: onLiveChannelFocused,
+            onPlay: onPlay,
+            onSeeAll: onSeeAll,
             onSelect: onSelect
         )
     }
@@ -274,9 +377,12 @@ public struct MediaRowView: View {
         showsResumeChip: Bool = false,
         liveChannels: [HomeLiveTVChannel] = [],
         onLiveChannelFocused: ((HomeLiveTVChannel) -> Void)? = nil,
+        onPlay: ((MediaItem) -> Void)? = nil,
+        onSeeAll: (() -> Void)? = nil,
         onSelect: @escaping (MediaItem) -> Void
     ) {
         self.title = title
+        self.onSeeAll = onSeeAll
         self.loadingPlaceholderCount = max(loadingPlaceholderCount, 0)
         self.reservesLoadingFocus = reservesLoadingFocus
         _tracksLoadingFocus = State(initialValue: reservesLoadingFocus)
@@ -314,6 +420,7 @@ public struct MediaRowView: View {
         self.pendingRemovalIDs = pendingRemovalIDs
         self.playsOnSelect = playsOnSelect
         self.showsResumeChip = showsResumeChip
+        self.onPlay = onPlay
         self.onSelect = onSelect
         // Every derived table is built from the DEDUPED array, never from the
         // caller's. Building them from the original left indices pointing at
@@ -461,42 +568,17 @@ public struct MediaRowView: View {
         }?.stablePresentationID ?? suppliedID
     }
 
-    private struct MediaRowHeader: View {
-        let title: Text
-        @Environment(\.plozzMetrics) private var metrics
-        @Environment(\.redactionReasons) private var redactionReasons
-        @Environment(\.themePalette) private var palette
-
-        var body: some View {
-            let header = title
-                .font(PlozzRailTitle.font(
-                    sectionHeaderFontSize: metrics.sectionHeaderFontSize
-                ))
-            if redactionReasons.contains(.placeholder) {
-                // A loading row keeps the title's exact height and draws Home's
-                // skeleton title pill in place of the words.
-                header
-                    .hidden()
-                    .overlay(alignment: .leading) {
-                        Capsule(style: .continuous)
-                            .fill(palette.fill)
-                            .frame(width: 220, height: 26)
-                    }
-                    .shimmering()
-            } else {
-                header
-            }
-        }
-    }
-
     public var body: some View {
-        if !items.isEmpty || !liveChannels.isEmpty || loadingPlaceholderCount > 0 || episodeEntry != nil {
-            VStack(alignment: .leading, spacing: layoutMetrics.sectionTitleSpacing - titleTightening) {
-                if let title {
-                    MediaRowHeader(title: title)
-                        .accessibilityIdentifier("media-row-title")
+        if !items.isEmpty || !liveChannels.isEmpty || loadingPlaceholderCount > 0 || episodeEntry != nil
+            || onSeeAll != nil || onBrowse != nil {
+            MediaRowSection(
+                title: title, leadingInset: leadingInset, spacing: layoutMetrics.sectionTitleSpacing,
+                onSeeAll: usesRowBrowsing ? nil : onSeeAll, onFocusEntered: onFocusEntered
+            ) {
+                if items.isEmpty && loadingPlaceholderCount == 0 && onSeeAll != nil {
+                    Text("No titles in this collection.")
+                        .plozzForeground(.secondary)
                         .padding(.leading, leadingInset + navigationContentInset)
-                        .modifier(PlozzRowTitlePosition())
                 }
 
                 PinnedSidebarLeadingFade(
@@ -525,6 +607,7 @@ public struct MediaRowView: View {
                                     } else {
                                         loadingPlaceholder
                                             .frame(width: cardSlotWidth)
+                                            .opacity(episodeEntry == nil ? 1 : 0)
                                     }
                                 }
                             }
@@ -536,12 +619,27 @@ public struct MediaRowView: View {
                                     onLiveChannelFocused?(focused)
                                 }
                             }
+                            #if os(tvOS)
+                            if let onBrowse, loadingPlaceholderCount == 0 {
+                                MediaRowBrowseCard(
+                                    width: cardSlotWidth,
+                                    style: presentation == .poster ? .poster : .landscape,
+                                    showsSeriesArtwork: showsSeriesArtwork,
+                                    onFocus: {
+                                        activity.pendingReport?.cancel()
+                                        activity.pendingReport = nil
+                                        onFocusEntered?()
+                                        onFocusChange?(nil)
+                                    }, action: onBrowse
+                                )
+                            }
+                            #endif
                         }
                         // The row's ordinary page gutter, unchanged from before the
                         // navigation rail existed, with the first card's visible
                         // edge under the title.
                         .padding(.leading, cardsLeadingInset)
-                        .padding(.trailing, PlozzTheme.Metrics.screenPadding)
+                        .padding(.trailing, cardsTrailingInset)
                         // Reserve generous vertical room *inside* the clip so a
                         // focused card's lift + drop shadow are never cut. The
                         // negative outer padding below cancels this clearance in
@@ -578,6 +676,13 @@ public struct MediaRowView: View {
                             episodeEntryPlaceholder
                         }
                     }
+                    #if os(tvOS)
+                    .onGeometryChange(for: CGFloat.self) { geometry in
+                        presentation == .poster ? geometry.safeAreaInsets.trailing : 0
+                    } action: { _, inset in
+                        trailingSafeInset = inset
+                    }
+                    #endif
                     .background {
                         #if os(tvOS)
                         if episodeEntry != nil {
@@ -595,6 +700,14 @@ public struct MediaRowView: View {
                     .onPreferenceChange(MediaRowEntryLayoutKey.self) { layout in
                         acceptEntryLayout(layout, using: proxy)
                     }
+                    .onChange(of: episodeEntry?.phase) { _, _ in
+                        acceptEntryLayout(entryLayout, using: proxy)
+                    }
+                    .onChange(of: episodeEntry?.isEnabled) { _, enabled in
+                        guard enabled == true else { return }
+                        applyInitialFocus(using: proxy)
+                        acceptEntryLayout(entryLayout, using: proxy)
+                    }
                     .onChange(of: entryPlaceholderFocused) { _, focused in
                         if focused {
                             pendingEntryHandoff = true
@@ -608,7 +721,8 @@ public struct MediaRowView: View {
                         pendingEntryHandoff = false
                         activity.focusEngaged = false
                         alignedEntryTarget = nil
-                        if let target = gateTarget { scrollToInitialPosition(target, using: proxy) }
+                        // The next measured layout reveals an offscreen target.
+                        // Re-entry must not leading-align an already-visible card.
                     }
                     // The navigation gutter is the scroll view's SAFE AREA — the
                     // same mechanism that lets a row scroll under the system tab bar
@@ -677,6 +791,7 @@ public struct MediaRowView: View {
                         if !remembersCurrentRow { activity.lastFocusedID = nil }
                         activity.hasBrowsedSinceTargetChange = remembersCurrentRow
                         alignedEntryTarget = nil
+                        if remembersCurrentRow { return }
                         guard let target = episodeEntry != nil ? gateTarget : newTarget,
                               itemIDSet.contains(target) else { return }
                         // Hard-align rather than going through `scrollToIfNeeded`.
@@ -719,7 +834,6 @@ public struct MediaRowView: View {
                         if episodeEntry != nil {
                             pendingEntryHandoff = false
                             alignedEntryTarget = nil
-                            if let target = gateTarget { scrollToInitialPosition(target, using: proxy) }
                         } else if let target = gateTarget {
                             scrollToIfNeeded(target, using: proxy)
                         }
@@ -773,7 +887,21 @@ public struct MediaRowView: View {
     @ViewBuilder
     private func tappableCard(for item: MediaItem) -> some View {
         #if os(tvOS)
-        card(for: item)
+        if let onPlay {
+            card(for: item)
+                .onPlayPauseCommand { onPlay(item) }
+        } else {
+            card(for: item)
+        }
+        #elseif os(iOS)
+        MediaArtworkZoomButton(id: item.stablePresentationID) { source in
+            if let onSelectArtwork {
+                onSelectArtwork(item, source)
+            } else {
+                onSelect(item)
+            }
+        } label: { card(for: item) }
+            .buttonStyle(.plain)
         #else
         Button { onSelect(item) } label: { card(for: item) }
             // Plain, so the card keeps its own colours and chrome.
@@ -849,6 +977,10 @@ public struct MediaRowView: View {
         // is `landscapeWidth + 2 * cardInset` — pin to that so `cardSpacing`
         // is a real gap and adjacent cards never overlap at rest.
         let card = content
+            // Hide only the card drawing: the lazy stack and target measurement
+            // must remain live while the transparent loading overlay is present.
+            .opacity(showsEntryPlaceholder ? 0 : 1)
+            .accessibilityHidden(showsEntryPlaceholder)
             .frame(width: cardSlotWidth)
             .id(item.stablePresentationID)
             .background {
@@ -892,6 +1024,16 @@ public struct MediaRowView: View {
         return layoutMetrics.cardRowLeadingPadding(leadingInset, cardStyle: cardStyle)
     }
 
+    private var cardsTrailingInset: CGFloat {
+        #if os(tvOS)
+        // Full-bleed artwork still needs a scrollable tail for the last card's
+        // native focus lift. A parent may already have consumed the safe area.
+        PlozzTheme.Metrics.screenPadding + max(trailingSafeInset, pageTrailingSafeInset)
+        #else
+        PlozzTheme.Metrics.screenPadding
+        #endif
+    }
+
     /// The layout width reserved for one card in the rail — its full glass-surface
     /// width, so `cardSpacing` lands as a true visible gap between cards.
 
@@ -931,7 +1073,7 @@ public struct MediaRowView: View {
         switch presentation {
         case .poster:
             SkeletonCardView(
-                style: .poster, showsCaption: !captionsHidden,
+                style: .poster, showsSeriesArtwork: showsSeriesArtwork,
                 isFocused: isFocused, showsProgress: showsProgress, focus: focus
             )
         case .landscape:
@@ -980,7 +1122,8 @@ public struct MediaRowView: View {
     private var showsEntryPlaceholder: Bool {
         guard let episodeEntry else { return false }
         return MediaRowEpisodeEntryPolicy.showsPlaceholder(
-            phase: episodeEntry.phase, targetReady: entryTargetReady, focusEngaged: activity.focusEngaged
+            phase: episodeEntry.phase, targetReady: entryTargetReady, focusEngaged: activity.focusEngaged,
+            hasBrowsedTarget: activity.lastFocusedID.map(itemIDSet.contains) == true
         )
     }
 
@@ -1025,9 +1168,6 @@ public struct MediaRowView: View {
         .padding(.top, layoutMetrics.railTopClearanceOffset)
         .padding(.bottom, layoutMetrics.railBottomClearanceOffset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        // Cover the drawing without masking the real scroller: SwiftUI can
-        // otherwise discard its lazy children before their target is realized.
-        .background(palette.backgroundBase)
         // Focus lift and halo deliberately overflow this viewport, just like
         // the real episode cards. The overlay must not crop them at its edge.
         .focusSectionIf(true)
@@ -1045,10 +1185,9 @@ public struct MediaRowView: View {
         guard episodeEntry != nil, !activity.focusEngaged else { return }
         if entryLayout != layout { entryLayout = layout }
         guard episodeEntry?.phase == .ready,
-              let target = gateTarget, itemIDSet.contains(target), !isCovered,
-              episodeEntry?.isEnabled != false else { return }
+              let target = gateTarget, itemIDSet.contains(target), !isCovered else { return }
         if MediaRowEpisodeEntryPolicy.targetReady(target, layout: layout) {
-            guard pendingEntryHandoff else { return }
+            guard pendingEntryHandoff, episodeEntry?.isEnabled != false else { return }
             // The real target is already laid out. Remove the loading leaf and
             // assign its replacement in one update, not after focusing a neighbor.
             pendingEntryHandoff = false
@@ -1056,7 +1195,11 @@ public struct MediaRowView: View {
             activity.requestFocus(target)
         } else if (layout.viewportWidth ?? 0) > 0, alignedEntryTarget != target {
             alignedEntryTarget = target
-            scrollToInitialPosition(target, using: proxy)
+            if activity.lastFocusedID == target {
+                proxy.scrollTo(target)
+            } else {
+                scrollToInitialPosition(target, using: proxy)
+            }
         }
     }
 
@@ -1131,13 +1274,13 @@ public struct MediaRowView: View {
             // the full two-candidate ladder below still handles the fallback.
             if presentation == .poster,
                let preview = candidates.first,
-               ArtworkImageVariant.posterPreview.hasDistinctRequestURL(
-                   from: variant,
-                   for: preview
-               ),
-               activity.prefetchedPreviewIDs.insert(
-                   candidate.stablePresentationID
-               ).inserted {
+               MediaArtworkPrefetchPolicy.claimPreview(
+                   for: candidate.stablePresentationID,
+                   prefetchedIDs: &activity.prefetchedPreviewIDs,
+                   isDistinct: ArtworkImageVariant.posterPreview.hasDistinctRequestURL(
+                       from: variant, for: preview
+                   )
+               ) {
                 trackPrefetch(preview, variant: .posterPreview)
             }
             if activity.prefetchedIDs.insert(candidate.stablePresentationID).inserted {
@@ -1162,13 +1305,13 @@ public struct MediaRowView: View {
                           showsSeriesArtwork: showsSeriesArtwork,
                           artworkPolicy: artworkPolicy
                       ).first,
-                      ArtworkImageVariant.posterPreview.hasDistinctRequestURL(
-                          from: .posterCard,
-                          for: preview
-                      ),
-                      activity.prefetchedPreviewIDs.insert(
-                          candidate.stablePresentationID
-                      ).inserted
+                      MediaArtworkPrefetchPolicy.claimPreview(
+                          for: candidate.stablePresentationID,
+                          prefetchedIDs: &activity.prefetchedPreviewIDs,
+                          isDistinct: ArtworkImageVariant.posterPreview.hasDistinctRequestURL(
+                              from: .posterCard, for: preview
+                          )
+                      )
                 else { continue }
                 trackPrefetch(preview, variant: .posterPreview)
             }
@@ -1204,7 +1347,9 @@ public struct MediaRowView: View {
     /// runloop tick so SwiftUI has installed the focusable cards before we move
     /// focus onto one.
     private func applyInitialFocus(using proxy: ScrollViewProxy) {
-        guard !isCovered, episodeEntry?.isEnabled != false else { return }
+        guard !isCovered else { return }
+        // Entrance gates restrict focus, not the unfocused episode preview.
+        if initialFocusID != nil, episodeEntry?.isEnabled == false { return }
         if episodeEntry != nil, initialFocusID != nil,
            !activity.didApplyInitialFocus, showsEntryPlaceholder {
             activity.didApplyInitialFocus = true
@@ -1536,6 +1681,14 @@ enum MediaRowFocusPolicy {
 }
 
 public enum MediaArtworkPrefetchPolicy {
+    public static func claimPreview(
+        for id: String,
+        prefetchedIDs: inout Set<String>,
+        isDistinct: @autoclosure () -> Bool
+    ) -> Bool {
+        !prefetchedIDs.contains(id) && isDistinct() && prefetchedIDs.insert(id).inserted
+    }
+
     public static func candidates(
         for item: MediaItem,
         style: PosterCardView.Style,

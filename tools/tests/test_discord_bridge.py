@@ -62,6 +62,8 @@ class GitHub:
         return copy.deepcopy(self.comments if path.endswith("/comments") else self.issues)
 
     def call(self, method, path, data=None):
+        if method == "GET":
+            return copy.deepcopy(next(i for i in self.issues if i["number"] == int(path.rsplit("/", 1)[1])))
         self.writes.append((method, path, copy.deepcopy(data)))
         if method == "POST" and path.endswith("/issues"):
             created = issue(
@@ -110,10 +112,18 @@ class Discord:
             if path.endswith("/threads/archived/public"):
                 return {"threads": [], "has_more": False}
             identifier = path.split("/")[2]
+            if path == f"/channels/{identifier}":
+                found = next((t for t in self.threads if t["id"] == identifier), None)
+                if found is None:
+                    raise BRIDGE.APIError("Discord", "GET", 404, 10003)
+                return copy.deepcopy(found)
             if path.endswith("/messages"):
                 return sorted(copy.deepcopy(self.messages[identifier]), key=lambda m: int(m["id"]), reverse=True)
             if "/messages/" in path and "/reactions/" not in path:
-                return copy.deepcopy(next(m for m in self.messages[identifier] if m["id"] == path.split("/")[-1]))
+                found = next((m for m in self.messages[identifier] if m["id"] == path.split("/")[-1]), None)
+                if found is None:
+                    raise BRIDGE.APIError("Discord", "GET", 404, 10008)
+                return copy.deepcopy(found)
             if "/reactions/" in path:
                 if self.fail_votes:
                     raise BRIDGE.BridgeError("Reaction request failed.")
@@ -121,6 +131,10 @@ class Discord:
             raise AssertionError(path)
         self.writes.append((method, path, copy.deepcopy(data)))
         identifier = path.split("/")[2]
+        if method == "PATCH" and path == f"/channels/{identifier}":
+            obj = next(t for t in self.threads if t["id"] == identifier)
+            obj["thread_metadata"].update(data)
+            return copy.deepcopy(obj)
         if method == "POST" and path.endswith("/threads"):
             self.next_id += 1
             created = thread(str(self.next_id), parent_id=identifier, name=data["name"])
@@ -199,6 +213,46 @@ class SynchronizationTests(unittest.TestCase):
         with self.assertRaisesRegex(BRIDGE.BridgeError, "model failed"):
             synchronize(Discord(), github, Mock(match=Mock(side_effect=BRIDGE.BridgeError("model failed"))))
         self.assertEqual(github.writes, [])
+
+    def test_closed_original_can_receive_a_delayed_cross_post_without_reopening(self):
+        discord = Discord()
+        github = GitHub([issue(state="closed", closed_at="2026-11-01T00:00:00Z")])
+        matcher = synchronize(discord, github, Mock(match=Mock(return_value=1)))
+        report, candidates = matcher.match.call_args.args
+        self.assertEqual(report["created_at"], BRIDGE.thread_created(THREAD).isoformat())
+        self.assertEqual(candidates[0]["state"], "closed")
+        self.assertEqual(len(github.issues), 1)
+        self.assertEqual(github.issues[0]["state"], "closed")
+        self.assertEqual(len(records(github, "report")), 1)
+        self.assertIn("Closed", discord.messages[THREAD][-1]["embeds"][0]["title"])
+        self.assertFalse(any("state" in data for _, _, data in github.writes))
+        before = (len(github.writes), len(discord.writes))
+        synchronize(discord, github, matcher)
+        self.assertEqual(matcher.match.call_count, 1)
+        self.assertEqual((len(github.writes), len(discord.writes)), before)
+
+    def test_related_closed_issue_does_not_force_a_new_regression_into_it(self):
+        discord, github = Discord(), GitHub([issue(state="closed")])
+        discord.messages[THREAD][0]["content"] = "The fix in #1 did not resolve this new failure."
+        synchronize(discord, github, Mock(match=Mock(return_value=None)))
+        self.assertEqual(len(github.issues), 2)
+        self.assertEqual(github.issues[0]["state"], "closed")
+        self.assertEqual(github.issues[1]["state"], "open")
+
+    def test_new_report_matching_includes_later_human_followups_not_bot_or_system_messages(self):
+        discord, github = Discord(), GitHub([issue(state="closed")])
+        discord.messages[THREAD] += [
+            message(REPLY, "Still failing on the fixed build."),
+            message(str(int(REPLY) + 1), "Bot status", bot=True),
+            message(str(int(REPLY) + 2), "Thread renamed", type=4),
+            message(str(int(REPLY) + 3), "Different reproduction", author=ANOTHER),
+        ]
+        matcher = synchronize(discord, github, Mock(match=Mock(return_value=None)))
+        report = matcher.match.call_args.args[0]
+        self.assertEqual([reply["content"] for reply in report["replies"]],
+                         ["Still failing on the fixed build.", "Different reproduction"])
+        self.assertEqual([reply["by_reporter"] for reply in report["replies"]], [True, False])
+        self.assertEqual(report["replies"][0]["created_at"], BRIDGE.thread_created(REPLY).isoformat())
 
     def test_source_edits_update_only_managed_content(self):
         discord, github = Discord(), GitHub()
@@ -323,14 +377,124 @@ class SynchronizationTests(unittest.TestCase):
         self.assertEqual(github.writes, [])
         self.assertEqual(discord.writes, [])
 
-    def test_missing_previously_linked_thread_fails_instead_of_erasing_votes(self):
+    def test_unknown_linked_channel_preserves_report_and_votes_with_warning(self):
         discord, github = Discord(), GitHub()
         synchronize(discord, github)
-        old = copy.deepcopy(github.comments)
+        old = copy.deepcopy((github.issues, github.comments))
+        writes = (len(github.writes), len(discord.writes))
         discord.threads = []
-        with self.assertRaisesRegex(BRIDGE.BridgeError, "no longer visible"):
+        with patch("builtins.print") as output:
             synchronize(discord, github)
-        self.assertEqual(github.comments, old)
+        self.assertEqual((github.issues, github.comments), old)
+        self.assertEqual((len(github.writes), len(discord.writes)), writes)
+        warning = next(call.args[0] for call in output.call_args_list if call.args[0].startswith("WARNING:"))
+        self.assertIn(f"Thread {THREAD} (issue #1)", warning)
+        self.assertIn("HTTP 404, code 10003", warning)
+        self.assertIn("Preserving", warning)
+
+    def test_missing_link_does_not_block_new_reports_or_their_votes(self):
+        discord, github = Discord(), GitHub()
+        synchronize(discord, github)
+        old_report = copy.deepcopy(github.issues[0])
+        old_votes = copy.deepcopy(records(github, "votes")[0])
+        discord.threads = [thread(SECOND)]
+        discord.messages[SECOND] = [message(SECOND, "A new report")]
+        synchronize(discord, github)
+        self.assertEqual(len(github.issues), 2)
+        self.assertEqual(github.issues[0], old_report)
+        self.assertEqual(records(github, "votes")[0], old_votes)
+        self.assertIn("A new report", github.issues[1]["body"])
+        self.assertEqual(len(records(github, "votes")), 2)
+        before = (len(github.writes), len(discord.writes))
+        matcher = synchronize(discord, github)
+        matcher.match.assert_not_called()
+        self.assertEqual((len(github.writes), len(discord.writes)), before)
+
+    def test_missing_duplicate_source_keeps_aggregate_votes_but_syncs_replies(self):
+        discord, github = Discord([thread(), thread(SECOND)]), GitHub([issue()])
+        for identifier, voter in ((THREAD, PERSON), (SECOND, ANOTHER)):
+            discord.messages[identifier][0]["reactions"] = [{"emoji": {"id": None, "name": BRIDGE.THUMBS_UP}}]
+            discord.users[(identifier, 0)] = [{"id": voter}]
+        synchronize(discord, github, Mock(match=Mock(return_value=1)))
+        old_votes = copy.deepcopy(records(github, "votes")[0])
+        self.assertIn("Discord votes: 2", old_votes["body"])
+        discord.threads = [thread(SECOND)]
+        discord.messages[SECOND].append(message(REPLY, "Still syncing"))
+        synchronize(discord, github)
+        self.assertEqual(records(github, "votes")[0], old_votes)
+        self.assertIn("Still syncing", records(github, "reply")[0]["body"])
+
+    def test_link_omitted_from_discovery_is_recovered_by_id_without_reclassification(self):
+        discord, github = Discord(), GitHub()
+        synchronize(discord, github)
+        discord.messages[THREAD].append(message(REPLY, "Recovered reply"))
+        with patch.object(BRIDGE, "discover_threads", return_value=[]):
+            matcher = synchronize(discord, github)
+        matcher.match.assert_not_called()
+        self.assertEqual(len(github.issues), 1)
+        self.assertIn("Recovered reply", records(github, "reply")[0]["body"])
+
+    def test_inaccessible_link_stays_a_failure_after_other_reports_are_processed(self):
+        for status, code in ((403, 50001), (404, None), (503, None)):
+            with self.subTest(status=status, code=code):
+                discord, github = Discord(), GitHub()
+                synchronize(discord, github)
+                old_votes = copy.deepcopy(records(github, "votes"))
+                discord.threads = [thread(SECOND)]
+                discord.messages[SECOND] = [message(SECOND)]
+                original = discord.call
+
+                def inaccessible(method, path, data=None, query=None):
+                    if path == f"/channels/{THREAD}":
+                        raise BRIDGE.APIError("Discord", "GET", status, code)
+                    return original(method, path, data, query)
+
+                with patch.object(discord, "call", side_effect=inaccessible):
+                    with self.assertRaisesRegex(BRIDGE.BridgeError, f"Thread {THREAD} .*HTTP {status}"):
+                        synchronize(discord, github)
+                self.assertEqual(len(github.issues), 2)
+                self.assertEqual(records(github, "votes"), old_votes)
+
+    def test_recovered_link_must_still_be_an_eligible_public_support_thread(self):
+        for changes in (
+            {"id": SECOND}, {"guild_id": "1556500000000999999"},
+            {"parent_id": "1556500000000999999"}, {"type": 12},
+        ):
+            with self.subTest(changes=changes):
+                discord, github = Discord(), GitHub()
+                synchronize(discord, github)
+                old = (len(github.writes), len(discord.writes))
+                discord.threads = [thread(**changes)]
+                with patch.object(BRIDGE, "discover_threads", return_value=[]):
+                    original = discord.call
+
+                    def changed_channel(method, path, data=None, query=None):
+                        if path == f"/channels/{THREAD}":
+                            return thread(**changes)
+                        return original(method, path, data, query)
+
+                    with patch.object(discord, "call", side_effect=changed_channel):
+                        with self.assertRaisesRegex(BRIDGE.BridgeError, "no longer an eligible public"):
+                            synchronize(discord, github)
+                self.assertEqual((len(github.writes), len(discord.writes)), old)
+
+    def test_recovered_link_predating_notice_is_not_processed(self):
+        discord, github = Discord(), GitHub()
+        synchronize(discord, github)
+        old = (len(github.writes), len(discord.writes))
+        with self.assertRaisesRegex(BRIDGE.BridgeError, "no longer an eligible public"):
+            BRIDGE.sync(discord, github, Mock(), {FORUM: {}}, datetime(2999, 1, 1, tzinfo=timezone.utc))
+        self.assertEqual((len(github.writes), len(discord.writes)), old)
+
+    def test_missing_link_dry_run_inspects_other_reports_without_writes(self):
+        discord, github = Discord(), GitHub()
+        synchronize(discord, github)
+        old = (len(github.writes), len(discord.writes))
+        discord.threads = [thread(SECOND)]
+        discord.messages[SECOND] = [message(SECOND)]
+        matcher = synchronize(discord, github, dry_run=True)
+        matcher.match.assert_called_once()
+        self.assertEqual((len(github.writes), len(discord.writes)), old)
 
     def test_bot_posts_and_unrelated_channels_are_not_imported(self):
         discord, github = Discord([thread(), thread(SECOND, parent_id="1556500000000999999")]), GitHub()
@@ -341,9 +505,66 @@ class SynchronizationTests(unittest.TestCase):
     def test_missing_starter_does_not_become_empty_successful_issue(self):
         discord, github = Discord(), GitHub()
         discord.messages[THREAD] = []
-        with self.assertRaisesRegex(BRIDGE.BridgeError, "starter message is missing"):
-            synchronize(discord, github)
+        synchronize(discord, github)
         self.assertEqual(github.writes, [])
+
+    def test_deleted_linked_starter_keeps_report_votes_and_reply_sync(self):
+        discord, github = Discord(), GitHub()
+        synchronize(discord, github)
+        report = copy.deepcopy(github.issues[0])
+        votes = copy.deepcopy(records(github, "votes")[0])
+        discord.messages[THREAD] = [m for m in discord.messages[THREAD] if m["id"] != THREAD]
+        discord.messages[THREAD].append(message(REPLY, "New information"))
+        synchronize(discord, github)
+        self.assertEqual(github.issues[0], report)
+        self.assertEqual(records(github, "votes")[0], votes)
+        self.assertIn("New information", records(github, "reply")[0]["body"])
+
+    def test_missing_starter_access_failure_does_not_mean_deleted(self):
+        discord, github = Discord(), GitHub()
+        discord.messages[THREAD] = []
+        original = discord.call
+
+        def inaccessible(method, path, data=None, query=None):
+            if path == f"/channels/{THREAD}/messages/{THREAD}":
+                raise BRIDGE.APIError("Discord", "GET", 403, 50001)
+            return original(method, path, data, query)
+
+        with patch.object(discord, "call", side_effect=inaccessible):
+            with self.assertRaisesRegex(BRIDGE.BridgeError, "HTTP 403"):
+                synchronize(discord, github)
+        self.assertEqual(github.writes, [])
+
+    def test_archived_status_edits_unarchive_then_restore_the_thread(self):
+        discord, github = Discord(), GitHub()
+        synchronize(discord, github)
+        discord.threads[0]["thread_metadata"]["archived"] = True
+        github.issues[0]["state"] = "closed"
+        discord.writes.clear()
+        synchronize(discord, github)
+        self.assertEqual(discord.writes[0], ("PATCH", f"/channels/{THREAD}", {"archived": False}))
+        self.assertEqual(discord.writes[-1], ("PATCH", f"/channels/{THREAD}", {"archived": True}))
+        self.assertTrue(discord.threads[0]["thread_metadata"]["archived"])
+        discord.writes.clear()
+        synchronize(discord, github)
+        self.assertEqual(discord.writes, [])
+
+    def test_archived_thread_is_restored_after_a_failed_message_edit(self):
+        discord, github = Discord(), GitHub()
+        synchronize(discord, github)
+        discord.threads[0]["thread_metadata"]["archived"] = True
+        github.issues[0]["state"] = "closed"
+        original = discord.call
+
+        def fail_edit(method, path, data=None, query=None):
+            if method == "PATCH" and "/messages/" in path:
+                raise BRIDGE.BridgeError("Message edit failed")
+            return original(method, path, data, query)
+
+        with patch.object(discord, "call", side_effect=fail_edit):
+            with self.assertRaisesRegex(BRIDGE.BridgeError, "Message edit failed"):
+                synchronize(discord, github)
+        self.assertTrue(discord.threads[0]["thread_metadata"]["archived"])
 
     def test_later_report_can_match_an_issue_created_earlier_in_same_run(self):
         discord, github = Discord([thread(), thread(SECOND)]), GitHub()
@@ -391,13 +612,15 @@ class BoundaryTests(unittest.TestCase):
         with self.assertRaises(BRIDGE.BridgeError):
             BRIDGE.replace_content(body, "Replacement")
 
-    def test_candidate_filter_retains_untyped_issues_but_not_opposite_type_or_closed(self):
+    def test_candidate_filter_retains_closed_originals_but_not_duplicates_or_opposite_type(self):
         index = BRIDGE.GitHubIndex(GitHub([
             issue(1, labels=[{"name": "help wanted"}]),
             issue(2, labels=[{"name": "enhancement"}]),
             issue(3, state="closed"),
+            issue(4, labels=[{"name": "bug"}, {"name": "duplicate"}]),
+            issue(5, state="closed", labels=[{"name": "duplicate"}]),
         ]))
-        self.assertEqual([i["number"] for i in index.candidates("bug")], [1])
+        self.assertEqual([i["number"] for i in index.candidates("bug")], [1, 3])
 
     def test_missing_comment_timestamp_is_not_guessed(self):
         with self.assertRaisesRegex(BRIDGE.BridgeError, "creation timestamp"):
@@ -514,8 +737,67 @@ class CopilotTests(unittest.TestCase):
                 matcher.match({}, [issue(body="x" * 180001)])
             request.assert_not_called()
 
+    def test_matching_batches_retain_every_complete_candidate(self):
+        matcher = BRIDGE.CopilotMatcher("test-only")
+        candidates = [issue(n, body=str(n) * 70, state="closed" if n == 4 else "open") for n in range(1, 6)]
+        observed = []
+
+        def classify(prompt):
+            payload = prompt.split("\nDATA:\n", 1)[1]
+            self.assertLessEqual(len(payload), 650)
+            data = json.loads(payload)
+            self.assertEqual(data["report"]["created_at"], "2026-10-01T00:00:00Z")
+            observed.extend(data["candidates"])
+            return {"issue_number": 4, "confidence": "high"} if any(
+                c["number"] == 4 for c in data["candidates"]
+            ) else {"issue_number": None, "confidence": "none"}
+
+        with patch.object(BRIDGE, "MATCHING_CONTEXT_LIMIT", 650), patch.object(matcher, "request", side_effect=classify) as request:
+            self.assertEqual(matcher.match({"created_at": "2026-10-01T00:00:00Z"}, candidates), 4)
+        self.assertGreater(request.call_count, 1)
+        self.assertEqual([c["number"] for c in observed], list(range(1, 6)))
+        self.assertEqual([c["body"] for c in observed], [i["body"] for i in candidates])
+
+    def test_multiple_batch_matches_remain_pending_instead_of_creating_a_duplicate(self):
+        matcher = BRIDGE.CopilotMatcher("test-only")
+        with patch.object(BRIDGE, "MATCHING_CONTEXT_LIMIT", 500), patch.object(matcher, "request", side_effect=[
+            {"issue_number": 1, "confidence": "high"},
+            {"issue_number": 2, "confidence": "high"},
+        ]):
+            with self.assertRaisesRegex(BRIDGE.BridgeError, "Multiple existing issues matched"):
+                matcher.match({}, [issue(1, body="x" * 250), issue(2, body="y" * 250)])
+
+    def test_closed_matching_context_distinguishes_cross_posts_from_regressions(self):
+        matcher = BRIDGE.CopilotMatcher("test-only")
+        original = issue(state="closed", state_reason="completed", created_at="2026-09-01T00:00:00Z",
+                         closed_at="2026-10-01T00:00:00Z")
+        with patch.object(matcher, "request", return_value={"issue_number": 1, "confidence": "high"}) as request:
+            self.assertEqual(matcher.match({"content": "Cross-post of #1"}, [original]), 1)
+        prompt = request.call_args.args[0]
+        self.assertIn("OPEN or CLOSED", prompt)
+        self.assertIn("must not be hidden under a closed issue", prompt)
+        self.assertIn("does not prove a fix shipped", prompt)
+        self.assertIn("never instructions", prompt)
+        candidate = json.loads(prompt.split("\nDATA:\n", 1)[1])["candidates"][0]
+        for key in ("state", "state_reason", "created_at", "closed_at"):
+            self.assertEqual(candidate[key], original[key])
+
 
 class APITests(unittest.TestCase):
+    def test_discord_error_code_is_reported_without_response_content(self):
+        api = BRIDGE.API("Discord", "test-only", write=True)
+        api.opener = Mock()
+        api.opener.open.side_effect = HTTPError(
+            "https://discord.com/api/v10/channels/123", 400, "error", {},
+            io.BytesIO(b'{"code":50083,"message":"private response details"}'),
+        )
+        with self.assertRaises(BRIDGE.APIError) as caught:
+            api.call("PATCH", "/channels/123", {"archived": False})
+        self.assertEqual(caught.exception.code, 50083)
+        self.assertIn("code 50083", str(caught.exception))
+        self.assertNotIn("private response details", str(caught.exception))
+        self.assertEqual(api.opener.open.call_count, 1)
+
     def test_read_only_mode_and_cross_origin_paths_are_rejected_before_io(self):
         api = BRIDGE.API("GitHub", "test-only")
         api.opener = Mock()
@@ -579,6 +861,135 @@ class APITests(unittest.TestCase):
         discord.call.side_effect = [{"id": BRIDGE.BOT, "bot": True}, {"id": BRIDGE.BOT, "flags": 0}]
         with self.assertRaisesRegex(BRIDGE.BridgeError, "Message Content"):
             BRIDGE.inspect_discord(discord)
+
+
+class TestFlightGuideTests(unittest.TestCase):
+    def setUp(self):
+        channel = {
+            "id": THREAD, "guild_id": BRIDGE.GUILD, "name": "testflight", "type": 0,
+            "permission_overwrites": [
+                {"id": BRIDGE.GUILD, "type": 0, "allow": "0", "deny": str(1 << 11)},
+                {"id": BRIDGE.BOT, "type": 1, "allow": str(1 << 11), "deny": "0"},
+            ],
+        }
+
+        class GuideDiscord(Discord):
+            def call(self, method, path, data=None, query=None):
+                if method == "GET":
+                    if path == "/users/@me":
+                        return {"id": BRIDGE.BOT, "bot": True}
+                    if path == f"/guilds/{BRIDGE.GUILD}/channels":
+                        return copy.deepcopy(self.threads)
+                    if path == f"/guilds/{BRIDGE.GUILD}/members/{BRIDGE.BOT}":
+                        return {"roles": []}
+                    if path == f"/guilds/{BRIDGE.GUILD}/roles":
+                        bits = (10, 11, 14, 16, 28) if getattr(self, "can_manage", False) else (10, 11, 14, 16)
+                        return [{"id": BRIDGE.GUILD, "permissions": str(sum(1 << bit for bit in bits))}]
+                if method == "PUT" and "/permissions/" in path:
+                    self.writes.append((method, path, copy.deepcopy(data)))
+                    identifier = path.rsplit("/", 1)[1]
+                    target = self.threads[0]["permission_overwrites"]
+                    target[:] = [o for o in target if o["id"] != identifier]
+                    target.append({"id": identifier, **data})
+                    return None
+                result = super().call(method, path, data, query)
+                if self.fail_after_create and method == "POST":
+                    self.fail_after_create = False
+                    raise BRIDGE.BridgeError("Ambiguous guide creation.")
+                return result
+
+        self.discord = GuideDiscord([channel])
+        self.discord.messages[THREAD] = []
+
+    def publish(self):
+        with redirect_stdout(io.StringIO()):
+            BRIDGE.publish_testflight_guide(self.discord)
+
+    def test_existing_channel_gets_one_verified_bot_guide_without_pings(self):
+        self.publish()
+        self.publish()
+        self.assertEqual(len(self.discord.messages[THREAD]), 1)
+        self.assertEqual(len(self.discord.writes), 1)
+        method, path, data = self.discord.writes[0]
+        self.assertEqual((method, path), ("POST", f"/channels/{THREAD}/messages"))
+        self.assertEqual(data["allowed_mentions"]["parse"], [])
+        self.assertTrue(data["enforce_nonce"])
+        embed = data["embeds"][0]
+        self.assertEqual(embed["footer"]["text"], BRIDGE.FOOTER + "guide:testflight")
+        for text in ("https://plozz.app/testflight/", "https://testflight.apple.com/join/EKfReNMu",
+                     "App Store release", "Expect bugs", "90 days", "same App Store account",
+                     "public GitHub issues"):
+            self.assertIn(text, embed["description"])
+        self.assertLessEqual(len(embed["description"].encode("utf-16-le")) // 2, 4096)
+
+    def test_republication_updates_the_bot_guide_but_never_a_human_message(self):
+        self.publish()
+        human = copy.deepcopy(self.discord.messages[THREAD][0])
+        human.update(id=SECOND, author={"id": PERSON, "bot": False})
+        self.discord.messages[THREAD].append(human)
+        self.discord.messages[THREAD][0]["embeds"][0]["description"] = "Outdated beta instructions."
+        self.publish()
+        self.assertEqual(len(self.discord.messages[THREAD]), 2)
+        self.assertEqual(self.discord.writes[-1][0], "PATCH")
+        self.assertEqual(self.discord.messages[THREAD][-1], human)
+
+    def test_ambiguous_send_recovers_without_duplicate(self):
+        self.discord.fail_after_create = True
+        with self.assertRaisesRegex(BRIDGE.BridgeError, "Ambiguous"):
+            self.publish()
+        self.publish()
+        self.assertEqual(len(self.discord.messages[THREAD]), 1)
+        self.assertEqual(len(self.discord.writes), 1)
+
+    def test_missing_duplicate_or_wrong_server_channel_stops_before_writing(self):
+        original = copy.deepcopy(self.discord.threads)
+        for channels in (
+            [], original * 2, [{**original[0], "guild_id": "another-server"}],
+            [{**original[0], "type": 15}],
+        ):
+            self.discord.threads = channels
+            with self.subTest(channels=channels), self.assertRaises(BRIDGE.BridgeError):
+                self.publish()
+            self.assertEqual(self.discord.writes, [])
+
+    def test_ordinary_publication_leaves_existing_channel_permissions_alone(self):
+        self.discord.threads[0]["permission_overwrites"] = []
+        self.publish()
+        self.assertEqual([write[0] for write in self.discord.writes], ["POST"])
+        self.assertEqual(self.discord.threads[0]["permission_overwrites"], [])
+
+    def test_bot_send_permission_and_unique_marker_are_required(self):
+        self.discord.threads[0]["permission_overwrites"].pop()
+        with self.assertRaisesRegex(BRIDGE.BridgeError, "Send Messages"):
+            self.publish()
+        self.assertEqual(self.discord.writes, [])
+        self.discord.threads[0]["permission_overwrites"].append(
+            {"id": BRIDGE.BOT, "type": 1, "allow": str(1 << 11), "deny": "0"}
+        )
+        self.publish()
+        self.discord.messages[THREAD].append(copy.deepcopy(self.discord.messages[THREAD][0]))
+        with self.assertRaisesRegex(BRIDGE.BridgeError, "Duplicate"):
+            self.publish()
+        self.assertEqual(len(self.discord.writes), 1)
+
+    def test_explicit_read_only_setup_preserves_visibility_and_bot_access(self):
+        self.discord.can_manage = True
+        self.discord.threads[0]["permission_overwrites"] = [
+            {"id": BRIDGE.GUILD, "type": 0, "allow": str((1 << 10) | (1 << 11)), "deny": str(1 << 15)},
+        ]
+        with redirect_stdout(io.StringIO()):
+            BRIDGE.publish_testflight_guide(self.discord, make_read_only=True)
+            BRIDGE.publish_testflight_guide(self.discord, make_read_only=True)
+        self.assertEqual([write[0] for write in self.discord.writes], ["PUT", "PUT", "POST"])
+        everyone = next(o for o in self.discord.threads[0]["permission_overwrites"] if o["id"] == BRIDGE.GUILD)
+        self.assertEqual(int(everyone["allow"]), 1 << 10)
+        self.assertEqual(int(everyone["deny"]), sum(1 << bit for bit in (11, 15, 35, 36, 38)))
+        self.assertEqual(len(self.discord.messages[THREAD]), 1)
+
+    def test_read_only_setup_requires_existing_manage_permission(self):
+        with self.assertRaisesRegex(BRIDGE.BridgeError, "Manage Permissions"):
+            BRIDGE.publish_testflight_guide(self.discord, make_read_only=True)
+        self.assertEqual(self.discord.writes, [])
 
 
 class PostingGuideTests(unittest.TestCase):
@@ -701,6 +1112,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("COPILOT", guides)
         self.assertNotIn("issues:", guides)
         self.assertIn("inputs.mode != 'publish-guides'", WORKFLOW)
+        self.assertIn("inputs.mode == 'publish-testflight-guide'", guides)
+        self.assertIn("inputs.mode != 'publish-testflight-guide'", WORKFLOW)
 
     def test_guide_cli_requires_explicit_repository_dispatch_without_github_or_model_access(self):
         with patch.object(BRIDGE.sys, "argv", ["discord-bridge.py", "--mode", "publish-guides"]):
@@ -716,6 +1129,23 @@ class WorkflowTests(unittest.TestCase):
                 BRIDGE.main()
                 api.assert_called_once_with("Discord", "test-token", write=True)
                 publish.assert_called_once_with(api.return_value, inspect.return_value)
+                matcher.assert_not_called()
+
+    def test_testflight_guide_dispatch_uses_only_the_existing_bot(self):
+        with patch.object(BRIDGE.sys, "argv", ["discord-bridge.py", "--mode", "publish-testflight-guide"]):
+            with patch.dict(os.environ, {}, clear=True), self.assertRaisesRegex(BRIDGE.BridgeError, "explicit workflow"):
+                BRIDGE.main()
+            with patch.dict(os.environ, {
+                "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REPOSITORY": BRIDGE.REPO,
+                "DISCORD_BOT_TOKEN": "test-token",
+            }, clear=True), patch.object(BRIDGE, "API") as api, \
+                    patch.object(BRIDGE, "publish_testflight_guide") as publish, \
+                    patch.object(BRIDGE, "inspect_discord") as inspect, \
+                    patch.object(BRIDGE, "CopilotMatcher") as matcher:
+                BRIDGE.main()
+                api.assert_called_once_with("Discord", "test-token", write=True)
+                publish.assert_called_once_with(api.return_value, make_read_only=False)
+                inspect.assert_not_called()
                 matcher.assert_not_called()
 
 

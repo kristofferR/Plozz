@@ -4,6 +4,7 @@ import CoreModels
 import CoreNetworking
 import CoreUI
 import FeaturePlayback
+import FeatureLiveTV
 import FeatureAuth
 import FeatureProfiles
 import FeatureSettings
@@ -19,7 +20,6 @@ struct PlozziOSSettingsView: View {
     /// A server we're signing an ADDITIONAL user into, so the Add Server sheet
     /// opens pre-filled with it instead of at the provider chooser.
     @State private var addUserServer: MediaServer?
-    @State private var addServerPresentationColorScheme: ColorScheme = .dark
     let appModel: PlozziOSAppModel
     let onClose: () -> Void
     /// Opens the profile picker. Owned by the root, because the picker can raise
@@ -78,8 +78,13 @@ struct PlozziOSSettingsView: View {
             )
             .presentationSizing(.page)
         }
+        .plozzSheet(item: $providerSetupRouter.reauthenticationAccount) { account in
+            PlozziOSAccountReauthenticationView(appModel: appModel, account: account)
+                .presentationSizing(.page)
+        }
         .onChange(of: appModel.profiles.activeProfileID) { _, _ in
             providerSetupRouter.addressAccount = nil
+            providerSetupRouter.reauthenticationAccount = nil
         }
         .onChange(of: appModel.liveTVAdmissionDiagnostic, initial: true) { _, diagnostic in
             HandoffDiagnostics.emit("SOURCES event=appAdmission \(diagnostic)")
@@ -94,9 +99,13 @@ struct PlozziOSSettingsView: View {
         .background { SettingsPageBackground() }
         .transientStatusOverlay(
             presenter: appModel.transientStatusPresenter,
-            bottomPadding: 24,
             palette: palette
         )
+        .guidePreparationOverlay(
+            model: appModel.guidePreparation, presenter: appModel.transientStatusPresenter,
+            palette: palette
+        )
+        .environment(appModel.guidePreparation)
         .environment(\.themePalette, palette)
         .environment(\.colorScheme, palette.isLight ? .light : .dark)
         .tint(palette.primaryText)
@@ -110,37 +119,31 @@ struct PlozziOSSettingsView: View {
         ) {
             AddServerView(
                 appModel: appModel,
-                initialProvider: iptvSetup == nil ? addUserServer?.provider ?? .jellyfin : .iptv,
+                initialProvider: iptvSetup == nil ? addUserServer?.provider : .iptv,
                 initialAddress: addUserServer?.baseURL.absoluteString ?? "",
                 initialIPTVPlaylist: iptvSetup?.playlist, initialIPTVAccount: iptvSetup?.account,
                 initialIPTVMode: iptvSetup?.mode ?? .playlist
             )
-                .preferredColorScheme(addServerPresentationColorScheme)
                 .presentationSizing(.page)
         }
         .plozzSheet(item: plexUserSelectionBinding) { selection in
             PlozziOSPlexUserSelectionView(
+                appModel: appModel,
                 selection: selection,
+                onImportAll: appModel.importPlexHomeProfilesDuringOnboarding,
                 onSelect: appModel.selectPlexUserDuringOnboarding
             )
-            .preferredColorScheme(addServerPresentationColorScheme)
         }
         .plozzSheet(item: plexPINBinding) { request in
             PlozziOSPlexPINView(
                 model: appModel.plexHomeUsers,
                 request: request
             )
-            .preferredColorScheme(addServerPresentationColorScheme)
         }
         .plozzSheet(item: librarySelectionBinding) { selection in
             PlozziOSLibrarySelectionView(
-                accounts: appModel.accountsProviders.resolvedAccounts(
-                    withIDs: selection.accountIDs
-                ),
-                visibility: appModel.settings.homeVisibility,
-                onContinue: appModel.completeLibrarySelection
+                appModel: appModel, accountIDs: selection.accountIDs
             )
-            .preferredColorScheme(addServerPresentationColorScheme)
         }
     }
 
@@ -153,7 +156,6 @@ struct PlozziOSSettingsView: View {
     }
 
     private func showAddServer() {
-        addServerPresentationColorScheme = palette.isLight ? .light : .dark
         appModel.beginManagedServerPresentation()
         showingAddServer = true
     }
@@ -175,7 +177,7 @@ struct PlozziOSSettingsView: View {
         Binding<PlexHomeUsersModel.PlexPINRequest?>
     {
         Binding(
-            get: { appModel.plexHomeUsers.pendingPlexPINRequest },
+            get: { appModel.plexPINRequestForAppPresentation },
             set: { request in
                 if request == nil {
                     appModel.plexHomeUsers.dismissPlexPINIfPresented()
@@ -206,6 +208,7 @@ struct PlozziOSSettingsView: View {
 }
 
 private enum PlozziOSSettingsDestination: Hashable {
+    case search(String)
     case profiles
     case requests
     case servers
@@ -226,11 +229,17 @@ private enum PlozziOSSettingsDestination: Hashable {
     case diagnostics
     case attributions
     case releaseNotes
+
+    var isSearchResult: Bool {
+        if case .search = self { return true }
+        return false
+    }
 }
 
 private struct PlozziOSProfileSettingsSection<Row: View, Management: View>: View {
     let profileName: String
     let showsParentalControls: Bool
+    let appLanguage: AppLanguageSettingsModel
     @ViewBuilder let row: (ProfileSettingsCategory) -> Row
     @ViewBuilder let management: () -> Management
 
@@ -238,7 +247,8 @@ private struct PlozziOSProfileSettingsSection<Row: View, Management: View>: View
         SettingsSectionGroup(verbatim: profileName) {
             ForEach(ProfileSettingsCategory.allCases) { category in
                 if category == .language {
-                    PlozziOSSettingsLanguagePicker()
+                    PlozziOSSettingsLanguagePicker(appLanguage: appLanguage)
+                        .settingsSearchAnchor("language")
                 } else if category == .libraries {
                     if !showsParentalControls { row(category) }
                     management()
@@ -283,12 +293,11 @@ struct PlozziOSSettingsCategoryLabel: View {
     }
 }
 
-private struct PlozziOSSettingsLanguagePicker: View {
-    @Environment(AppLanguageSettingsModel.self) private var appLanguage
+struct PlozziOSSettingsLanguagePicker: View {
+    @Bindable var appLanguage: AppLanguageSettingsModel
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        @Bindable var appLanguage = appLanguage
         Menu {
             Picker("Language", selection: $appLanguage.language) {
                 ForEach(AppLanguage.available()) { language in
@@ -343,6 +352,7 @@ private struct PlozziOSProfileSettingsPage: View {
     let onAddUser: (MediaServer) -> Void
     let canManageProviders: Bool
     var isPresented = true
+    var searchPage: SettingsSearchPage? = nil
 
     var body: some View {
         switch category {
@@ -363,7 +373,7 @@ private struct PlozziOSProfileSettingsPage: View {
             LiveTVSettingsView(
                 store: LiveTVViewSettingsStore(namespace: appModel.profiles.activeNamespace),
                 preferencesStore: LiveTVPreferencesStore(namespace: appModel.profiles.activeNamespace),
-                sourceManagement: {
+                sourceManagement: { preferences in
                     AnyView(PlozziOSLiveTVSourcesDestination(
                         profileID: appModel.profiles.activeProfile.id,
                         preferencesNamespace: appModel.profiles.activeNamespace,
@@ -371,9 +381,11 @@ private struct PlozziOSProfileSettingsPage: View {
                         connectServer: onAddServer,
                         didConfigurePlaylist: { _ = appModel.recordSuccessfulIPTVSetup() },
                         isPresented: isPresented,
-                        isProfileAuthorized: { [appModel] in appModel.isLiveTVProfileAuthorized }
+                        isProfileAuthorized: { [appModel] in appModel.isLiveTVProfileAuthorized },
+                        settingsPreferences: preferences
                     ))
-                }
+                },
+                searchPage: searchPage ?? .liveTV
             )
             .id(appModel.profiles.activeProfile.id)
         case .libraries:
@@ -392,7 +404,10 @@ private struct PlozziOSProfileSettingsPage: View {
         case .trackers:
             PlozziOSTrackerSettingsView(appModel: appModel)
         case .language:
-            List { PlozziOSSettingsLanguagePicker() }
+            List {
+                PlozziOSSettingsLanguagePicker(appLanguage: appModel.appLanguage)
+                    .settingsSearchAnchor("language")
+            }
                 .settingsPageSurface()
                 .navigationTitle("Language")
         }
@@ -500,7 +515,8 @@ private struct PlozziOSSettingsSplitView: View {
 
                     PlozziOSProfileSettingsSection(
                         profileName: appModel.profiles.activeProfile.name,
-                        showsParentalControls: showsParentalControlsSection
+                        showsParentalControls: showsParentalControlsSection,
+                        appLanguage: appModel.appLanguage
                     ) { category in
                         Button {
                             selection = .profile(category)
@@ -560,7 +576,7 @@ private struct PlozziOSSettingsSplitView: View {
                         SettingsSectionGroup(deviceSettingsTitle) {
                             settingsRow(
                                 .servers,
-                                title: "Servers",
+                                title: SettingsCopy.sources,
                                 systemImage: "externaldrive.connected.to.line.below"
                             )
                             Button {
@@ -613,6 +629,10 @@ private struct PlozziOSSettingsSplitView: View {
                     PlozziOSCommunitySettingsSection()
                     PlozziOSMoreAppsSettingsSection()
 
+                    SettingsSectionGroup("Privacy") {
+                        PrivacyPolicyLink()
+                    }
+
                     SettingsSectionGroup("Support") {
                         settingsRow(.diagnostics, title: "Help & Diagnostics", systemImage: "ladybug")
                         settingsRow(.attributions, title: SettingsCopy.attributions, systemImage: "doc.text.magnifyingglass")
@@ -640,9 +660,12 @@ private struct PlozziOSSettingsSplitView: View {
                     }
                 }
             }
-            .navigationTitle("Settings")
+            .navigationTitle(Text(verbatim: ""))
+            .modifier(PlozziOSSettingsSearch(
+                appModel: appModel, isShowingDestination: selection?.isSearchResult == true
+            ) { selection = .search($0.id) })
             .toolbar(removing: .sidebarToggle)
-            .settingsPageSurface(titleDisplayMode: .inlineLarge, horizontalInset: 16)
+            .settingsPageSurface(titleDisplayMode: .inline, horizontalInset: 16)
         } detail: {
             NavigationStack {
                 ZStack {
@@ -772,6 +795,13 @@ private struct PlozziOSSettingsSplitView: View {
     private var settingsDetail: some View {
         // The default must also be safe for Kids, not just the visible sidebar rows.
         switch selection ?? .profile(.playback) {
+        case .search(let id):
+            if let entry = SettingsSearchCatalog.entry(id: id) {
+                PlozziOSSettingsSearchDestination(
+                    entry: entry, appModel: appModel, onAddServer: onAddServer, onAddUser: onAddUser,
+                    onFinish: { selection = .profile(.playback) }
+                )
+            }
         case .profiles:
             PlozziOSProfilesView(appModel: appModel, onClose: onClose, onSwitchTo: onSwitchTo)
         case .requests:
@@ -988,7 +1018,9 @@ private struct PlozziOSSettingsCompactMenu: View {
     @Environment(\.dismiss) private var dismiss
     @State private var confirmSignOutAll = false
     @State private var showMetadata = false
+    @State private var searchSelection: SettingsSearchEntry?
     @State private var isHeaderCollapsed = false
+    @State private var expandedTitleHeight: CGFloat = 0
     private var developerMode: DeveloperModeModel { .shared }
     /// Whether the Parental PIN has been entered for the Kids Profile currently
     /// open. View state, cleared when the profile changes.
@@ -1017,6 +1049,15 @@ private struct PlozziOSSettingsCompactMenu: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 18) {
+                Text("Settings")
+                    .font(.largeTitle.bold())
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityIdentifier("settings-expanded-title")
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                        expandedTitleHeight = height
+                    }
+
                 // Live media-share scan/enrich progress. Renders nothing when idle.
                 ShareScanStatusHeader(
                     status: appModel.shareScanStatus,
@@ -1027,7 +1068,8 @@ private struct PlozziOSSettingsCompactMenu: View {
 
                 PlozziOSProfileSettingsSection(
                     profileName: appModel.profiles.activeProfile.name,
-                    showsParentalControls: showsParentalControlsSection
+                    showsParentalControls: showsParentalControlsSection,
+                    appLanguage: appModel.appLanguage
                 ) { category in
                     NavigationLink {
                         PlozziOSProfileSettingsPage(
@@ -1129,7 +1171,11 @@ private struct PlozziOSSettingsCompactMenu: View {
                                 onAddServer: onAddServer
                             )
                         } label: {
-                            Label("Servers", systemImage: "externaldrive.connected.to.line.below")
+                            Label {
+                                Text(SettingsCopy.sources)
+                            } icon: {
+                                Image(systemName: "externaldrive.connected.to.line.below")
+                            }
                         }
                         NavigationLink {
                             PlozziOSProfilesView(
@@ -1194,6 +1240,10 @@ private struct PlozziOSSettingsCompactMenu: View {
                 PlozziOSCommunitySettingsSection()
                 PlozziOSMoreAppsSettingsSection()
 
+                SettingsSectionGroup("Privacy") {
+                    PrivacyPolicyLink()
+                }
+
                 SettingsSectionGroup("Support") {
                     NavigationLink {
                         PlozziOSDiagnosticsSettingsView(
@@ -1242,12 +1292,22 @@ private struct PlozziOSSettingsCompactMenu: View {
         }
         .contentMargins(.top, 8, for: .scrollContent)
         .settingsPageSurface(
-            titleDisplayMode: isHeaderCollapsed ? .inline : .inlineLarge,
+            titleDisplayMode: .inline,
             horizontalInset: 16
         )
-        .navigationTitle("Settings")
+        .navigationTitle(isHeaderCollapsed ? Text("Settings") : Text(verbatim: ""))
+        .modifier(PlozziOSSettingsSearch(
+            appModel: appModel, isShowingDestination: searchSelection != nil
+        ) { searchSelection = $0 })
+        .navigationDestination(item: $searchSelection) { entry in
+            PlozziOSSettingsSearchDestination(
+                entry: entry, appModel: appModel, onAddServer: onAddServer, onAddUser: onAddUser,
+                onFinish: { searchSelection = nil }
+            )
+        }
+        .onChange(of: appModel.profiles.activeProfileID) { _, _ in searchSelection = nil }
         .onScrollGeometryChange(for: Bool.self) { geometry in
-            geometry.contentOffset.y + geometry.contentInsets.top > 12
+            geometry.contentOffset.y + geometry.contentInsets.top > expandedTitleHeight
         } action: { _, collapsed in
             isHeaderCollapsed = collapsed
         }
@@ -1266,6 +1326,299 @@ private struct PlozziOSSettingsCompactMenu: View {
         } message: {
             Text("This removes every server and network share from this device.")
         }
+    }
+}
+
+private struct PlozziOSSettingsSearch: ViewModifier {
+    let appModel: PlozziOSAppModel
+    var isShowingDestination = false
+    let onSelect: (SettingsSearchEntry) -> Void
+    @State private var query = ""
+    @State private var isPresented = false
+    @FocusState private var isFocused: Bool
+
+    private var showsResults: Bool { isPresented || !query.isEmpty }
+
+    func body(content: Content) -> some View {
+        Group {
+            if #available(iOS 26.0, *), UIDevice.current.userInterfaceIdiom == .phone {
+                searchableContent(content)
+                    .toolbar { DefaultToolbarItem(kind: .search, placement: .bottomBar) }
+            } else {
+                searchableContent(content)
+            }
+        }
+        .onChange(of: appModel.profiles.activeProfileID) { _, _ in
+            query = ""
+            isPresented = false
+            isFocused = false
+        }
+        .onChange(of: isShowingDestination) { wasShowing, isShowing in
+            if wasShowing && !isShowing && !query.isEmpty {
+                isPresented = true
+                isFocused = true
+            }
+        }
+    }
+
+    @ViewBuilder private func searchableContent(_ content: Content) -> some View {
+        let searchable = content
+            .opacity(showsResults ? 0 : 1)
+            .allowsHitTesting(!showsResults)
+            .accessibilityHidden(showsResults)
+            .overlay {
+                if showsResults {
+                    SettingsSearchResults(
+                        query: query,
+                        platform: UIDevice.current.userInterfaceIdiom == .phone ? .phone : .tablet,
+                        isKids: appModel.profiles.activeProfile.isKids
+                    ) { entry, _ in
+                        isFocused = false
+                        onSelect(entry)
+                    }
+                    .scrollDismissesKeyboard(.interactively)
+                    .simultaneousGesture(TapGesture().onEnded { isFocused = false })
+                    .background { SettingsPageBackground() }
+                }
+            }
+            .searchable(
+                text: $query, isPresented: $isPresented,
+                placement: UIDevice.current.userInterfaceIdiom == .phone
+                    ? .automatic : .navigationBarDrawer(displayMode: .always),
+                prompt: "Search settings"
+            )
+        searchable.searchFocused($isFocused)
+    }
+}
+
+private struct PlozziOSSettingsSearchDestination: View {
+    let entry: SettingsSearchEntry
+    let appModel: PlozziOSAppModel
+    let onAddServer: () -> Void
+    let onAddUser: (MediaServer) -> Void
+    let onFinish: () -> Void
+    @State private var unlockedProfileID: String?
+    @State private var showsParentalUnlock = false
+    @State private var showsCustomQuality = false
+
+    private var isParentalUnlocked: Bool {
+        unlockedProfileID == appModel.profiles.activeProfileID
+    }
+
+    private var needsSeparateSubtitleStyle: Bool {
+        entry.page == .liveSubtitleStyle && !appModel.settings.subtitleStyle.usesSeparateLiveTVStyle
+    }
+
+    private var targetID: String {
+        needsSeparateSubtitleStyle ? "live-subtitle-style" : entry.anchorID
+    }
+
+    var body: some View {
+        Group {
+            if entry.isAvailable(
+                on: UIDevice.current.userInterfaceIdiom == .phone ? .phone : .tablet,
+                isKids: appModel.profiles.activeProfile.isKids
+            ) {
+                if entry.page.requiresParentalAuthorization, appModel.managementRequiresParentalPIN, !isParentalUnlocked {
+                    authorizationPrompt
+                } else {
+                    SettingsSearchLanding(targetID: targetID) { destination }
+                        .id("\(appModel.profiles.activeProfileID)-\(entry.id)-\(targetID)")
+                }
+            } else {
+                ContentUnavailableView("Setting unavailable", systemImage: "magnifyingglass")
+            }
+        }
+        .plozzSheet(isPresented: $showsParentalUnlock) {
+            PlozziOSGrownUpsUnlockView(appModel: appModel) {
+                unlockedProfileID = appModel.profiles.activeProfileID
+            }
+        }
+        .onChange(of: appModel.profiles.activeProfileID) { _, _ in
+            unlockedProfileID = nil
+            showsParentalUnlock = false
+            showsCustomQuality = false
+        }
+        .onChange(of: appModel.profiles.parentalPIN) { _, _ in
+            unlockedProfileID = nil
+            showsParentalUnlock = false
+        }
+    }
+
+    private var authorizationPrompt: some View {
+        List {
+            Button { showsParentalUnlock = true } label: { Text(KidsProfileCopy.parentalPIN) }
+        }
+        .settingsPageSurface()
+        .navigationTitle(Text(KidsProfileCopy.parentalPIN))
+        .task { showsParentalUnlock = true }
+    }
+
+    @ViewBuilder private var destination: some View {
+        switch entry.destinationPage(on: UIDevice.current.userInterfaceIdiom == .phone ? .phone : .tablet) {
+        case .playback: profilePage(.playback)
+        case .playbackAdvanced:
+            PlaybackAdvancedSettingsView()
+        case .streamingAdvanced:
+            if appModel.accountsProviders.resolvedActiveAccounts.contains(where: {
+                $0.provider is any StreamingQualityProviding
+            }) {
+                @Bindable var playback = appModel.settings.playback
+                if let network = entry.qualityNetwork {
+                    profilePage(.playback)
+                        .plozzSheet(isPresented: $showsCustomQuality, onDismiss: onFinish) {
+                            StreamingCustomQualityEditor(
+                                quality: playback.settings.streaming[keyPath: network.keyPath],
+                                support: appModel.streamingQualitySupport
+                            ) { playback.settings.streaming[keyPath: network.keyPath] = $0 }
+                        }
+                        .task { showsCustomQuality = true }
+                } else {
+                    PlozziOSAdvancedStreamingSettings(
+                        settings: $playback.settings.streaming, support: appModel.streamingQualitySupport
+                    )
+                }
+            } else {
+                profilePage(.playback)
+            }
+        case .externalPlayer:
+            ExternalPlayerSettingsView(custom: entry.id == "external-template")
+        case .skipMarkers:
+            SkipMarkerSettingsView(
+                model: appModel.settings.playback, initialKind: entry.skipKind, initialCategory: entry.contentCategory
+            )
+        case .subtitles:
+            if entry.id == "subtitle-remember" { profilePage(.playback) }
+            else { profilePage(.subtitles) }
+        case .subtitleStyle:
+            @Bindable var style = appModel.settings.subtitleStyle
+            SubtitleStyleSettingsView(style: $style.style, initialPage: entry.subtitlePage)
+        case .liveSubtitleStyle:
+            if needsSeparateSubtitleStyle {
+                profilePage(.subtitles)
+            } else {
+                @Bindable var style = appModel.settings.subtitleStyle
+                SubtitleStyleSettingsView(
+                    style: $style.resolvedLiveTVStyle, isLiveTV: true, initialPage: entry.subtitlePage
+                )
+            }
+        case .theme:
+            PlozziOSThemeSettingsView(theme: appModel.settings.theme, transparency: appModel.settings.transparency)
+        case .cards:
+            CardAppearanceControls(
+                cards: appModel.settings.cardStyle, watchIndicator: appModel.settings.watchIndicator,
+                density: appModel.settings.density, visibility: appModel.settings.homeVisibility
+            )
+            .environment(appModel.settings.hero)
+        case .cardLabels:
+            CardCaptionCustomizationView(
+                cards: appModel.settings.cardStyle, visibility: appModel.settings.homeVisibility,
+                initialView: entry.cardCaptionView
+            )
+            .environment(appModel.settings.hero)
+        case .artwork:
+            if entry.anchorID.hasPrefix("artwork-view-") {
+                ArtworkCustomizationView(
+                    cards: appModel.settings.cardStyle,
+                    continueWatchingShowsSeriesArtwork: appModel.settings.homeVisibility.continueWatchingShowsSeriesArtwork,
+                    continueWatchingLayout: appModel.settings.homeVisibility.continueWatchingLayout
+                )
+                .environment(appModel.settings.hero)
+            } else {
+            PlozziOSArtworkSettingsView(
+                appModel: appModel, cardStyle: appModel.settings.cardStyle,
+                canManageProviders: !appModel.managementRequiresParentalPIN || isParentalUnlocked
+            )
+            }
+        case .circadian: PlozziOSNightShiftSettingsView(model: appModel.settings.nightShift)
+        case .allScreens:
+            PlozziOSAllScreensSettingsView(
+                contentRatings: appModel.settings.contentRatings, spoilers: appModel.settings.spoilers
+            )
+        case .navigation: PlozziOSNavigationSettingsView(appModel: appModel)
+        case .home, .hero, .heroContent, .heroRatings, .heroTrailers, .heroDiscovery,
+             .heroLibraries, .heroCollections, .homeRows, .homeRowStyle, .homeFiltering, .homeLabels, .continueWatching:
+            PlozziOSHomeSettingsView(
+                hero: appModel.settings.hero, heroBackground: appModel.settings.heroBackground,
+                cards: appModel.settings.cardStyle, visibility: appModel.settings.homeVisibility,
+                accounts: appModel.accountsProviders.resolvedActiveAccounts,
+                spoilerSettings: appModel.settings.spoilers.settings,
+                searchPage: entry.page
+            )
+        case .detail:
+            PlozziOSDetailPageSettingsView(
+                cards: appModel.settings.cardStyle, heroBackground: appModel.settings.heroBackground,
+                themeMusic: appModel.settings.themeMusic, detailPage: appModel.settings.detailPage
+            )
+        case .detailRatingSources:
+            PlozziOSDetailRatingPriorityView(model: appModel.settings.detailPage)
+        case .libraries:
+            LibraryPresentationSettingsView(
+                model: appModel.settings.libraryPresentation, cards: appModel.settings.cardStyle,
+                visibility: appModel.settings.homeVisibility,
+                accounts: appModel.accountsProviders.resolvedActiveAccounts,
+                loader: LibraryPresentationLoader(
+                    settings: appModel.settings.libraryPresentation, namespace: appModel.profiles.activeNamespace
+                )
+            )
+            .id(ObjectIdentifier(appModel.settings.libraryPresentation))
+        case .liveTV, .liveTVSources, .liveTVGuide, .liveTVVisibility: profilePage(.liveTV)
+        case .language: profilePage(.language)
+        case .trackers: profilePage(.trackers)
+        case .downloads: PlozziOSDownloadSettingsView(model: appModel.downloads)
+        case .profiles:
+            List {
+                SettingsSectionGroup {
+                    AutomaticSignInToggle(settings: appModel.automaticSignInSettings)
+                } footer: {
+                    AutomaticSignInErrorMessage(settings: appModel.automaticSignInSettings)
+                }
+            }
+            .settingsPageSurface()
+            .navigationTitle("Profiles")
+        case .profileAppearance:
+            PlozziOSProfileAppearancePage(appModel: appModel, profileID: appModel.profiles.activeProfileID)
+        case .profileSettings:
+            PlozziOSProfileSettingsView(
+                appModel: appModel, profileID: appModel.profiles.activeProfileID,
+                isParentalUnlocked: isParentalUnlocked
+            )
+        case .accountLibraries: profilePage(.libraries)
+        case .seerr: PlozziOSSeerrSettingsView(appModel: appModel)
+        case .sync: PlozziOSSyncSetupSettingsView(appModel: appModel)
+        case .metadata:
+            PlozziOSMetadataSettingsView(appModel: appModel, deps: appModel.makeMetadataSettingsDependencies())
+        case .metadataDiagnostics:
+            PlozziOSMetadataDiagnosticsView(deps: appModel.makeMetadataSettingsDependencies())
+        case .diagnostics:
+            PlozziOSDiagnosticsSettingsView(
+                appModel: appModel, model: appModel.settings.diagnostics, crashReporting: appModel.crashReporting
+            )
+        case .musicPlayer, .topShelf:
+            ContentUnavailableView("Setting unavailable", systemImage: "magnifyingglass")
+        case .releaseNotes:
+            ReleaseNotesSettingsView(model: .shared)
+        }
+    }
+
+    private func profilePage(_ category: ProfileSettingsCategory) -> some View {
+        PlozziOSProfileSettingsPage(
+            category: category, appModel: appModel, onAddServer: onAddServer, onAddUser: onAddUser,
+            canManageProviders: !appModel.managementRequiresParentalPIN || isParentalUnlocked,
+            searchPage: entry.page
+        )
+    }
+}
+
+private extension PlozziOSAppModel {
+    var automaticSignInSettings: AutomaticSignInSettings {
+        AutomaticSignInSettings(
+            isEnabled: Binding(
+                get: { self.plexHomeUsers.automaticallySignIn },
+                set: { self.setAutomaticallySignIn($0) }
+            ),
+            error: plexHomeUsers.automaticSignInError
+        )
     }
 }
 
@@ -1291,13 +1644,7 @@ private struct PlozziOSProfilesView: View {
     private var orderedProfiles: [Profile] { appModel.profiles.profilesByRecency }
 
     private var automaticSignIn: AutomaticSignInSettings {
-        AutomaticSignInSettings(
-            isEnabled: Binding(
-                get: { appModel.plexHomeUsers.automaticallySignIn },
-                set: { appModel.setAutomaticallySignIn($0) }
-            ),
-            error: appModel.plexHomeUsers.automaticSignInError
-        )
+        appModel.automaticSignInSettings
     }
 
     /// One optional route owned by this page. A row cannot activate another
@@ -1410,7 +1757,6 @@ private struct PlozziOSProfilesView: View {
                     onFinished: { showingAddProfile = false }
                 )
             }
-            .preferredColorScheme(palette.isLight ? .light : .dark)
         }
         .plozzSheet(item: $editingProfile) { profile in
             NavigationStack {
@@ -1421,7 +1767,6 @@ private struct PlozziOSProfilesView: View {
                     onFinished: { editingProfile = nil }
                 )
             }
-            .preferredColorScheme(palette.isLight ? .light : .dark)
         }
         // New-profile setup. A profile is created holding EVERY server, so this
         // runs before its first watchlist import and asks which servers it
@@ -1454,6 +1799,7 @@ struct PlozziOSProfileSettingsRoute: Hashable {
 
 struct PlozziOSAccountDetailView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.managedProviderSetupRouter) private var providerSetupRouter
 
     let appModel: PlozziOSAppModel
     let account: Account
@@ -1498,6 +1844,11 @@ struct PlozziOSAccountDetailView: View {
             }
 
             SettingsSectionGroup {
+                if account.server.provider.supportsAccountReauthentication, let providerSetupRouter {
+                    Button("Sign In Again", systemImage: "arrow.clockwise") {
+                        providerSetupRouter.reauthenticationAccount = account
+                    }
+                }
                 Button("Remove Server", role: .destructive) {
                     confirmRemoval = true
                 }
@@ -1595,111 +1946,6 @@ private struct PlozziOSShareScanSection: View {
     }
 }
 
-struct PlozziOSPlexHomeUserSettingsView: View {
-    let appModel: PlozziOSAppModel
-    let account: Account
-    @State private var users: [PlexHomeUser] = []
-    @State private var isLoading = false
-
-    var body: some View {
-        List {
-            SettingsSectionGroup("Account owner") {
-                let owner = users.first(where: \.isAdmin)
-                userButton(
-                    name: owner?.name ?? (account.userName.isEmpty ? "Plex Account Owner" : account.userName),
-                    avatarURL: owner?.avatarURL,
-                    requiresPIN: owner?.requiresPIN ?? false,
-                    user: owner
-                )
-                .disabled(owner == nil)
-            }
-
-            SettingsSectionGroup("Home users") {
-                if isLoading {
-                    HStack {
-                        ProgressView()
-                        Text("Loading Plex Home…")
-                    }
-                } else if users.isEmpty {
-                    Text("No additional Plex Home users were found.")
-                        .plozzForeground(.secondary)
-                } else {
-                    ForEach(users.filter { !$0.isAdmin }) { user in
-                        userButton(
-                            name: user.name,
-                            avatarURL: user.avatarURL,
-                            requiresPIN: user.requiresPIN,
-                            user: user
-                        )
-                    }
-                }
-            } footer: {
-                Text("PIN-protected users must unlock when their Plozz profile becomes active.")
-            }
-        }
-        .settingsPageSurface()
-        .navigationTitle("Plex User")
-        .navigationBarTitleDisplayMode(.inline)
-        .task {
-            isLoading = true
-            users = await appModel.plexHomeUsers.plexHomeUsers(
-                forAccountID: account.id
-            )
-            isLoading = false
-        }
-    }
-
-    private func userButton(
-        name: String,
-        avatarURL: URL?,
-        requiresPIN: Bool,
-        user: PlexHomeUser?
-    ) -> some View {
-        Button {
-            appModel.plexHomeUsers.setPlexHomeUserForActiveProfile(
-                accountID: account.id,
-                user: user
-            )
-        } label: {
-            HStack(spacing: 12) {
-                AsyncImage(url: avatarURL) { image in
-                    image.resizable().scaledToFill()
-                } placeholder: {
-                    Image(systemName: "person.crop.circle.fill")
-                        .resizable()
-                        .plozzForeground(.secondary)
-                }
-                .frame(width: 40, height: 40)
-                .clipShape(Circle())
-
-                Text(name)
-                    .foregroundStyle(.primary)
-                if requiresPIN {
-                    Image(systemName: "lock.fill")
-                        .font(.caption)
-                        .plozzForeground(.secondary)
-                }
-                Spacer()
-                if isSelected(user) {
-                    Image(systemName: "checkmark")
-                        .foregroundStyle(.tint)
-                }
-            }
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func isSelected(_ user: PlexHomeUser?) -> Bool {
-        let binding = appModel.profiles.activeProfile.homeUserBinding(
-            forPlexAccount: account.id
-        )
-        if let user {
-            return binding?.homeUserID == user.id || (binding == nil && user.isAdmin)
-        }
-        return binding == nil
-    }
-}
-
 struct PlozziOSAppearanceSettingsView: View {
     let appModel: PlozziOSAppModel
     @Bindable var theme: ThemeSettingsModel
@@ -1711,14 +1957,13 @@ struct PlozziOSAppearanceSettingsView: View {
     @State private var destination: Page?
 
     private enum Page: String, CaseIterable, Identifiable {
-        case theme, cards, artwork, spoilers, circadian
+        case theme, cards, artwork, circadian
         var id: Self { self }
         var title: LocalizedStringResource {
             switch self {
             case .theme: "Theme"
             case .cards: "Cards"
             case .artwork: "Artwork"
-            case .spoilers: "Spoiler Protection"
             case .circadian: "Circadian Mode"
             }
         }
@@ -1742,13 +1987,15 @@ struct PlozziOSAppearanceSettingsView: View {
             case .theme:
                 PlozziOSThemeSettingsView(theme: theme, transparency: transparency)
             case .cards:
-                CardAppearanceControls(cards: cardStyle, watchIndicator: watchIndicator, density: density)
+                CardAppearanceControls(
+                    cards: cardStyle, watchIndicator: watchIndicator,
+                    density: density, visibility: appModel.settings.homeVisibility
+                )
+                .environment(appModel.settings.hero)
             case .artwork:
                 PlozziOSArtworkSettingsView(
                     appModel: appModel, cardStyle: cardStyle, canManageProviders: canManageProviders
                 )
-            case .spoilers:
-                PlozziOSSpoilerSettingsView(model: appModel.settings.spoilers)
             case .circadian:
                 PlozziOSNightShiftSettingsView(model: appModel.settings.nightShift)
             }
@@ -1768,14 +2015,18 @@ private struct PlozziOSThemeSettingsView: View {
                         Label(theme.displayName, systemImage: theme.symbolName).tag(theme)
                     }
                 }
+                .settingsSearchAnchor("theme")
                 Toggle("Gradient Backgrounds", isOn: $theme.gradientEnabled)
+                    .settingsSearchAnchor("gradient-backgrounds")
                 Picker("Liquid Glass", selection: $transparency.preference) {
                     ForEach(TransparencyPreference.allCases) { preference in
                         Text(preference == .system ? "System" : preference.displayName)
                             .tag(preference)
                     }
                 }
+                .settingsSearchAnchor("liquid-glass")
             }
+            .settingsSearchGroup(["theme", "gradient-backgrounds", "liquid-glass"])
         }
         .settingsPageSurface()
         .navigationTitle("Theme")
@@ -1787,13 +2038,15 @@ private struct PlozziOSScreensNavigationSettingsView: View {
     @State private var destination: Page?
 
     private enum Page: String, CaseIterable, Identifiable {
-        case home, navigation, detail
+        case home, libraries, navigation, detail, allScreens
         var id: Self { self }
         var title: LocalizedStringResource {
             switch self {
-            case .home: "Customize Home"
-            case .navigation: "Navigation"
-            case .detail: "Detail Page"
+            case .home: "Home"
+            case .libraries: "Libraries"
+            case .navigation: "App navigation"
+            case .detail: "Movie & show details"
+            case .allScreens: "All screens"
             }
         }
     }
@@ -1801,10 +2054,21 @@ private struct PlozziOSScreensNavigationSettingsView: View {
     var body: some View {
         List {
             SettingsSectionGroup {
-                ForEach(Page.allCases) { page in
+                Button { destination = .navigation } label: {
+                    SettingsDisclosureLabel { Text(Page.navigation.title) }
+                }
+                .accessibilityIdentifier("screens-navigation")
+                Button { destination = .allScreens } label: {
+                    SettingsDisclosureLabel { Text(Page.allScreens.title) }
+                }
+                .accessibilityIdentifier("screens-all-screens")
+            }
+            SettingsSectionGroup {
+                ForEach([Page.home, .libraries, .detail]) { page in
                     Button { destination = page } label: {
                         SettingsDisclosureLabel { Text(page.title) }
                     }
+                    .accessibilityIdentifier("screens-\(page.rawValue)")
                 }
             }
         }
@@ -1812,17 +2076,35 @@ private struct PlozziOSScreensNavigationSettingsView: View {
         .navigationTitle("Screens & Navigation")
         .navigationDestination(item: $destination) { page in
             switch page {
+            case .allScreens:
+                PlozziOSAllScreensSettingsView(
+                    contentRatings: appModel.settings.contentRatings, spoilers: appModel.settings.spoilers
+                )
             case .home:
                 PlozziOSHomeSettingsView(
                     hero: appModel.settings.hero, heroBackground: appModel.settings.heroBackground,
+                    cards: appModel.settings.cardStyle,
                     visibility: appModel.settings.homeVisibility,
-                    accounts: appModel.accountsProviders.resolvedActiveAccounts
+                    accounts: appModel.accountsProviders.resolvedActiveAccounts,
+                    spoilerSettings: appModel.settings.spoilers.settings
                 )
                 .id(ObjectIdentifier(appModel.settings.homeVisibility))
             case .navigation:
                 PlozziOSNavigationSettingsView(appModel: appModel)
+            case .libraries:
+                LibraryPresentationSettingsView(
+                    model: appModel.settings.libraryPresentation, cards: appModel.settings.cardStyle,
+                    visibility: appModel.settings.homeVisibility,
+                    accounts: appModel.accountsProviders.resolvedActiveAccounts,
+                    loader: LibraryPresentationLoader(
+                        settings: appModel.settings.libraryPresentation,
+                        namespace: appModel.profiles.activeNamespace
+                    )
+                )
+                .id(ObjectIdentifier(appModel.settings.libraryPresentation))
             case .detail:
                 PlozziOSDetailPageSettingsView(
+                    cards: appModel.settings.cardStyle,
                     heroBackground: appModel.settings.heroBackground,
                     themeMusic: appModel.settings.themeMusic, detailPage: appModel.settings.detailPage
                 )
@@ -1831,20 +2113,46 @@ private struct PlozziOSScreensNavigationSettingsView: View {
     }
 }
 
+struct PlozziOSAllScreensSettingsView: View {
+    let contentRatings: ContentRatingSettingsModel
+    let spoilers: SpoilerSettingsModel
+
+    var body: some View {
+        List {
+            SettingsSectionGroup {
+                ContentRatingToggle(model: contentRatings)
+                    .settingsSearchAnchor("content-ratings")
+            }
+            .settingsSearchGroup(["content-ratings"])
+            PlozziOSSpoilerSettingsControls(model: spoilers)
+        }
+        .settingsPageSurface()
+        .navigationTitle("All screens")
+    }
+}
+
 private struct PlozziOSNavigationSettingsView: View {
     let appModel: PlozziOSAppModel
 
     private var navigationLibrariesScope: ProfileLibrariesScope {
         let profile = appModel.profiles.activeProfile
+        let discovery = appModel.settings.discoveredLibraries
+        let libraries = appModel.visibleNavigationLibraries
+        let state: LoadState<[AggregatedLibrary]> = if !libraries.isEmpty {
+            .loaded(libraries)
+        } else if let failure = discovery.failures.values.first {
+            .failed(failure)
+        } else {
+            discovery.state
+        }
         return ProfileLibrariesScope(
             accounts: appModel.accounts,
             activeProfile: profile,
-            // Individual library tabs are not supported by the iOS tab bar, so
-            // this shared editor needs only its always-available built-ins.
-            discoveredLibraries: .loaded([]),
-            refreshingLibraryAccountIDs: [],
-            unreachableLibraryAccountIDs: [],
-            reloadLibraries: {},
+            discoveredLibraries: state,
+            refreshingLibraryAccountIDs: discovery.refreshingAccountIDs,
+            unreachableLibraryAccountIDs: discovery.unreachableAccountIDs,
+            libraryFailures: discovery.failures,
+            reloadLibraries: { await appModel.refreshNavigationLibraries() },
             homeVisibility: appModel.settings.homeVisibility,
             isAccountIncludedInActiveProfile: {
                 appModel.activeAccountIDs(for: profile.id).contains($0)
@@ -1871,17 +2179,17 @@ private struct PlozziOSNavigationSettingsView: View {
                 NavigationLibrariesDetailView(
                     scope: navigationLibrariesScope,
                     navigation: appModel.settings.navigation,
-                    includesIndividualLibraries: false,
                     excludedKeys: [
                         NavigationLibraryLayout.musicKey,
-                        NavigationLibraryLayout.allLibrariesKey,
                     ]
                 )
-                .id(appModel.profiles.activeProfileID)
+                .id(appModel.navigationLibrariesScopeKey)
             }
+            .settingsSearchAnchor("navigation-order")
+            .settingsSearchGroup(["navigation-order"])
         }
         .settingsPageSurface()
-        .navigationTitle("Navigation")
+        .navigationTitle("App navigation")
     }
 }
 
@@ -1932,8 +2240,11 @@ struct PlozziOSArtworkSettingsView: View {
 struct PlozziOSHomeSettingsView: View {
     @Bindable var hero: HeroSettingsModel
     @Bindable var heroBackground: HeroBackgroundSettingsModel
+    let cards: CardStyleSettingsModel
     let visibility: HomeLibraryVisibilityModel
     let accounts: [ResolvedAccount]
+    var spoilerSettings: SpoilerSettings = .default
+    var searchPage: SettingsSearchPage = .home
     @State private var librarySnapshot: (scope: HomeSectionCatalogModel.RequestID, choices: [HomeLibraryChoice])?
 
     private var libraryRequestID: HomeSectionCatalogModel.RequestID {
@@ -1946,10 +2257,14 @@ struct PlozziOSHomeSettingsView: View {
     }
 
     var body: some View {
-        HomeRowsSettingsView(libraries: aggregatedHomeLibraries, accounts: accounts, visibility: visibility)
+        HomeRowsSettingsView(
+            libraries: aggregatedHomeLibraries, accounts: accounts, visibility: visibility,
+            spoilerSettings: spoilerSettings, searchPage: searchPage
+        )
         .id(ObjectIdentifier(visibility))
         .environment(hero)
         .environment(heroBackground)
+        .environment(cards)
         .task(id: libraryRequestID) {
             await loadLibraries()
         }
@@ -2011,16 +2326,28 @@ private struct HomeLibraryChoice {
 }
 
 private struct PlozziOSDetailPageSettingsView: View {
+    let cards: CardStyleSettingsModel
     @Bindable var heroBackground: HeroBackgroundSettingsModel
     @Bindable var themeMusic: ThemeMusicSettingsModel
     @Bindable var detailPage: DetailPageSettingsModel
 
     var body: some View {
         List {
+            SettingsSectionGroup("Hero") {
+                HeroLogoSizeControl(
+                    size: $detailPage.settings.logoSize, textSize: $detailPage.settings.textSize, surface: .detail
+                )
+                .settingsSearchAnchor("detail-size")
+            }
+            .settingsSearchGroup(["detail-size", "detail-logo-size", "detail-text-size"])
             SettingsSectionGroup("Review scores") {
                 Toggle("Show review scores", isOn: $detailPage.settings.showsHeaderRatings)
+                    .settingsSearchAnchor(
+                        "detail-ratings",
+                        fallbackFor: detailPage.settings.showsHeaderRatings ? [] : ["detail-rating-count"]
+                    )
                 if detailPage.settings.showsHeaderRatings {
-                    HeaderReviewScoreCountPicker(settings: $detailPage.settings)
+                    HeaderReviewScoreCountPicker(settings: $detailPage.settings).settingsSearchAnchor("detail-rating-count")
                 }
                 NavigationLink {
                     PlozziOSDetailRatingPriorityView(model: detailPage)
@@ -2028,9 +2355,12 @@ private struct PlozziOSDetailPageSettingsView: View {
                     Text("Rating sources & order")
                 }
             }
+            .settingsSearchGroup(["detail-ratings", "detail-rating-count"])
             SettingsSectionGroup("Age recommendation") {
                 Toggle("Show Common Sense age", isOn: $detailPage.settings.showsHeaderFamilyGuidance)
+                    .settingsSearchAnchor("detail-age")
             }
+            .settingsSearchGroup(["detail-age"])
             SettingsSectionGroup("Behind the hero") {
                 Picker(
                     "Background",
@@ -2040,28 +2370,30 @@ private struct PlozziOSDetailPageSettingsView: View {
                         Text($0.displayName).tag($0)
                     }
                 }
+                .settingsSearchAnchor(
+                    "detail-background",
+                    fallbackFor: (heroBackground.settings.detailMode == .trailer ? [] : ["detail-trailer-muted"])
+                        + (heroBackground.settings.detailMode == .themeMusic ? [] : ["theme-music-volume"])
+                )
                 if heroBackground.settings.detailMode == .trailer {
                     Toggle(
                         "Start muted",
                         isOn: $heroBackground.settings.detailTrailerMuted
-                    )
+                    ).settingsSearchAnchor("detail-trailer-muted")
                 }
                 if heroBackground.settings.detailMode == .themeMusic {
-                    Picker(
-                        "Theme music volume",
-                        selection: $themeMusic.settings.volume
-                    ) {
-                        ForEach(ThemeMusicVolume.allCases, id: \.self) {
-                            Text($0.displayName).tag($0)
-                        }
-                    }
+                    ThemeMusicVolumeControl(model: themeMusic)
                 }
             } footer: {
-                Text("Choose what plays behind the hero on a movie or show's detail page. Trailer and theme music never play together.")
+                Text("Choose what plays behind the hero on a movie or show's details screen. Trailer and theme music never play together.")
+            }
+            .settingsSearchGroup(["detail-background", "detail-trailer-muted", "theme-music-volume"])
+            SettingsSectionGroup("Cards") {
+                CardCaptionSettingsLink(cards: cards, scope: .detail)
             }
         }
         .settingsPageSurface()
-        .navigationTitle("Detail Page")
+        .navigationTitle("Movie & show details")
     }
 }
 
@@ -2088,6 +2420,10 @@ private struct PlozziOSDetailRatingPriorityView: View {
                         default: Text(verbatim: source.displayName)
                         }
                     }
+                    .settingsSearchAnchor(
+                        "rating-source-\(source.rawValue)",
+                        fallbackFor: source == model.settings.orderedSources.first ? ["rating-source-enabled"] : []
+                    )
                 }
                 .onMove { offsets, destination in
                     var order = model.settings.orderedSources
@@ -2101,7 +2437,7 @@ private struct PlozziOSDetailRatingPriorityView: View {
         .toggleStyle(SettingsSwitchToggleStyle())
         .settingsPageSurface()
         .navigationTitle("Rating sources & order")
-        .toolbar { EditButton() }
+        .toolbar { EditButton().settingsSearchAnchor("rating-source-order") }
     }
 }
 
@@ -2112,33 +2448,14 @@ struct PlozziOSPlaybackSettingsView: View {
     let hasStreamingServer: Bool
     let streamingSupport: StreamingQualitySupport
     @State private var showsAdvancedStreaming = false
+    @State private var showsAdvancedPlayback = false
+    @State private var showsSkipMarkerSettings = false
 
     private static let policyCategories: [ContentCategory] = [.movie, .tvShow, .anime]
     private static let audioOptions: [AudioLanguagePreference] =
         [.original, .device] + SubtitleLanguageCatalog.languages.map {
             .language($0.code)
         }
-
-    /// On seeds every kind with the current mode, so turning it on changes
-    /// nothing until a kind is set; off returns every kind to the one mode.
-    private var perKindSkipBinding: Binding<Bool> {
-        Binding(
-            get: { !model.settings.skipModeOverrides.isEmpty },
-            set: { on in
-                let base = model.settings.skipIntros
-                model.settings.skipModeOverrides = on
-                    ? Dictionary(uniqueKeysWithValues: MediaSegment.Kind.skippable.map { ($0, base) })
-                    : [:]
-            }
-        )
-    }
-
-    private func skipModeBinding(for kind: MediaSegment.Kind) -> Binding<SkipIntrosMode> {
-        Binding(
-            get: { model.settings.skipMarkerModes.mode(for: kind) },
-            set: { model.settings.skipModeOverrides[kind] = $0 }
-        )
-    }
 
     var body: some View {
         List {
@@ -2148,6 +2465,9 @@ struct PlozziOSPlaybackSettingsView: View {
                 onShowAdvanced: { showsAdvancedStreaming = true }
             )
             PlaybackReadAheadControl()
+                .settingsSearchAnchor("read-ahead")
+            LivePlaybackBufferControl()
+                .settingsSearchAnchor("live-buffer")
             if UIDevice.current.userInterfaceIdiom == .phone {
                 SettingsSectionGroup {
                     Picker("Player orientation", selection: $model.settings.orientation) {
@@ -2156,45 +2476,11 @@ struct PlozziOSPlaybackSettingsView: View {
                         }
                     }
                     .accessibilityIdentifier("playback-orientation")
+                    .settingsSearchAnchor("player-orientation")
                 }
             }
-            SettingsSectionGroup("Skip intros, credits & more") {
-                if model.settings.skipModeOverrides.isEmpty {
-                    Picker("Skip", selection: $model.settings.skipIntros) {
-                        ForEach(SkipIntrosMode.allCases, id: \.self) {
-                            Text($0.title).tag($0)
-                        }
-                    }
-                }
-                Toggle("Set each marker separately", isOn: perKindSkipBinding)
-                if !model.settings.skipModeOverrides.isEmpty {
-                    ForEach(MediaSegment.Kind.skippable, id: \.self) { kind in
-                        Picker(selection: skipModeBinding(for: kind)) {
-                            ForEach(SkipIntrosMode.allCases, id: \.self) {
-                                Text($0.title).tag($0)
-                            }
-                        } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(kind.settingsTitle)
-                                if let hint = kind.settingsHint {
-                                    Text(hint)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                    }
-                }
-                Toggle(isOn: $model.settings.useCommunityMarkers) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Use community markers")
-                        Text("Looks up missing markers on IntroDB and TheIntroDB using IMDb/TMDB IDs.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
+            SkipMarkerSettingsControl(model: model, onOpenSettings: { showsSkipMarkerSettings = true })
+                .settingsSearchGroup(["skip-intros"])
 
             SettingsSectionGroup("Skipping") {
                 Picker("Skip backward", selection: $model.settings.skipBackwardInterval) {
@@ -2202,21 +2488,33 @@ struct PlozziOSPlaybackSettingsView: View {
                         Text(verbatim: $0.title(locale: locale)).tag($0)
                     }
                 }
+                .settingsSearchAnchor("skip-backward")
                 Picker("Skip forward", selection: $model.settings.skipForwardInterval) {
                     ForEach(SkipInterval.allCases, id: \.self) {
                         Text(verbatim: $0.title(locale: locale)).tag($0)
                     }
                 }
+                .settingsSearchAnchor("skip-forward")
                 Picker("Resume rewind", selection: $model.settings.resumeRewindInterval) {
                     ForEach(ResumeRewindInterval.allCases, id: \.self) {
                         Text(verbatim: $0.title(locale: locale)).tag($0)
                     }
                 }
+                .settingsSearchAnchor("resume-rewind")
             }
+            .settingsSearchGroup(["skip-backward", "skip-forward", "resume-rewind"])
 
             SettingsSectionGroup("Playback") {
+                Toggle("Ask to resume or start over", isOn: $model.settings.askBeforeResuming)
+                    .accessibilityIdentifier("playback-ask-before-resuming")
+                    .settingsSearchAnchor("ask-before-resuming")
                 PlaybackVersionPreferencePicker(model: model)
+                    .settingsSearchAnchor("version-selection")
+                Toggle("Remember series version choices", isOn: $model.settings.rememberVersionPerSeries)
+                    .accessibilityIdentifier("playback-remember-series-version")
+                    .settingsSearchAnchor("remember-series-version")
                 Toggle("Background Audio", isOn: $model.settings.backgroundAudio)
+                    .settingsSearchAnchor("background-audio")
                 Toggle(isOn: $model.settings.volumeBrightnessGestures) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Volume and brightness gestures")
@@ -2227,24 +2525,36 @@ struct PlozziOSPlaybackSettingsView: View {
                     }
                 }
                 .accessibilityIdentifier("playback-volume-brightness-gestures")
+                .settingsSearchAnchor("volume-brightness")
                 Toggle("Seek without pausing", isOn: $model.settings.seekWithoutPausing)
+                    .settingsSearchAnchor("seek-without-pausing")
                 // Autoplay first: whether the next episode starts at all, then
                 // whether the card announces it. Independent switches.
                 Toggle("Autoplay next episode", isOn: $model.settings.autoPlayNextEpisode)
+                    .settingsSearchAnchor("autoplay-next-episode")
                 Toggle("Autoplay next playlist item", isOn: $model.settings.autoPlayNextPlaylistItem)
+                    .settingsSearchAnchor("autoplay-next-playlist")
                 Toggle("Show Up Next card", isOn: $model.settings.showUpNextCard)
+                    .settingsSearchAnchor(
+                        "show-up-next-card", fallbackFor: model.settings.showUpNextCard ? [] : ["up-next-lead"]
+                    )
                 if model.settings.showUpNextCard {
                     Picker("Up Next lead time", selection: $model.settings.upNextLeadSeconds) {
                         ForEach(PlaybackSettings.upNextLeadSecondsOptions, id: \.self) {
                             Text("\($0) sec").tag($0)
                         }
-                    }
+                    }.settingsSearchAnchor("up-next-lead")
                 }
                 Toggle(
                     "Sync watch state across servers",
                     isOn: $model.settings.syncWatchAcrossServers
-                )
+                ).settingsSearchAnchor("cross-server-watch-sync")
             }
+            .settingsSearchGroup([
+                "ask-before-resuming", "version-selection", "remember-series-version", "background-audio",
+                "volume-brightness", "seek-without-pausing", "autoplay-next-episode",
+                "autoplay-next-playlist", "show-up-next-card", "up-next-lead", "cross-server-watch-sync"
+            ])
 
             SettingsSectionGroup(LocalizedStringResource(
                 "settings.section.tracks",
@@ -2259,8 +2569,14 @@ struct PlozziOSPlaybackSettingsView: View {
                             audioName(preference).tag(preference)
                         }
                     }
+                    .settingsSearchAnchor("audio-language")
                 }
                 Toggle("Set separately for movies, TV shows & anime", isOn: audioOverridesEnabled)
+                    .settingsSearchAnchor(
+                        "audio-separate",
+                        fallbackFor: audioPolicy.overrides.isEmpty
+                            ? Self.policyCategories.map { "audio-language-\($0.rawValue)" } : []
+                    )
                 if !audioPolicy.overrides.isEmpty {
                     ForEach(Self.policyCategories + [.other], id: \.self) { category in
                         Picker(selection: category == .other
@@ -2273,22 +2589,45 @@ struct PlozziOSPlaybackSettingsView: View {
                         } label: {
                             SeparateSettingLabel(category: category)
                         }
+                        .settingsSearchAnchor(category == .other ? "audio-language" : "audio-language-\(category)")
                     }
                 }
                 Toggle(
-                    "Remember audio per series",
+                    "Remember audio language per series",
                     isOn: $model.settings.rememberAudioTrackPerSeries
                 )
+                .settingsSearchAnchor("remember-audio")
                 Toggle(
                     "Remember subtitles per series",
                     isOn: $model.settings.rememberSubtitleTrackPerSeries
                 )
+                .settingsSearchAnchor("subtitle-remember")
+            }
+            .settingsSearchGroup(
+                ["audio-language", "audio-separate", "remember-audio", "subtitle-remember"]
+                    + Self.policyCategories.map { "audio-language-\($0.rawValue)" }
+            )
+            SettingsSectionGroup("Audio") {
+                LosslessAudioControl()
+                    .settingsSearchAnchor("lossless-audio")
+            }
+            .settingsSearchGroup(["lossless-audio"])
+            SettingsSectionGroup {
+                Button { showsAdvancedPlayback = true } label: {
+                    SettingsDisclosureLabel { Text("Advanced") }
+                }
             }
         }
         .settingsPageSurface()
         .navigationTitle("Playback")
+        .navigationDestination(isPresented: $showsSkipMarkerSettings) {
+            SkipMarkerSettingsView(model: model)
+        }
         .navigationDestination(isPresented: $showsAdvancedStreaming) {
             PlozziOSAdvancedStreamingSettings(settings: $model.settings.streaming, support: streamingSupport)
+        }
+        .navigationDestination(isPresented: $showsAdvancedPlayback) {
+            PlaybackAdvancedSettingsView()
         }
     }
 
@@ -2349,6 +2688,7 @@ private struct PlozziOSSubtitleSettingsView: View {
             }
             SettingsSectionGroup("Live TV subtitle style") {
                 Toggle("Use a separate style for Live TV", isOn: $style.usesSeparateLiveTVStyle)
+                    .settingsSearchAnchor("live-subtitle-style")
                 Text("Use the same subtitle appearance everywhere, or choose a separate look for Live TV.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -2358,6 +2698,7 @@ private struct PlozziOSSubtitleSettingsView: View {
                     }
                 }
             }
+            .settingsSearchGroup(["live-subtitle-style"])
 
             SettingsSectionGroup("Behavior") {
                 // Set separately, "Everything else" takes over the one mode,
@@ -2368,8 +2709,14 @@ private struct PlozziOSSubtitleSettingsView: View {
                             Text($0.displayName).tag($0)
                         }
                     }
+                    .settingsSearchAnchor("subtitle-default")
                 }
                 Toggle("Set separately for movies, TV shows & anime", isOn: subtitleOverridesEnabled)
+                    .settingsSearchAnchor(
+                        "subtitle-separate",
+                        fallbackFor: policy.overrides.isEmpty
+                            ? Self.policyCategories.map { "subtitle-default-\($0.rawValue)" } : []
+                    )
                 if !policy.overrides.isEmpty {
                     ForEach(Self.policyCategories + [.other], id: \.self) { category in
                         Picker(selection: category == .other
@@ -2382,12 +2729,13 @@ private struct PlozziOSSubtitleSettingsView: View {
                         } label: {
                             SeparateSettingLabel(category: category)
                         }
+                        .settingsSearchAnchor(category == .other ? "subtitle-default" : "subtitle-default-\(category)")
                     }
                 }
                 Toggle(
                     "Download subtitles automatically",
                     isOn: $behavior.settings.autoDownloadSubtitles
-                )
+                ).settingsSearchAnchor("subtitle-download")
                 TextField(
                     "Preferred language code",
                     text: Binding(
@@ -2402,6 +2750,7 @@ private struct PlozziOSSubtitleSettingsView: View {
                 )
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .settingsSearchAnchor("subtitle-language")
                 Picker(
                     "SDH subtitles",
                     selection: $behavior.settings.hearingImpairedPreference
@@ -2411,10 +2760,15 @@ private struct PlozziOSSubtitleSettingsView: View {
                     }
                 }
                 .accessibilityIdentifier("subtitle-sdh")
+                .settingsSearchAnchor("subtitle-sdh")
                 Text(behavior.settings.hearingImpairedPreference.detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            .settingsSearchGroup(
+                ["subtitle-default", "subtitle-separate", "subtitle-download", "subtitle-language", "subtitle-sdh"]
+                    + Self.policyCategories.map { "subtitle-default-\($0.rawValue)" }
+            )
 
             SettingsSectionGroup("Subtitle search") {
                 Picker(
@@ -2424,8 +2778,9 @@ private struct PlozziOSSubtitleSettingsView: View {
                     ForEach(ForcedSubtitlePreference.allCases, id: \.self) {
                         Text($0.displayName).tag($0)
                     }
-                }
+                }.settingsSearchAnchor("subtitle-forced-search")
             }
+            .settingsSearchGroup(["subtitle-forced-search"])
         }
         .settingsPageSurface()
         .navigationTitle("Subtitles")
@@ -2476,37 +2831,36 @@ private struct SeparateSettingLabel: View {
     }
 }
 
-private struct PlozziOSSpoilerSettingsView: View {
+private struct PlozziOSSpoilerSettingsControls: View {
     @Bindable var model: SpoilerSettingsModel
 
     var body: some View {
-        List {
-            SettingsSectionGroup {
-                Toggle("Protect unwatched episodes", isOn: $model.settings.isEnabled)
-                Picker("Thumbnail treatment", selection: $model.settings.mode) {
-                    ForEach(SpoilerSettings.Mode.allCases, id: \.self) {
-                        Text($0.displayName).tag($0)
-                    }
+        SettingsSectionGroup("Spoiler Protection") {
+            Toggle("Protect unwatched episodes", isOn: $model.settings.isEnabled)
+                .settingsSearchAnchor("spoilers")
+            Picker("Thumbnail treatment", selection: $model.settings.mode) {
+                ForEach(SpoilerSettings.Mode.allCases, id: \.self) {
+                    Text($0.displayName).tag($0)
                 }
-                .disabled(!model.settings.isEnabled)
-                Toggle(
-                    "Hide ratings until watched",
-                    isOn: $model.settings.hideRatingsUntilWatched
-                )
-            } footer: {
-                Text(LocalizedStringResource(
-                    "settings.spoilers.footer",
-                    defaultValue: """
-                        Episode titles, summaries, and artwork can be hidden until \
-                        you watch them. Hidden ratings are blurred on a title's \
-                        page — tap to reveal them.
-                        """,
-                    comment: "Footer under the Spoilers settings group on iPhone/iPad, explaining what the switches above it do."
-                ))
             }
+            .disabled(!model.settings.isEnabled).settingsSearchAnchor("spoiler-treatment")
+            Toggle(
+                "Hide ratings until watched",
+                isOn: $model.settings.hideRatingsUntilWatched
+            )
+            .settingsSearchAnchor("hide-ratings")
+        } footer: {
+            Text(LocalizedStringResource(
+                "settings.spoilers.footer",
+                defaultValue: """
+                    Episode titles, summaries, and artwork can be hidden until \
+                    you watch them. Tap blurred ratings on the details screen \
+                    to reveal them.
+                    """,
+                comment: "Footer under the Spoilers settings group on iPhone/iPad, explaining what the switches above it do."
+            ))
         }
-        .settingsPageSurface()
-        .navigationTitle("Spoiler Protection")
+        .settingsSearchGroup(["spoilers", "hide-ratings"])
     }
 }
 
@@ -2518,12 +2872,22 @@ private struct PlozziOSNightShiftSettingsView: View {
         List {
             SettingsSectionGroup {
                 Toggle("Circadian Mode", isOn: $model.settings.isEnabled)
+                    .settingsSearchAnchor(
+                        "circadian",
+                        fallbackFor: model.settings.isEnabled ? [] : SettingsSearchCatalog.targets(on: .circadian)
+                    )
                 Picker("Schedule", selection: $model.settings.scheduleMode) {
                     ForEach(NightShiftScheduleMode.allCases) {
                         Text($0.displayName).tag($0)
                     }
                 }
                 .disabled(!model.settings.isEnabled)
+                .settingsSearchAnchor(
+                    model.settings.isEnabled ? "circadian-schedule-mobile" : "circadian-disabled-schedule",
+                    fallbackFor: model.settings.isEnabled ? SettingsSearchCatalog.circadianScheduleFallbacks(
+                        isEnabled: true, mode: model.settings.scheduleMode
+                    ) : []
+                )
 
                 if model.settings.isEnabled {
                     scheduleDetails
@@ -2531,6 +2895,12 @@ private struct PlozziOSNightShiftSettingsView: View {
             } footer: {
                 Text(model.scheduleSummary(locale: locale))
             }
+            .settingsSearchGroup(
+                model.settings.isEnabled
+                    ? ["circadian", "circadian-schedule-mobile", "circadian-region", "circadian-on", "circadian-off"]
+                        + (model.settings.scheduleMode == .alwaysOn ? ["circadian-fade"] : [])
+                    : SettingsSearchCatalog.targets(on: .circadian)
+            )
 
             if model.settings.isEnabled {
                 SettingsSectionGroup("Picture") {
@@ -2538,21 +2908,25 @@ private struct PlozziOSNightShiftSettingsView: View {
                         ForEach(NightShiftWarmth.allCases) {
                             Text($0.displayName).tag($0)
                         }
-                    }
+                    }.settingsSearchAnchor("circadian-warmth")
                     Picker("Dimness", selection: $model.settings.dimness) {
                         ForEach(NightShiftDimness.allCases) {
                             Text($0.displayName).tag($0)
                         }
-                    }
+                    }.settingsSearchAnchor("circadian-dimness")
                     if model.settings.scheduleMode != .alwaysOn {
                         Picker("Fade", selection: $model.settings.fadeMinutes) {
                             ForEach(fadeOptions, id: \.self) { minutes in
                                 Text(fadeLabel(minutes))
                                     .tag(minutes)
                             }
-                        }
+                        }.settingsSearchAnchor("circadian-fade")
                     }
                 }
+                .settingsSearchGroup(
+                    ["circadian-warmth", "circadian-dimness"]
+                        + (model.settings.scheduleMode == .alwaysOn ? [] : ["circadian-fade"])
+                )
 
                 SettingsSectionGroup("Preview") {
                     Toggle("Preview at Full Strength", isOn: $model.isPreviewing)
@@ -2589,18 +2963,18 @@ private struct PlozziOSNightShiftSettingsView: View {
                 ForEach(NightShiftRegion.sortedCatalog) { region in
                     Text(region.name).tag(region.id)
                 }
-            }
+            }.settingsSearchAnchor("circadian-region")
         case .manual:
             DatePicker(
                 "Turns on",
                 selection: timeBinding(for: \.manualOnMinutes),
                 displayedComponents: .hourAndMinute
-            )
+            ).settingsSearchAnchor("circadian-on")
             DatePicker(
                 "Turns off",
                 selection: timeBinding(for: \.manualOffMinutes),
                 displayedComponents: .hourAndMinute
-            )
+            ).settingsSearchAnchor("circadian-off")
         case .alwaysOn:
             EmptyView()
         }

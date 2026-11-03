@@ -245,12 +245,34 @@ final class LibraryCollageTests: XCTestCase {
         XCTAssertTrue([.none, .noneSkipFirst, .noneSkipLast].contains(alpha))
     }
 
+    func testCollectionDirectoryCollageAcceptsWideCoversWithoutRelaxingMoviePosters() async {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let wide = UIGraphicsImageRenderer(size: CGSize(width: 400, height: 225), format: format).image {
+            UIColor.blue.setFill()
+            $0.fill(CGRect(x: 0, y: 0, width: 400, height: 225))
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = LibraryCollageCache(directory: directory, imageLoader: { _ in wide })
+        for kind: MediaItemKind in [.movie, .collection] {
+            let provider = CollageProvider(items: [.init(
+                id: "cover", title: "Cover", kind: kind,
+                posterURL: URL(string: "https://example.invalid/cover-\(kind.rawValue)"),
+                allowsTitleBasedMetadataMatching: false
+            )])
+            let image = await cache.image(for: source(provider, libraryID: kind.rawValue, kind: kind))
+            XCTAssertEqual(image != nil, kind == .collection)
+        }
+    }
+
     private func source(
         _ provider: CollageProvider,
         cover: URL? = nil,
         scope: String = "adult",
         accountID: String = "account",
         libraryID: String = "movies",
+        kind: MediaItemKind = .movie,
         revision: CredentialRevision = CredentialRevision(
             rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
         )
@@ -263,7 +285,7 @@ final class LibraryCollageTests: XCTestCase {
             library: AggregatedLibrary(
                 accountID: accountID, accountName: "Viewer", serverName: "Server",
                 providerKind: .jellyfin,
-                library: MediaLibrary(id: libraryID, title: "Movies", kind: .movie, imageURL: cover)
+                library: MediaLibrary(id: libraryID, title: "Movies", kind: kind, imageURL: cover)
             ),
             account: ResolvedAccount(account: account, provider: provider), scope: scope
         )

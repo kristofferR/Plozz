@@ -43,7 +43,6 @@ public final class IPTVAuthViewModel {
     public var guideAddress: String
     public var additionalGuides: [Guide]
     public var guideHeaders: [Header] = []
-    public var discoversPlaylistGuides: Bool
     public var authentication: Authentication = .none
     public var headers: [Header] = []
     public private(set) var isConnecting = false
@@ -63,7 +62,6 @@ public final class IPTVAuthViewModel {
     public init(
         deviceID: String, address: String = "", name: String = "", guideAddress: String = "",
         guideURLs: [URL] = [], reconnecting: UserSession? = nil, initialMode: IPTVCredential.Mode = .playlist,
-        discoversPlaylistGuides: Bool = true,
         setupDiagnostics: IPTVSetupDiagnostics = .shared,
         signIn: @escaping SignIn = { credential, name, deviceID, progress in
             try await IPTVProvider.signIn(credential: credential, name: name, deviceID: deviceID, progress: progress)
@@ -74,7 +72,6 @@ public final class IPTVAuthViewModel {
         self.address = address
         self.name = name
         self.guideAddress = guideURLs.first?.absoluteString ?? guideAddress
-        self.discoversPlaylistGuides = discoversPlaylistGuides
         additionalGuides = guideURLs.dropFirst().map { Guide(address: $0.absoluteString) }
         self.onAuthenticated = onAuthenticated
         self.signIn = signIn
@@ -94,7 +91,6 @@ public final class IPTVAuthViewModel {
                 additionalGuides = credential.explicitGuideURLs.dropFirst().map { Guide(address: $0.absoluteString) }
                 guideHeaders = credential.explicitGuideHeaders.sorted { $0.key < $1.key }
                     .map { Header(name: $0.key, value: $0.value) }
-                self.discoversPlaylistGuides = credential.automaticallyDiscoversGuides
             } catch {
                 issue = "Enter your provider's connection details again to reconnect this account."
                 PlozzLog.auth.error("Saved IPTV connection details are unavailable")
@@ -105,9 +101,7 @@ public final class IPTVAuthViewModel {
     public var hasAdvancedConfiguration: Bool {
         (mode == .playlist && authentication != .none)
             || (mode != .file && !headers.isEmpty)
-            || !guideAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !additionalGuides.isEmpty || !guideHeaders.isEmpty
-            || (mode != .xtream && !discoversPlaylistGuides)
     }
 
     public var usesHTTP: Bool {
@@ -250,7 +244,7 @@ public final class IPTVAuthViewModel {
         return try IPTVCredential(
             mode: mode, address: url, username: username, password: password,
             headers: values, guideURL: guide, additionalGuideURLs: extraGuides,
-            guideHeaders: try headerValues(guideHeaders), discoversPlaylistGuides: discoversPlaylistGuides
+            guideHeaders: try headerValues(guideHeaders)
         )
     }
 

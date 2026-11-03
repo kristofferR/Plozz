@@ -83,6 +83,12 @@ enum PlozzigenLiveFailure {
         let error = fallbackError.map { $0 as NSError }
         guard appError(info) != .cancelled, !(fallbackError is CancellationError),
               !(error?.domain == NSURLErrorDomain && error?.code == NSURLErrorCancelled) else { return }
+        let rejectedBody = deliveryDiagnostic.flatMap { diagnostic -> PlaybackFailureDiagnostic.Format? in
+            guard diagnostic.stage == .body, diagnostic.reason == .invalidResponse,
+                  diagnostic.httpStatus.map({ (200...299).contains($0) }) == true,
+                  diagnostic.format.nonVideoMessage != nil else { return nil }
+            return diagnostic.format
+        }
         attempt?.fail(
             stage: stage,
             reason: deliveryDiagnostic?.reason ?? .other,
@@ -92,7 +98,7 @@ enum PlozzigenLiveFailure {
             code: info == nil ? error?.code : info?.underlyingCode,
             httpStatus: deliveryDiagnostic?.httpStatus
                 ?? (info?.kind == .sourceRefused && info?.underlyingDomain == nil ? info?.underlyingCode : nil),
-            format: evidence?.delivery?.root?.format ?? .unknown,
+            format: rejectedBody ?? evidence?.delivery?.root?.format ?? .unknown,
             evidence: evidence
         )
     }

@@ -2,6 +2,7 @@ import CoreModels
 import Foundation
 import XCTest
 @testable import MetadataKit
+@testable import TestSupportNetworking
 
 final class CommunitySkipMarkersTests: XCTestCase {
     private func episode(providerIDs: [String: String], season: Int? = 1, number: Int? = 2) -> MediaItem {
@@ -75,6 +76,45 @@ final class CommunitySkipMarkersTests: XCTestCase {
     }
 
     // MARK: TheIntroDB
+
+    func testTheIntroDBRequestsIdentifyPlozz() async throws {
+        let session = URLSession(configuration: StubURLProtocol.makeEphemeralSession())
+        defer {
+            session.invalidateAndCancel()
+            StubURLProtocol.reset()
+        }
+        let queries = [
+            CommunitySkipMarkerQuery(isMovie: true, imdbID: "tt1375666", tmdbID: nil),
+            CommunitySkipMarkerQuery(
+                isMovie: false, imdbID: nil, tmdbID: nil,
+                season: 1, episode: 2, tvdbID: "81189", episodeOrdering: .aired
+            )
+        ]
+        for query in queries {
+            let url = try XCTUnwrap(TheIntroDBClient.url(for: query))
+            StubURLProtocol.queue(StubResponse(
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"tvdb_id":81189,"intro":[{"start_ms":10000,"end_ms":40000}]}"#.utf8)
+            ), for: url)
+
+            let segments = await TheIntroDBClient.segments(for: query, session: session)
+
+            let requests = StubURLProtocol.requests(for: url)
+            XCTAssertEqual(requests.count, 1)
+            let request = try XCTUnwrap(requests.first)
+            XCTAssertEqual(request.url?.host, "api.theintrodb.org")
+            XCTAssertEqual(request.url?.path, "/v4/media")
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json")
+            let userAgent = try XCTUnwrap(request.value(forHTTPHeaderField: "User-Agent"))
+            XCTAssertEqual(userAgent, MetadataHTTP.userAgent)
+            XCTAssertNotNil(userAgent.range(of: #"^Plozz/[0-9]+\.[0-9]+"#, options: .regularExpression))
+            XCTAssertEqual(segments.map(\.kind), [.intro])
+            XCTAssertEqual(segments.first?.start, 10)
+            XCTAssertEqual(segments.first?.end, 40)
+        }
+    }
 
     func testTheIntroDBURLPrefersTMDB() {
         let tv = CommunitySkipMarkerQuery(isMovie: false, imdbID: "tt0903747", tmdbID: "1396", season: 1, episode: 2)

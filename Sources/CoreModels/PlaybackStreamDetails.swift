@@ -24,10 +24,12 @@ public struct PlaybackStreamDetails: Equatable, Sendable {
             badges.append(.init(resolution.displayString, style: .prominent))
         }
         if let codec = metadata.videoCodecBadge { badges.append(codec) }
-        badges += metadata.dynamicRangeBadges
+        badges += MediaSourceMetadata.orderedTechnicalBadges(
+            resolution: nil, range: metadata.dynamicRangeBadges, audio: []
+        )
         if let audio = metadata.audio,
            let format = TrackLabeling.audioFormatHint(codec: audio.codec, channels: audio.channels, isAtmos: false) {
-            badges.append(.init(format))
+            badges.append(.init(format, style: .audio))
         }
         return badges
     }

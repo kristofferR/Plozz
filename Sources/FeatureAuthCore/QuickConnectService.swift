@@ -21,6 +21,7 @@ public struct QuickConnectService: Sendable {
     private let server: MediaServer
     private let deviceID: String
     private let http: HTTPClient
+    private let diagnostics: ServerConnectionDiagnostics
     private let config: Configuration
     private let now: @Sendable () -> Date
     private let sleep: @Sendable (TimeInterval) async throws -> Void
@@ -31,11 +32,13 @@ public struct QuickConnectService: Sendable {
         http: HTTPClient = URLSessionHTTPClient(),
         config: Configuration = Configuration(),
         now: @escaping @Sendable () -> Date = { Date() },
-        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }
+        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) },
+        diagnostics: ServerConnectionDiagnostics = .shared
     ) {
         self.server = server
         self.deviceID = deviceID
         self.http = http
+        self.diagnostics = diagnostics
         self.config = config
         self.now = now
         self.sleep = sleep
@@ -51,10 +54,12 @@ public struct QuickConnectService: Sendable {
     /// Begins a Quick Connect request. Throws `.quickConnectUnavailable` if the
     /// server has the feature disabled.
     public func begin() async throws -> QuickConnectChallenge {
-        guard try await client.quickConnectEnabled() else {
-            throw AppError.quickConnectUnavailable
+        try await diagnostics.capture(provider: server.provider, stage: .quickConnectBegin, baseURL: server.baseURL) {
+            guard try await client.quickConnectEnabled() else {
+                throw AppError.quickConnectUnavailable
+            }
+            return try await client.quickConnectInitiate()
         }
-        return try await client.quickConnectInitiate()
     }
 
     /// Polls until the user approves the request, then exchanges the secret for
@@ -63,6 +68,12 @@ public struct QuickConnectService: Sendable {
     /// - Throws: `.quickConnectExpired` on timeout, `.cancelled` if the task is
     ///   cancelled, or any transport error.
     public func awaitApproval(for challenge: QuickConnectChallenge) async throws -> UserSession {
+        try await diagnostics.capture(provider: server.provider, stage: .quickConnectApproval, baseURL: server.baseURL) {
+            try await pollForApproval(for: challenge)
+        }
+    }
+
+    private func pollForApproval(for challenge: QuickConnectChallenge) async throws -> UserSession {
         let deadline = now().addingTimeInterval(config.timeout)
         let client = self.client
 
@@ -73,19 +84,38 @@ public struct QuickConnectService: Sendable {
                 let auth = try await client.authenticate(withSecret: challenge.secret)
                 // Fetch the server's real name (no auth required) so the account
                 // doesn't keep the placeholder provider name ("Jellyfin").
-                let info = try? await client.publicSystemInfo()
+                let info: MediaServer?
+                do {
+                    info = try await client.publicSystemInfo()
+                } catch {
+                    try Task.checkCancellation()
+                    if error is CancellationError || (error as? AppError) == .cancelled { throw error }
+                    PlozzLog.auth.info("Public server metadata unavailable after Quick Connect")
+                    info = nil
+                }
+                try Task.checkCancellation()
+                if let info, info.baseURL != server.baseURL,
+                   let authenticatedServerID = auth.serverID, info.id != authenticatedServerID {
+                    PlozzLog.auth.error("Redirected public metadata did not match the authenticated server")
+                    throw AppError.invalidResponse
+                }
                 let resolvedServer = MediaServer(
                     id: auth.serverID ?? info?.id ?? server.id,
                     name: info?.name ?? server.name,
-                    baseURL: server.baseURL,
+                    baseURL: info?.baseURL ?? server.baseURL,
                     provider: .jellyfin,
                     version: info?.version ?? server.version
+                )
+                let resolvedClient = JellyfinClient(
+                    baseURL: resolvedServer.baseURL,
+                    deviceProfile: JellyfinDeviceProfile(deviceID: deviceID),
+                    http: http
                 )
                 return UserSession(
                     server: resolvedServer,
                     userID: auth.userID,
                     userName: auth.userName,
-                    avatarURL: client.userAvatarURL(userID: auth.userID, maxWidth: 120, token: auth.token),
+                    avatarURL: resolvedClient.userAvatarURL(userID: auth.userID, maxWidth: 120, token: auth.token),
                     deviceID: deviceID,
                     accessToken: auth.token
                 )

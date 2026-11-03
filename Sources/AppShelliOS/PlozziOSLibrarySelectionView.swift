@@ -3,19 +3,56 @@ import AppRuntime
 import CoreModels
 import CoreUI
 import FeatureHomeCore
+import FeatureLiveTV
+import FeatureLiveTVCore
 import SwiftUI
 
 struct PlozziOSLibrarySelectionView: View {
-    let accounts: [ResolvedAccount]
-    @Bindable var visibility: HomeLibraryVisibilityModel
-    let onContinue: () -> Void
+    let appModel: PlozziOSAppModel
+    let accountIDs: [String]
+    var hostsGuideProgress = true
+    @Environment(\.themePalette) private var palette
+
+    private var visibility: HomeLibraryVisibilityModel { appModel.settings.homeVisibility }
+    private func onContinue() { appModel.completeLibrarySelection() }
 
     @State private var libraries: [LibraryChoice] = []
     @State private var isLoading = true
     @State private var loadFailed = false
     @State private var loadGeneration = 0
 
+    private var guides: [LiveTVGuidePreparationModel.Status] {
+        accountIDs.compactMap { appModel.guidePreparation.statuses[$0] }
+    }
+
     var body: some View {
+        Group {
+            if let request = appModel.plexHomeUsers.pendingPlexPINRequest {
+                PlozziOSPlexPINView(
+                    model: appModel.plexHomeUsers, request: request, dismissOnSuccess: false
+                )
+            } else {
+                librarySelection
+            }
+        }
+        .guidePreparationOverlay(
+            model: appModel.guidePreparation, presenter: appModel.transientStatusPresenter,
+            palette: palette, isEnabled: hostsGuideProgress
+        )
+        .task(id: loadID) {
+            guard appModel.plexHomeUsers.pendingPlexPINRequest == nil else { return }
+            await loadLibraries()
+        }
+        .interactiveDismissDisabled()
+    }
+
+    private var loadID: [String] {
+        [appModel.profiles.activeProfileID, String(appModel.plexHomeUsers.plexIdentityGeneration)]
+            + accountIDs
+            + appModel.accountsProviders.accounts.map { "\($0.id):\($0.credentialRevision.rawValue)" }
+    }
+
+    private var librarySelection: some View {
         NavigationStack {
             Group {
                 if isLoading {
@@ -48,22 +85,29 @@ struct PlozziOSLibrarySelectionView: View {
                             .listRowInsets(EdgeInsets())
                             .listRowSeparator(.hidden)
                         } footer: {
-                            Text("You can change these choices later in Settings.")
+                            if !libraries.isEmpty || guides.isEmpty {
+                                Text("You can change these choices later in Settings.")
+                            }
                         }
                     }
                     .settingsPageSurface()
                 }
             }
-            .navigationTitle("Choose Your Libraries")
+            .navigationTitle(libraries.isEmpty && !guides.isEmpty ? Text("Live TV") : Text("Choose Your Libraries"))
             .navigationBarTitleDisplayMode(.inline)
         }
-        .task { await loadLibraries() }
-        .interactiveDismissDisabled()
     }
 
     @ViewBuilder
     private var content: some View {
-        if libraries.isEmpty {
+        if !guides.isEmpty {
+            Section {
+                if libraries.isEmpty { Label("Playlist added", systemImage: "checkmark.circle") }
+            } footer: {
+                Text("You can start watching while the guide loads.")
+            }
+        }
+        if libraries.isEmpty && guides.isEmpty {
             Section {
                 ContentUnavailableView(
                     loadFailed ? "Couldn’t Load Libraries" : "No Video Libraries",
@@ -85,7 +129,7 @@ struct PlozziOSLibrarySelectionView: View {
                             library.library.title,
                             isOn: Binding(
                                 get: {
-                                    visibility.isEnabled(library.key)
+                                    visibility.isVisibleOnHome(library.key, library: library.library)
                                 },
                                 set: {
                                     visibility.setEnabled($0, for: library.key)
@@ -130,18 +174,22 @@ struct PlozziOSLibrarySelectionView: View {
 
     @MainActor
     private func loadLibraries() async {
+        let scope = loadID
         loadGeneration += 1
         let generation = loadGeneration
         isLoading = true
         loadFailed = false
-        let discovery = await HomeAggregator().libraryDiscovery(from: accounts)
-        guard !Task.isCancelled, generation == loadGeneration else { return }
+        let accounts = appModel.accountsProviders.resolvedAccounts(withIDs: accountIDs)
+        let discovery = await HomeAggregator().libraryDiscovery(
+            from: accounts, expectedAccountIDs: Set(accountIDs)
+        )
+        guard !Task.isCancelled, generation == loadGeneration, scope == loadID else { return }
         loadFailed = !discovery.unreachableAccountIDs.isEmpty
         libraries = discovery.libraries.filter { !$0.library.isMusic }.map {
             LibraryChoice(accountID: $0.accountID, serverName: $0.serverName, library: $0.library)
         }
         isLoading = false
-        if discovery.canSkipSelection(for: accounts) { onContinue() }
+        if discovery.canSkipSelection(for: accounts), guides.isEmpty { onContinue() }
     }
 }
 

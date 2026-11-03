@@ -7,26 +7,46 @@ public struct CardAppearanceControls: View {
     @Bindable private var cards: CardStyleSettingsModel
     @Bindable private var watchIndicator: WatchStatusIndicatorSettingsModel
     private let density: UIDensitySettingsModel?
+    private let visibility: HomeLibraryVisibilityModel?
 
     public init(
         cards: CardStyleSettingsModel, watchIndicator: WatchStatusIndicatorSettingsModel,
-        density: UIDensitySettingsModel? = nil
+        density: UIDensitySettingsModel? = nil, visibility: HomeLibraryVisibilityModel? = nil
     ) {
         self.cards = cards
         self.watchIndicator = watchIndicator
         self.density = density
+        self.visibility = visibility
     }
 
     public var body: some View {
+        controls
+            .environment(\.plozzWatchIndicatorColor, watchIndicator.color)
+            .environment(\.plozzShowsUnwatchedEpisodeCount, watchIndicator.showsUnwatchedEpisodeCount)
+            .environment(\.plozzShowsProgressBars, watchIndicator.showsProgressBars)
+            .environment(\.plozzEpisodeCountBadgeStyle, watchIndicator.episodeCountStyle)
+    }
+
+    @ViewBuilder
+    private var controls: some View {
         #if os(tvOS)
         VStack(alignment: .leading, spacing: SettingsMetrics.sectionSpacing) {
             SettingsDetailGroup(title: "Labels", illustrated: true) {
-                CardLabelControls(settings: $cards.captions, style: cards.style)
+                CardLabelControls(settings: $cards.captions, style: cards.style, visibility: visibility)
+                    .settingsSearchAnchor("card-labels")
             }
-            SettingsDetailGroup(title: "Watched Indicator", illustrated: true) {
+            SettingsDetailGroup(title: "Watch indicators", illustrated: true) {
                 CompactWatchIndicatorPicker(selection: $watchIndicator.indicator, swatchHeight: 150)
-                colorMenu
+                    .settingsSearchAnchor(
+                        "watch-indicators", fallbackFor: watchIndicator.indicator == .hidden ? ["watch-indicator-color"] : []
+                    )
+                if watchIndicator.indicator != .hidden {
+                    WatchIndicatorColorPicker(selection: $watchIndicator.color)
+                        .settingsSearchAnchor("watch-indicator-color")
+                }
                 episodeCountToggle
+                if watchIndicator.showsUnwatchedEpisodeCount { episodeCountStyleMenu }
+                progressBarsToggle
             }
             SettingsDetailGroup(
                 title: LocalizedStringResource(
@@ -37,30 +57,48 @@ public struct CardAppearanceControls: View {
                 illustrated: true
             ) {
                 CompactCardFocusStylePicker(selection: $cards.focusStyle, swatchHeight: 150)
+                    .settingsSearchAnchor("card-focus")
             }
             SettingsDetailGroup(title: "Style", illustrated: true) {
                 CompactCardStylePicker(selection: $cards.style, swatchHeight: 150)
+                    .settingsSearchAnchor("card-style")
             }
             if let density {
                 @Bindable var density = density
                 SettingsDetailGroup(title: "Display Size", illustrated: true) {
                     CompactDisplaySizePicker(selection: $density.density)
+                        .settingsSearchAnchor("display-size")
                 }
             }
         }
         #else
         List {
             SettingsSectionGroup("Labels") {
-                CardLabelControls(settings: $cards.captions, style: cards.style)
+                CardLabelControls(settings: $cards.captions, style: cards.style, visibility: visibility)
+                    .settingsSearchAnchor("card-labels")
             }
-            SettingsSectionGroup("Watched Indicator") {
+            .settingsSearchGroup(["card-labels"])
+            SettingsSectionGroup("Watch indicators") {
                 CompactWatchIndicatorPicker(selection: $watchIndicator.indicator, swatchHeight: 112)
-                colorMenu
+                    .settingsSearchAnchor(
+                        "watch-indicators", fallbackFor: watchIndicator.indicator == .hidden ? ["watch-indicator-color"] : []
+                    )
+                if watchIndicator.indicator != .hidden {
+                    WatchIndicatorColorPicker(selection: $watchIndicator.color)
+                        .settingsSearchAnchor("watch-indicator-color")
+                }
                 episodeCountToggle
+                if watchIndicator.showsUnwatchedEpisodeCount { episodeCountStyleMenu }
+                progressBarsToggle
             }
+            .settingsSearchGroup([
+                "watch-indicators", "watch-indicator-color", "episode-count", "episode-count-style", "progress-bars"
+            ])
             SettingsSectionGroup("Style") {
                 CompactCardStylePicker(selection: $cards.style, swatchHeight: 112)
+                    .settingsSearchAnchor("card-style")
             }
+            .settingsSearchGroup(["card-style"])
             if let density {
                 @Bindable var density = density
                 SettingsSectionGroup("Display Size") {
@@ -72,9 +110,11 @@ public struct CardAppearanceControls: View {
                     }
                     .pickerStyle(.menu)
                     .accessibilityIdentifier("appearance-display-size")
+                    .settingsSearchAnchor("display-size")
                 } footer: {
                     Text("Scales card size, columns and spacing across the app.")
                 }
+                .settingsSearchGroup(["display-size"])
             }
         }
         .settingsPageSurface()
@@ -82,32 +122,57 @@ public struct CardAppearanceControls: View {
         #endif
     }
 
-    private var colorMenu: some View {
-        SettingsMenuRow(title: "Color", value: Text(watchIndicator.color.displayName)) {
-            Picker("Color", selection: $watchIndicator.color) {
-                ForEach(WatchIndicatorColor.allCases) { color in
-                    Text(color.displayName).tag(color)
-                }
-            }
-        }
-        .accessibilityIdentifier("watch-indicator-color")
-    }
-
     private var episodeCountToggle: some View {
         Toggle("Show unwatched episode count", isOn: $watchIndicator.showsUnwatchedEpisodeCount)
             .accessibilityIdentifier("unwatched-episode-count-toggle")
+            .settingsSearchAnchor(
+                "episode-count", fallbackFor: watchIndicator.showsUnwatchedEpisodeCount ? [] : ["episode-count-style"]
+            )
+    }
+
+    private var progressBarsToggle: some View {
+        Toggle("Show progress bars", isOn: $watchIndicator.showsProgressBars)
+            .accessibilityIdentifier("progress-bars-toggle")
+            .settingsSearchAnchor("progress-bars")
+    }
+
+    private var episodeCountStyleMenu: some View {
+        let title = LocalizedStringResource(
+            "episodeCountStyle.label", defaultValue: "Episode count style",
+            comment: "Settings control for choosing an attached or floating unwatched episode-count badge."
+        )
+        let picker = Picker(selection: $watchIndicator.episodeCountStyle) {
+            ForEach(EpisodeCountBadgeStyle.allCases) { style in
+                Text(style.displayName)
+                    .tag(style)
+                    .accessibilityIdentifier("episode-count-style-\(style.rawValue)")
+            }
+        } label: { Text(title) }
+        #if os(tvOS)
+        return SettingsMenuRow(title: title, value: Text(watchIndicator.episodeCountStyle.displayName)) {
+            picker.pickerStyle(.inline)
+        }
+        .accessibilityIdentifier("episode-count-style")
+        .settingsSearchAnchor("episode-count-style")
+        #else
+        return picker
+            .pickerStyle(.menu)
+            .accessibilityIdentifier("episode-count-style")
+            .settingsSearchAnchor("episode-count-style")
+        #endif
     }
 }
 
 struct CardLabelControls: View {
     @Binding var settings: CardCaptionSettings
     let style: CardStyle
+    var visibility: HomeLibraryVisibilityModel? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: spacing) {
             CardCaptionPicker(settings: $settings, style: style)
-            ViewCustomizationLink(isCustomized: settings.selectedPreset == nil) {
-                CardCaptionCustomizationContent(settings: $settings, style: style)
+            ViewCustomizationLink(isCustomized: settings.selectedPreset == nil, title: "Customize labels") {
+                CardCaptionCustomizationContent(settings: $settings, style: style, visibility: visibility)
             }
             .accessibilityIdentifier("card-label-customization")
         }
@@ -130,32 +195,71 @@ private struct CardCaptionPicker: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     var body: some View {
+        #if os(iOS)
+        AdaptiveCardSettingsPicker {
+            HStack(alignment: .top, spacing: 16) { choices }
+        } compact: {
+            compactPicker
+        }
+        #else
         let layout = dynamicTypeSize.isAccessibilitySize || horizontalSizeClass == .compact
             ? AnyLayout(VStackLayout(spacing: 16))
             : AnyLayout(HStackLayout(alignment: .top, spacing: 16))
-        layout {
-            ForEach(CardCaptionPreference.allCases) { preference in
-                PreviewCard(
-                    title: preference.displayName,
-                    isSelected: settings.selectedPreset == preference,
-                    accent: palette.accent,
-                    compact: true,
-                    swatchHeight: swatchHeight,
-                    titleLineLimit: nil,
-                    titleSizeGroup: CardCaptionPreference.allCases.map(\.displayName),
-                    action: { settings.applyPreset(preference) }
-                ) {
-                    CardStyleSwatch(
-                        style: style,
-                        showsCaptions: preference != .hide,
-                        showsMixedCaptions: preference == .recommended
-                    )
-                        .accessibilityHidden(true)
+        layout { choices }
+        #endif
+    }
+
+    #if os(iOS)
+    private var compactPicker: some View {
+        VStack(spacing: 12) {
+            CardStyleSwatch(
+                style: style,
+                showsCaptions: previewVisibility.contains(true),
+                showsMixedCaptions: previewVisibility.contains(true) && previewVisibility.contains(false)
+            )
+            .frame(height: 96)
+            .accessibilityHidden(true)
+            Picker("Labels", selection: Binding<CardCaptionPreference?>(
+                get: { settings.selectedPreset },
+                set: { if let preset = $0 { settings.applyPreset(preset) } }
+            )) {
+                if settings.selectedPreset == nil {
+                    Text("Custom").tag(Optional<CardCaptionPreference>.none)
                 }
-                .accessibilityAddTraits(settings.selectedPreset == preference ? .isSelected : [])
-                .accessibilityIdentifier(preference == .recommended ? "card-labels-recommended"
-                                         : preference == .show ? "card-labels-on" : "card-labels-off")
+                ForEach(CardCaptionPreference.allCases) { preference in
+                    Text(preference.displayName).tag(Optional(preference))
+                        .accessibilityIdentifier(preference == .recommended ? "card-labels-recommended"
+                                                 : preference == .show ? "card-labels-on" : "card-labels-off")
+                }
             }
+            .pickerStyle(.menu)
+            .accessibilityIdentifier("card-label-picker")
+        }
+    }
+    #endif
+
+    private var choices: some View {
+        ForEach(CardCaptionPreference.allCases) { preference in
+            PreviewCard(
+                title: preference.displayName,
+                isSelected: settings.selectedPreset == preference,
+                accent: palette.accent,
+                compact: true,
+                swatchHeight: swatchHeight,
+                titleLineLimit: nil,
+                titleSizeGroup: CardCaptionPreference.allCases.map(\.displayName),
+                action: { settings.applyPreset(preference) }
+            ) {
+                CardStyleSwatch(
+                    style: style,
+                    showsCaptions: preference != .hide,
+                    showsMixedCaptions: preference == .recommended
+                )
+                    .accessibilityHidden(true)
+            }
+            .accessibilityAddTraits(settings.selectedPreset == preference ? .isSelected : [])
+            .accessibilityIdentifier(preference == .recommended ? "card-labels-recommended"
+                                     : preference == .show ? "card-labels-on" : "card-labels-off")
         }
     }
 
@@ -166,73 +270,133 @@ private struct CardCaptionPicker: View {
         112
         #endif
     }
+
+    private var previewVisibility: [Bool] {
+        CardCaptionView.customizableCases.flatMap { view in
+            [false, true].map { settings.showsLabels(in: view, hasArtworkTitle: $0) }
+        }
+    }
+}
+
+#if os(iOS)
+struct AdaptiveCardSettingsPicker<Choices: View, Compact: View>: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .headline) private var minimumChoiceWidth = 200
+    private let choices: Choices
+    private let compact: Compact
+
+    init(@ViewBuilder choices: () -> Choices, @ViewBuilder compact: () -> Compact) {
+        self.choices = choices()
+        self.compact = compact()
+    }
+
+    var body: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            compact
+        } else {
+            ViewThatFits(in: .horizontal) {
+                choices.frame(minWidth: minimumChoiceWidth * 3 + 32)
+                compact
+            }
+        }
+    }
+}
+#endif
+
+public enum CardCaptionSettingsScope: CaseIterable, Sendable {
+    case all, home, libraries, detail
+
+    public var views: [CardCaptionView] {
+        switch self {
+        case .all: CardCaptionView.allCases
+        case .home: [.home, .continueWatching, .homeLibraries]
+        case .libraries: [.recommended, .browse, .collections, .playlists, .continueWatching]
+        case .detail: [.episodes, .related, .extras]
+        }
+    }
+}
+
+public struct CardCaptionSettingsLink: View {
+    private let cards: CardStyleSettingsModel
+    private let scope: CardCaptionSettingsScope
+    private let visibility: HomeLibraryVisibilityModel?
+    @State private var isPresented = false
+
+    public init(
+        cards: CardStyleSettingsModel, scope: CardCaptionSettingsScope,
+        visibility: HomeLibraryVisibilityModel? = nil
+    ) {
+        self.cards = cards
+        self.scope = scope
+        self.visibility = visibility
+    }
+
+    public var body: some View {
+        #if os(tvOS)
+        SettingsPageLink {
+            destination
+        } label: {
+            SettingsDisclosureLabel { Text("Customize labels") }
+                .settingsFormRowLayout()
+        }
+        .buttonStyle(SettingsFormButtonStyle())
+        .accessibilityIdentifier(identifier)
+        #else
+        Button { isPresented = true } label: {
+            SettingsDisclosureLabel { Text("Customize labels") }
+        }
+        .navigationDestination(isPresented: $isPresented) { destination }
+        .accessibilityIdentifier(identifier)
+        #endif
+    }
+
+    private var destination: some View {
+        CardCaptionCustomizationView(cards: cards, scope: scope, visibility: visibility)
+    }
+
+    private var identifier: String {
+        switch scope {
+        case .all: "card-label-customization"
+        case .home: "home-customize-labels"
+        case .libraries: "library-customize-labels"
+        case .detail: "detail-customize-labels"
+        }
+    }
 }
 
 public struct CardCaptionCustomizationView: View {
     @Bindable private var cards: CardStyleSettingsModel
+    private let scope: CardCaptionSettingsScope
+    private let visibility: HomeLibraryVisibilityModel?
+    private let initialView: CardCaptionView?
 
-    public init(cards: CardStyleSettingsModel) { self.cards = cards }
+    public init(
+        cards: CardStyleSettingsModel, scope: CardCaptionSettingsScope = .all,
+        visibility: HomeLibraryVisibilityModel? = nil, initialView: CardCaptionView? = nil
+    ) {
+        self.cards = cards
+        self.scope = scope
+        self.visibility = visibility
+        self.initialView = initialView
+    }
 
     public var body: some View {
-        CardCaptionCustomizationContent(settings: $cards.captions, style: cards.style)
+        CardCaptionCustomizationContent(
+            settings: $cards.captions, style: cards.style, scope: scope, visibility: visibility, initialView: initialView
+        )
     }
-}
-
-struct CardCaptionCustomizationContent: View {
-    @Binding var settings: CardCaptionSettings
-    var style: CardStyle = .borderless
-
-    var body: some View {
-        ViewCustomizationList(
-            title: "Labels by view", initialRowID: "card-label-view-home",
-            focusedHelp: { id in
-                CardCaptionView.allCases.first { "card-label-view-\($0.rawValue)" == id }
-                    .map { settings.customizationHelp(in: $0, style: style) }
-            }
-        ) {
-            #if os(tvOS)
-            CardCaptionViewChoices(view: .home, settings: $settings)
-            #else
-            Section("Home") {
-                CardCaptionViewChoices(view: .home, settings: $settings)
-            }
-            #endif
-            Section {
-                ForEach(CardCaptionView.customizableCases.filter(\.isLibraryView), id: \.rawValue) { view in
-                    CardCaptionViewChoices(view: view, settings: $settings)
-                }
-            } header: {
-                Text("Libraries")
-                    #if os(tvOS)
-                    .settingsSectionHeader()
-                    #endif
-            }
-            Section {
-                ForEach(CardCaptionView.customizableCases.filter { $0 != .home && !$0.isLibraryView }, id: \.rawValue) { view in
-                    CardCaptionViewChoices(view: view, settings: $settings)
-                }
-            } header: {
-                Text("Other views")
-                    #if os(tvOS)
-                    .settingsSectionHeader()
-                    #endif
-            } footer: {
-                Text("Choices apply across all libraries. Titles inside collections and playlists use Browse.")
-            }
-        }
-    }
-
 }
 
 struct CardCaptionViewChoices: View {
     let view: CardCaptionView
     @Binding var settings: CardCaptionSettings
+    var title: LocalizedStringResource?
 
     var body: some View {
         #if os(iOS)
         ViewCustomizationMenu(
             id: "card-label-view-\(view.rawValue)",
-            title: view.displayName,
+            title: title ?? view.displayName,
             value: settings.customizationValue(in: view),
             detail: settings.customizationDetail(in: view),
             selection: Binding(
@@ -241,36 +405,60 @@ struct CardCaptionViewChoices: View {
             )
         ) {
             ForEach(view.customizationChoices) { choice in
-                Text(choice.displayName).tag(choice)
+                Text(view.isRowOverride && choice == .automatic
+                    ? LocalizedStringResource("Use default") : choice.displayName).tag(choice)
             }
         }
+        .settingsSearchAnchor("card-label-view-\(view.rawValue)")
         #else
         ViewCustomizationRow(
             id: "card-label-view-\(view.rawValue)",
-            title: view.displayName,
+            title: title ?? view.displayName,
             value: settings.customizationValue(in: view),
             detail: settings.customizationDetail(in: view)
         ) { settings.toggleCustomization(in: view) }
+        .settingsSearchAnchor("card-label-view-\(view.rawValue)")
         #endif
     }
 }
 
 extension CardCaptionSettings {
     func customizationHelp(in view: CardCaptionView, style: CardStyle) -> ViewCustomizationHelp {
+        let isContinueWatching = view == .continueWatching
+        let parent = isContinueWatching ? CardCaptionView.home : view
+        let showsCaptions = showsLabels(in: parent, isContinueWatching: isContinueWatching)
+        let showsArtworkCaptions = showsLabels(
+            in: parent, hasArtworkTitle: true, isContinueWatching: isContinueWatching
+        )
         return ViewCustomizationHelp(
             detail: customizationDetail(in: view),
             illustration: .captions(
-                style: style, showsCaptions: showsLabels(in: view),
+                style: style, showsCaptions: showsCaptions,
                 showsMixedCaptions: customization(in: view) == .mixed
+                    || (isContinueWatching && showsCaptions != showsArtworkCaptions)
             )
         )
     }
 
     func customizationValue(in view: CardCaptionView) -> LocalizedStringResource {
-        customization(in: view).displayName
+        if view.isRowOverride, customization(in: view) == .automatic {
+            return "Use default"
+        }
+        return customization(in: view).displayName
     }
 
     func customizationDetail(in view: CardCaptionView) -> LocalizedStringResource {
+        if view == .homeLibraries, customization(in: view) == .automatic {
+            return "Uses Home's default."
+        }
+        if view == .continueWatching {
+            switch customization(in: view) {
+            case .automatic: return "Uses Home rows or Recommended, depending on where the row appears."
+            case .show: return "Labels are visible below Continue Watching artwork."
+            case .hide: return "Labels are hidden below Continue Watching artwork."
+            case .mixed: preconditionFailure("Continue Watching does not support mixed label overrides.")
+            }
+        }
         if customization(in: view) == .mixed {
             return "Labels are visible except in Showcase and on series artwork."
         }

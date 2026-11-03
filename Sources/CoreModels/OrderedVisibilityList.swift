@@ -15,8 +15,27 @@ import Foundation
 /// d-pad step (tvOS) *cross* it and thereby change enablement, instead of needing a
 /// separate toggle control.
 public enum OrderedVisibilityList {
+    /// Splices live edits into saved order without dropping unavailable entries.
+    public static func mergingOrder<Element: Hashable>(
+        _ edited: [Element], into order: [Element], available: [Element]
+    ) -> [Element] {
+        let availableSet = Set(available)
+        var iterator = edited.makeIterator()
+        var result: [Element] = []
+        for element in order {
+            if availableSet.contains(element) {
+                if let next = iterator.next() { result.append(next) }
+            } else {
+                result.append(element)
+            }
+        }
+        while let next = iterator.next() { result.append(next) }
+        var seen: Set<Element> = []
+        return result.filter { seen.insert($0).inserted }
+    }
+
     public enum Action: Equatable, Sendable {
-        case hide, show, moveUp, moveDown
+        case hide, show, moveUp, moveDown, moveToTop, moveToBottom
     }
 
     public struct Edit<Element: Hashable>: Equatable {
@@ -53,6 +72,18 @@ public enum OrderedVisibilityList {
                 next.enabled = moved(element, by: delta, in: next.enabled)
             } else {
                 next.disabled = moved(element, by: delta, in: next.disabled)
+            }
+        case .moveToTop, .moveToBottom:
+            func moveToEdge(_ order: [Element]) -> [Element] {
+                guard order.contains(element) else { return order }
+                var result = order.filter { $0 != element }
+                result.insert(element, at: action == .moveToTop ? 0 : result.count)
+                return result
+            }
+            if next.enabled.contains(element) {
+                next.enabled = moveToEdge(next.enabled)
+            } else {
+                next.disabled = moveToEdge(next.disabled)
             }
         }
         guard next != sections else { return nil }

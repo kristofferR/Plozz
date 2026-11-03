@@ -8,6 +8,57 @@ import XCTest
 
 @MainActor
 final class PlayerTimelineClockPresentationTests: XCTestCase {
+    func testElapsedModeDoesNotReserveUnusedHourColumns() throws {
+        for duration in [TimeInterval(1_200), 3_599] {
+            let model = PlayerControlsModel()
+            model.duration = duration
+            model.currentSeconds = 600
+            let image = try render(model, width: 398, scrubbing: false, locale: "en_US")
+            XCTAssertEqual(try trackRange(image).count, 302, accuracy: 1)
+        }
+    }
+
+    func testTimestampFieldsStayFixedForTheVideoDuration() {
+        let model = PlayerControlsModel()
+        let timeline = PlozziOSPlayerTimeline(
+            model: model, displayedSeconds: 0, isScrubbing: false,
+            onScrubChanged: { _ in }, onScrubEditingChanged: { _ in }, onInteraction: {}
+        )
+        model.duration = 1_200
+        for (seconds, expected) in [(0.0, "00:00"), (9, "00:09"), (60, "01:00"), (600, "10:00"), (1_200, "20:00")] {
+            XCTAssertEqual(timeline.playbackTime(seconds), expected)
+        }
+        model.duration = 5_600
+        for (seconds, expected) in [(0.0, "0:00:00"), (59, "0:00:59"), (600, "0:10:00"), (3_600, "1:00:00")] {
+            XCTAssertEqual(timeline.playbackTime(seconds), expected)
+        }
+        model.duration = 43_200
+        XCTAssertEqual(timeline.playbackTime(600), "00:10:00")
+        XCTAssertEqual(timeline.playbackTime(36_000), "10:00:00")
+        for invalid in [TimeInterval.nan, .infinity, -1, Double(Int.max)] {
+            XCTAssertEqual(timeline.playbackTime(invalid), "--:--")
+        }
+    }
+
+    func testScrubTargetCrossingTimeFormatsDoesNotChangeDragGeometry() throws {
+        for clockEnabled in [false, true] {
+            for locale in ["en_US", "en_GB", "de_DE", "ar"] {
+                let model = PlayerControlsModel()
+                model.duration = 43_200
+                model.currentSeconds = 600
+                model.timelineClock.isEnabled = clockEnabled
+                let normal = try render(model, width: 398, scrubbing: false, locale: locale)
+                for target in [TimeInterval(30), 3_600, 40_000] {
+                    let scrub = try render(
+                        model, width: 398, scrubbing: true, locale: locale, displayedSeconds: target
+                    )
+                    XCTAssertEqual(try trackRange(normal), try trackRange(scrub),
+                                   "A longer seek label must not move the track under the finger.")
+                }
+            }
+        }
+    }
+
     func testClockLabelsDoNotMoveTheScrubberWhenScrubbingStartsOrEnds() throws {
         for width in [320, 393, 852, 1024] {
             for locale in ["en_US", "en_GB", "de_DE", "ar"] {
@@ -37,11 +88,12 @@ final class PlayerTimelineClockPresentationTests: XCTestCase {
     }
 
     private func render(
-        _ model: PlayerControlsModel, width: Int, scrubbing: Bool, locale: String
+        _ model: PlayerControlsModel, width: Int, scrubbing: Bool, locale: String,
+        displayedSeconds: TimeInterval? = nil
     ) throws -> CGImage {
         let renderer = ImageRenderer(content:
             PlozziOSPlayerTimeline(
-                model: model, displayedSeconds: scrubbing ? 1_200 : 600, isScrubbing: scrubbing,
+                model: model, displayedSeconds: displayedSeconds ?? (scrubbing ? 1_200 : 600), isScrubbing: scrubbing,
                 onScrubChanged: { _ in XCTFail("Rendering must not seek.") },
                 onScrubEditingChanged: { _ in XCTFail("Rendering must not change scrub state.") },
                 onInteraction: { XCTFail("Rendering must not toggle clock mode.") }

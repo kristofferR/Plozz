@@ -176,11 +176,8 @@ final class IPTVAuthViewModelTests: XCTestCase {
         model.authentication = .bearer
         XCTAssertTrue(model.hasAdvancedConfiguration)
         model.authentication = .none
-        model.discoversPlaylistGuides = false
-        XCTAssertTrue(model.hasAdvancedConfiguration)
-        model.discoversPlaylistGuides = true
         model.guideAddress = "https://guide.example/guide.xml"
-        XCTAssertTrue(model.hasAdvancedConfiguration)
+        XCTAssertFalse(model.hasAdvancedConfiguration, "The primary EPG URL is part of basic setup.")
         model.guideAddress = ""
         model.addGuide()
         XCTAssertTrue(model.hasAdvancedConfiguration)
@@ -192,6 +189,30 @@ final class IPTVAuthViewModelTests: XCTestCase {
         XCTAssertTrue(model.hasAdvancedConfiguration)
         model.guideHeaders = []
         XCTAssertFalse(model.hasAdvancedConfiguration)
+    }
+
+    func testReconnectKeepsCustomGuidesAndHeadersButRetiresTheDiscoveryOptOut() throws {
+        let guide = try XCTUnwrap(URL(string: "https://guide.example/primary.xml"))
+        let extra = try XCTUnwrap(URL(string: "https://guide.example/extra.xml"))
+        let credential = try IPTVCredential(
+            mode: .playlist, address: XCTUnwrap(URL(string: "https://provider.test/list")),
+            guideURL: guide, additionalGuideURLs: [extra], guideHeaders: ["X-Guide-Key": "fixture"],
+            discoversPlaylistGuides: false
+        )
+        let session = UserSession(
+            server: .init(id: "fixture", name: "Fixture", baseURL: credential.address, provider: .iptv),
+            userID: "fixture", userName: "IPTV", deviceID: "fixture", accessToken: try credential.encoded()
+        )
+        let model = IPTVAuthViewModel(deviceID: "fixture", reconnecting: session, onAuthenticated: { _ in })
+        let updated = try model.makeCredential()
+        XCTAssertEqual(updated.explicitGuideURLs, [guide, extra])
+        XCTAssertEqual(updated.explicitGuideHeaders, credential.explicitGuideHeaders)
+        XCTAssertTrue(updated.automaticallyDiscoversGuides)
+        XCTAssertTrue(model.hasAdvancedConfiguration)
+        model.additionalGuides = []
+        model.guideHeaders = []
+        XCTAssertFalse(model.hasAdvancedConfiguration)
+        XCTAssertEqual(try model.makeCredential().guideURL, guide)
     }
 
     func testHTTPWarningTracksOnlyAddressesUsedByTheSelectedMode() {

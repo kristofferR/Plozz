@@ -1,3 +1,4 @@
+import CoreModels
 import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
@@ -15,6 +16,26 @@ public struct WebDAVClient: Sendable {
 
     public init(registry: TransportSessionRegistry) {
         self.registry = registry
+    }
+
+    /// Proves that the configured root is a WebDAV collection, rather than
+    /// relying on OPTIONS headers that proxies may omit or block.
+    public func validateCollection(
+        root: WebDAVRoot,
+        sessionKey: TransportSessionKey,
+        credential: WebDAVCredential,
+        trustPolicy: TrustPolicy
+    ) async throws {
+        let entry = try await properties(
+            root: root,
+            path: root.path,
+            sessionKey: sessionKey,
+            credential: credential,
+            trustPolicy: trustPolicy
+        )
+        guard entry.isCollection else {
+            throw TransportError.malformedMultistatus(reason: "configured WebDAV root is not a collection")
+        }
     }
 
     /// `OPTIONS` capability probe. Returns the normalized (lower-cased-key)
@@ -71,6 +92,12 @@ public struct WebDAVClient: Sendable {
             trustPolicy: trustPolicy,
             maxResponseBytes: limits.maxResponseBytes
         )
+        if sessionKey.role != .scanner || response.statusCode != 207 {
+            HandoffDiagnostics.emit(
+                "webdav PROPFIND depth=\(depth == .zero ? 0 : 1) role=\(sessionKey.role.rawValue)"
+                    + " resource=\(HandoffDiagnostics.correlationID(path)) status=\(response.statusCode) bytes=\(data.count)"
+            )
+        }
         try validateAuthenticationStatus(response)
         guard response.statusCode == 207 else {
             throw TransportError.protocolError(status: response.statusCode, detail: "expected 207 Multi-Status from PROPFIND")
@@ -89,24 +116,31 @@ public struct WebDAVClient: Sendable {
         )
     }
 
-    /// Establishes a GET validator and size with a bounded one-byte probe.
+    /// Establishes a GET validator and size with a bounded probe, optionally
+    /// retaining the first playback window instead of discarding two bytes.
     /// Same-origin hops remain root-bound; external HTTPS media hops use an
     /// isolated anonymous session. Its final URL lives only in the source lease.
+    /// Opt-in delivery connection failures let the owner revalidate DAV identity
+    /// before a bounded fresh opening; this client never retries the request.
     public func probeRange(
         root: WebDAVRoot,
         url: URL,
         sessionKey: TransportSessionKey,
         credential: WebDAVCredential,
-        trustPolicy: TrustPolicy
+        trustPolicy: TrustPolicy,
+        prefetch: Bool = false,
+        reportDeliveryConnectionFailure: Bool = false,
+        allowUnvalidatedPlayback: Bool = false
     ) async throws -> RangeProbeResult {
         let (result, anonymous) = try await executeMediaGET(
-            requestBuilder: { RangeProbe.probeRequest(url: $0) },
+            requestBuilder: { RangeProbe.probeRequest(url: $0, prefetch: prefetch) },
             root: root,
             url: url,
             sessionKey: sessionKey,
             credential: credential,
             trustPolicy: trustPolicy,
-            maxResponseBytes: 1
+            maxResponseBytes: prefetch ? RangeProbe.initialReadByteCount : RangeProbe.probeByteCount,
+            reportDeliveryConnectionFailure: reportDeliveryConnectionFailure
         )
         let (data, response) = (result.data, result.response)
         try validateAuthenticationStatus(response)
@@ -125,7 +159,10 @@ public struct WebDAVClient: Sendable {
             status: response.statusCode,
             headers: headers,
             bodyLength: data.count,
-            resourceURL: resourceURL
+            resourceURL: resourceURL,
+            prefetch: prefetch,
+            allowUnvalidatedPlayback: allowUnvalidatedPlayback && anonymous
+                && sessionKey.role == .playback && TransportOrigin(url: resourceURL) != root.origin
         ) {
         case .success(let result):
             return RangeProbeResult(
@@ -133,9 +170,16 @@ public struct WebDAVClient: Sendable {
                 totalLength: result.totalLength,
                 resourceURL: result.resourceURL,
                 lastModified: result.lastModified,
-                usesAnonymousSession: anonymous
+                usesAnonymousSession: anonymous,
+                initialData: prefetch ? data : Data()
             )
         case .failure(let error):
+            HandoffDiagnostics.emit(
+                "webdav PROBE_REJECTED failure=\(error) anonymous=\(anonymous) prefetch=\(prefetch) "
+                    + RangeProbe.diagnosticSummary(
+                        status: response.statusCode, headers: headers, bodyLength: data.count
+                    )
+            )
             throw error
         }
     }
@@ -154,6 +198,11 @@ public struct WebDAVClient: Sendable {
         trustPolicy: TrustPolicy,
         maxReadBytes: Int64 = RangeProbe.defaultMaxReadBytes
     ) async throws -> Data {
+        if representation.validator == .unvalidatedPlayback {
+            guard representation.usesAnonymousSession, sessionKey.role == .playback else {
+                throw TransportError.seekableRequiresValidator
+            }
+        }
         let builtRequest: URLRequest
         guard url.absoluteString == representation.resourceURL.absoluteString else {
             throw TransportError.sourceChanged(reason: "read URL did not match the probed resource")
@@ -224,6 +273,12 @@ public struct WebDAVClient: Sendable {
         case .success:
             return data
         case .failure(let error):
+            HandoffDiagnostics.emit(
+                "webdav READ_REJECTED failure=\(error) anonymous=\(representation.usesAnonymousSession) "
+                    + RangeProbe.diagnosticSummary(
+                        status: response.statusCode, headers: headers, bodyLength: data.count
+                    )
+            )
             throw error
         }
     }
@@ -256,6 +311,10 @@ public struct WebDAVClient: Sendable {
             trustPolicy: trustPolicy,
             maxResponseBytes: limits.maxResponseBytes
         )
+        HandoffDiagnostics.emit(
+            "webdav PROPFIND depth=0 role=\(sessionKey.role.rawValue)"
+                + " resource=\(HandoffDiagnostics.correlationID(path)) status=\(response.statusCode) bytes=\(data.count)"
+        )
         try validateAuthenticationStatus(response)
         guard response.statusCode == 207 else {
             throw TransportError.protocolError(status: response.statusCode, detail: "expected 207 Multi-Status from PROPFIND")
@@ -281,6 +340,22 @@ public struct WebDAVClient: Sendable {
             WebDAVPathPolicy.isSelfEntry(resolvedPath: $0.resolvedPath, requestPath: finalPath)
         }
         guard selfEntries.count == 1, let entry = selfEntries.first else {
+            HandoffDiagnostics.emit(
+                "webdav STAT_REJECTED check=self-entry entries=\(entries.count) matches=\(selfEntries.count)"
+            )
+            if let first = selfEntries.first, selfEntries.count > 1 {
+                let others = selfEntries.dropFirst()
+                HandoffDiagnostics.emit(
+                    "webdav STAT_CONFLICT"
+                        + " pathEqual=\(others.allSatisfy { $0.resolvedPath == first.resolvedPath })"
+                        + " kindEqual=\(others.allSatisfy { $0.isCollection == first.isCollection })"
+                        + " sizeEqual=\(others.allSatisfy { $0.contentLength == first.contentLength })"
+                        + " etagEqual=\(others.allSatisfy { $0.etag == first.etag })"
+                        + " strongETag=\(selfEntries.allSatisfy { $0.etag?.isValidStrongValidator == true })"
+                        + " modifiedEqual=\(others.allSatisfy { $0.lastModified == first.lastModified })"
+                        + " typeEqual=\(others.allSatisfy { $0.contentType == first.contentType })"
+                )
+            }
             throw TransportError.malformedMultistatus(
                 reason: "Depth:0 PROPFIND did not return exactly the queried resource (\(selfEntries.count) self-entries)"
             )
@@ -333,7 +408,8 @@ public struct WebDAVClient: Sendable {
         sessionKey: TransportSessionKey,
         credential: WebDAVCredential,
         trustPolicy: TrustPolicy,
-        maxResponseBytes: Int
+        maxResponseBytes: Int,
+        reportDeliveryConnectionFailure: Bool = false
     ) async throws -> (TransportDataResponse, Bool) {
         guard sessionKey.origin == root.origin else {
             throw TransportError.invalidOrigin(reason: "media root did not match session")
@@ -345,9 +421,14 @@ public struct WebDAVClient: Sendable {
             try Task.checkCancellation()
             let result: TransportDataResponse
             if anonymous {
-                result = try await executeAnonymousMediaGET(
-                    request: requestBuilder(currentURL), sourceKey: sessionKey, maxResponseBytes: maxResponseBytes
-                )
+                do {
+                    result = try await executeAnonymousMediaGET(
+                        request: requestBuilder(currentURL), sourceKey: sessionKey, maxResponseBytes: maxResponseBytes
+                    )
+                } catch TransportError.transport(let code)
+                    where reportDeliveryConnectionFailure && code == URLError.cannotConnectToHost.rawValue {
+                    throw TransportError.deliveryConnectionFailed
+                }
             } else {
                 let (data, response) = try await execute(
                     requestBuilder: requestBuilder, url: currentURL, sessionKey: sessionKey,

@@ -116,12 +116,21 @@ public struct WatchMutation: Codable, Hashable, Sendable, Identifiable {
     /// Servers still needing this write. The reconciler removes a target as it
     /// succeeds, so a partial fan-out resumes exactly where it left off.
     public var targets: [WatchMutationTarget]
+    struct TargetRetry: Codable, Hashable, Sendable {
+        var failures: Int
+        var notBefore: Date
+    }
+    /// A failed destination stays queued without retrying on every index publication.
+    var targetRetries: [String: TargetRetry] = [:]
     /// Every server copy this intent has targeted, retained after successful writes
     /// are removed from ``targets``. UI replay uses this immutable history so a
     /// partially drained offline mutation still matches already-written copies.
     public var optimisticTargets: [WatchMutationTarget]
     /// Optional durable Trakt mirror, drained once (idempotency-keyed).
     public var trakt: TraktScrobbleIntent?
+    /// Pending partial playback for Trakt only; separate from completed-watch
+    /// mirrors so it cannot mark an episode watched on another tracker.
+    public var traktProgress: TraktScrobbleIntent?
     /// Whether the Trakt mirror still needs writing (cleared on success).
     public var traktPending: Bool
     /// Whether the Simkl mirror still needs writing (cleared on success).
@@ -210,6 +219,7 @@ public struct WatchMutation: Codable, Hashable, Sendable, Identifiable {
         clearResume: Bool = false,
         targets: [WatchMutationTarget],
         trakt: TraktScrobbleIntent? = nil,
+        traktProgress: TraktScrobbleIntent? = nil,
         attempts: Int = 0,
         episodeOrigin: EpisodeOrigin? = nil,
         expansionPending: Bool = false,
@@ -236,6 +246,7 @@ public struct WatchMutation: Codable, Hashable, Sendable, Identifiable {
         self.targets = targets
         self.optimisticTargets = targets
         self.trakt = trakt
+        self.traktProgress = traktProgress
         self.traktPending = trakt != nil
         self.simklPending = simklPending ?? (trakt != nil)
         self.wetrakrPending = wetrakrPending ?? false
@@ -259,10 +270,10 @@ public struct WatchMutation: Codable, Hashable, Sendable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case id, capturedAt, canonicalMediaID, seasonNumber, episodeNumber
-        case resumePosition, played, clearResume, targets, optimisticTargets, trakt, traktPending
+        case resumePosition, played, clearResume, targets, optimisticTargets, trakt, traktProgress, traktPending
         case simklPending, anilistPending, malPending
         case wetrakrPending, wetrakrAccountIdentity, wetrakrCapturedAt, wetrakrIdempotencyKey
-        case attempts, episodeOrigin, expansionPending, appliedTargetIDs, expansionStartedAt, identities, kind
+        case attempts, targetRetries, episodeOrigin, expansionPending, appliedTargetIDs, expansionStartedAt, identities, kind
         case anchorTitle, anchorYear, authorization, serverScope, rejectedSourceIDs
     }
 
@@ -345,6 +356,7 @@ public struct WatchMutation: Codable, Hashable, Sendable, Identifiable {
             forKey: .optimisticTargets
         ) ?? targets
         trakt = try container.decodeIfPresent(TraktScrobbleIntent.self, forKey: .trakt)
+        traktProgress = try container.decodeIfPresent(TraktScrobbleIntent.self, forKey: .traktProgress)
         traktPending = try container.decodeIfPresent(Bool.self, forKey: .traktPending) ?? (trakt != nil)
         simklPending = try container.decodeIfPresent(Bool.self, forKey: .simklPending) ?? false
         wetrakrPending = try container.decodeIfPresent(Bool.self, forKey: .wetrakrPending) ?? false
@@ -354,6 +366,7 @@ public struct WatchMutation: Codable, Hashable, Sendable, Identifiable {
         anilistPending = try container.decodeIfPresent(Bool.self, forKey: .anilistPending) ?? false
         malPending = try container.decodeIfPresent(Bool.self, forKey: .malPending) ?? false
         attempts = try container.decodeIfPresent(Int.self, forKey: .attempts) ?? 0
+        targetRetries = try container.decodeIfPresent([String: TargetRetry].self, forKey: .targetRetries) ?? [:]
         episodeOrigin = try container.decodeIfPresent(EpisodeOrigin.self, forKey: .episodeOrigin)
         expansionPending = try container.decodeIfPresent(Bool.self, forKey: .expansionPending) ?? false
         // Queued before this record existed. Until then every drain re-expanded and
@@ -411,6 +424,7 @@ public struct WatchMutation: Codable, Hashable, Sendable, Identifiable {
         try container.encode(targets, forKey: .targets)
         try container.encode(optimisticTargets, forKey: .optimisticTargets)
         try container.encodeIfPresent(trakt, forKey: .trakt)
+        try container.encodeIfPresent(traktProgress, forKey: .traktProgress)
         try container.encode(traktPending, forKey: .traktPending)
         try container.encode(simklPending, forKey: .simklPending)
         try container.encode(wetrakrPending, forKey: .wetrakrPending)
@@ -420,6 +434,9 @@ public struct WatchMutation: Codable, Hashable, Sendable, Identifiable {
         try container.encode(anilistPending, forKey: .anilistPending)
         try container.encode(malPending, forKey: .malPending)
         try container.encode(attempts, forKey: .attempts)
+        if !targetRetries.isEmpty {
+            try container.encode(targetRetries, forKey: .targetRetries)
+        }
         try container.encodeIfPresent(episodeOrigin, forKey: .episodeOrigin)
         try container.encode(expansionPending, forKey: .expansionPending)
         try container.encode(appliedTargetIDs, forKey: .appliedTargetIDs)
@@ -517,7 +534,7 @@ public struct WatchMutation: Codable, Hashable, Sendable, Identifiable {
     /// Whether every server target AND all tracker mirrors are done **and** no
     /// cross-server twin expansion is still owed — safe to prune.
     public var isFullyApplied: Bool {
-        targets.isEmpty && !traktPending && !simklPending && !wetrakrPending && !anilistPending && !malPending && !expansionPending
+        targets.isEmpty && !traktPending && traktProgress == nil && !simklPending && !wetrakrPending && !anilistPending && !malPending && !expansionPending
     }
 
     // MARK: - Canonical id

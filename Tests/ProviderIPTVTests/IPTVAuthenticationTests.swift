@@ -5,6 +5,70 @@ import Foundation
 import XCTest
 
 final class IPTVAuthenticationTests: XCTestCase {
+    func testLateHLSDirectiveRollsBackLocallyImportedChannels() async throws {
+        let root = temporaryDirectory()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("channels.m3u")
+        let credential = try IPTVCredential(
+            mode: .file, address: XCTUnwrap(URL(string: "https://imported-playlist.invalid"))
+        )
+        try Data("#EXTM3U\n#EXTINF:-1,Original\nhttps://provider.test/original.ts\n".utf8).write(to: file)
+        let session = try await IPTVProvider.importFile(
+            file, credential: credential, name: "Fixture", deviceID: "fixture", cacheDirectory: root
+        )
+        let replacement = "#EXTM3U\n#EXT-X-SESSION-DATA:DATA-ID=\"fixture\"\n" + (0..<2_000).map {
+            "#EXTINF:6,Segment \($0)\nhttps://provider.test/segment/\($0).ts\n"
+        }.joined() + "#EXT-X-TARGETDURATION:6\n"
+        XCTAssertGreaterThan(replacement.utf8.count, 65_536)
+        try Data(replacement.utf8).write(to: file)
+        do {
+            _ = try await IPTVProvider.importFile(
+                file, credential: credential, name: "Fixture", deviceID: "fixture", cacheDirectory: root
+            )
+            XCTFail("HLS segments must not replace the committed channel catalogue.")
+        } catch { XCTAssertEqual(error as? IPTVError, .unsupported) }
+        let provider = try IPTVProvider(
+            context: .init(session: session, accountID: "account", credentialRevision: .init(),
+                           localMediaContext: .init(accountID: "account", profileID: "fixture", profileNamespace: nil)),
+            cacheDirectory: root, configuration: IPTVFixture.configuration()
+        )
+        addTeardownBlock { await provider.teardown() }
+        let channels = try await provider.liveTVChannels()
+        XCTAssertEqual(channels.map(\.name), ["Original"])
+        XCTAssertTrue(IPTVFixture.state.requests.isEmpty)
+    }
+
+    func testHLSURLWithSessionMetadataStillImportsOnlyTheOriginalStream() async throws {
+        IPTVFixture.state.handler = { _ in
+            (200, [:], Data("""
+            #EXTM3U
+            #EXT-X-SESSION-DATA:DATA-ID="fixture"
+            #EXT-X-STREAM-INF:BANDWIDTH=800000
+            https://provider.test/low.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=4000000
+            https://provider.test/high.m3u8
+            """.utf8))
+        }
+        let root = temporaryDirectory()
+        let credential = try IPTVCredential(
+            mode: .playlist, address: XCTUnwrap(URL(string: "https://provider.test/stream"))
+        )
+        let session = try await IPTVProvider.signIn(
+            credential: credential, name: "Fixture", deviceID: "fixture",
+            cacheDirectory: root, configuration: IPTVFixture.configuration()
+        )
+        let provider = try IPTVProvider(
+            context: .init(session: session, accountID: "account", credentialRevision: .init(),
+                           localMediaContext: .init(accountID: "account", profileID: "fixture", profileNamespace: nil)),
+            cacheDirectory: root, configuration: IPTVFixture.configuration()
+        )
+        addTeardownBlock { await provider.teardown() }
+        let channels = try await provider.liveTVChannels()
+        XCTAssertEqual(channels.map(\.id), ["live:direct"])
+        XCTAssertEqual(channels.map(\.name), ["provider.test"])
+        XCTAssertEqual(IPTVFixture.state.requests.count, 1)
+    }
+
     func testUnexpectedHTTPStatusIsPreservedInsteadOfBecomingAFieldValidationError() async throws {
         for status in [451, 500, 503] {
             IPTVFixture.state.reset()
@@ -61,7 +125,7 @@ final class IPTVAuthenticationTests: XCTestCase {
             ("#EXTM3U", true, true, true),
             ("#EXTM3U", true, false, true),
             ("#EXTM3U x-tvg-url=\"https://provider.test/guide.xml\"", false, true, true),
-            ("#EXTM3U x-tvg-url=\"https://provider.test/guide.xml\"", false, false, false),
+            ("#EXTM3U x-tvg-url=\"https://provider.test/guide.xml\"", false, false, true),
             ("#EXTM3U x-tvg-url=\"https://other.test/guide.xml\"", false, true, true)
         ]
         for mode in [IPTVCredential.Mode.playlist, .file] {

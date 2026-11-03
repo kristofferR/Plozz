@@ -87,6 +87,20 @@ public struct M3UPlaylistParser: Sendable {
     public static let maximumBytes = 128 * 1_024 * 1_024
     public static let maximumEntries = 100_000
     public static let maximumLineBytes = 64 * 1_024
+    // IPTV generators also emit EXT-X metadata, notably XUI SESSION-DATA.
+    // Recognize actual HLS directives rather than reserving the entire prefix.
+    private static let hlsManifestTags: Set<String> = [
+        "#EXT-X-TARGETDURATION", "#EXT-X-STREAM-INF", "#EXT-X-MEDIA",
+        "#EXT-X-MEDIA-SEQUENCE", "#EXT-X-DISCONTINUITY-SEQUENCE",
+        "#EXT-X-KEY", "#EXT-X-MAP", "#EXT-X-BYTERANGE", "#EXT-X-ENDLIST",
+        "#EXT-X-DISCONTINUITY", "#EXT-X-PROGRAM-DATE-TIME", "#EXT-X-DATERANGE",
+        "#EXT-X-PLAYLIST-TYPE", "#EXT-X-I-FRAMES-ONLY", "#EXT-X-I-FRAME-STREAM-INF",
+        "#EXT-X-SESSION-KEY", "#EXT-X-INDEPENDENT-SEGMENTS", "#EXT-X-START",
+        "#EXT-X-VERSION", "#EXT-X-ALLOW-CACHE", "#EXT-X-GAP",
+        "#EXT-X-PART", "#EXT-X-PART-INF", "#EXT-X-SERVER-CONTROL",
+        "#EXT-X-PRELOAD-HINT", "#EXT-X-RENDITION-REPORT", "#EXT-X-SKIP",
+        "#EXT-X-CONTENT-STEERING"
+    ]
     // Contrast hints must not pull the regression channel catalog into shipping builds.
     private static let darkLogoURLs = Set(
         ["https://i.imgur.com/xP7Ehn8.png"].compactMap { URL(string: $0) }
@@ -152,7 +166,7 @@ public struct M3UPlaylistParser: Sendable {
         private var entryCount = 0
         private var skippedEntryCount = 0
         private var fallbackNumber = 0
-        private var importedIDs = Set<String>()
+        private var importedIndexes: [String: Int] = [:]
         private var declaredGuideURLs: [URL] = []
 
         fileprivate init(parser: M3UPlaylistParser, indexesCatalog: Bool = false) {
@@ -219,9 +233,9 @@ public struct M3UPlaylistParser: Sendable {
                 penultimateByte = 0
             }
             guard lineByteCount <= M3UPlaylistParser.maximumLineBytes else {
+                let directive = parser.directive(in: String(decoding: lineBuffer.prefix(64), as: UTF8.self))
                 if !hasPlaylistStart {
-                    if indexesCatalog, lineBuffer.starts(with: Data("#EXTM3U ".utf8))
-                        || lineBuffer.starts(with: Data("#EXTM3U\t".utf8)) {
+                    if indexesCatalog, directive == "#EXTM3U" {
                         // Optional guide declarations can exceed the line budget;
                         // they must not reject an otherwise valid channel list.
                         try consumeLine("#EXTM3U")
@@ -231,7 +245,7 @@ public struct M3UPlaylistParser: Sendable {
                     throw parser.limitExceeded(.headerLineBytes, observed: lineByteCount,
                                                maximum: M3UPlaylistParser.maximumLineBytes)
                 }
-                if lineBuffer.starts(with: Data("#EXTINF:".utf8)) {
+                if directive == "#EXTINF:" {
                     try countEntry()
                     skippedEntryCount += 1
                     awaitingURL = true
@@ -255,11 +269,11 @@ public struct M3UPlaylistParser: Sendable {
             var line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             if !hasPlaylistStart, line.hasPrefix("\u{FEFF}") { line.removeFirst() }
             guard !line.isEmpty else { return }
-            if !hasPlaylistStart, line == "#EXTM3U"
-                || line.hasPrefix("#EXTM3U ") || line.hasPrefix("#EXTM3U\t") {
+            let directive = parser.directive(in: line)
+            if !hasPlaylistStart, directive == "#EXTM3U" {
                 hasPlaylistStart = true
                 let attributes = parser.parseAttributes(String(line.dropFirst("#EXTM3U".count)))
-                for key in ["url-tvg", "x-tvg-url"] {
+                for key in ["url-tvg", "x-tvg-url", "tvg-url"] {
                     for address in (attributes[key] ?? "").split(separator: ",") {
                         if let url = parser.supportedURL(
                             address.trimmingCharacters(in: .whitespacesAndNewlines), relativeTo: parser.baseURL
@@ -268,19 +282,20 @@ public struct M3UPlaylistParser: Sendable {
                 }
                 return
             }
-            if line.hasPrefix("#EXT-X-") {
+            let tag = directive.hasSuffix(":") ? String(directive.dropLast()) : directive
+            if M3UPlaylistParser.hlsManifestTags.contains(tag) {
                 isHLS = true
-                hasPlayableHLSTag = hasPlayableHLSTag || line.hasPrefix("#EXT-X-STREAM-INF:")
-                    || line.hasPrefix("#EXT-X-TARGETDURATION:")
+                hasPlayableHLSTag = hasPlayableHLSTag || directive == "#EXT-X-STREAM-INF:"
+                    || directive == "#EXT-X-TARGETDURATION:"
                 channels.removeAll(keepingCapacity: false)
                 catalogEntries.removeAll(keepingCapacity: false)
-                importedIDs.removeAll(keepingCapacity: false)
+                importedIndexes.removeAll(keepingCapacity: false)
                 pending = nil
                 pendingHeaders.removeAll()
                 return
             }
             guard !isHLS else { return }
-            if line.hasPrefix("#EXTINF:") {
+            if directive == "#EXTINF:" {
                 hasPlaylistStart = true
                 if pending != nil { skippedEntryCount += 1 }
                 try countEntry()
@@ -293,11 +308,11 @@ public struct M3UPlaylistParser: Sendable {
                 if pending == nil { skippedEntryCount += 1 }
                 return
             }
-            if line.hasPrefix("#EXTGRP:") {
+            if directive == "#EXTGRP:" {
                 defaultGroups = parser.clean(String(line.dropFirst("#EXTGRP:".count)))
                 return
             }
-            if line.hasPrefix("#EXTVLCOPT:") {
+            if directive == "#EXTVLCOPT:" {
                 guard let header = parser.parseVLCOption(line) else { return }
                 if pending != nil {
                     pending?.headers[header.name] = header.value
@@ -343,22 +358,47 @@ public struct M3UPlaylistParser: Sendable {
             }
             fallbackNumber += 1
             let tvgID = parser.clean(entry.attributes["tvg-id"])
-            let logoURL = parser.clean(entry.attributes["tvg-logo"])
+            let logoURL = (parser.clean(entry.attributes["tvg-logo"]) ?? parser.clean(entry.attributes["logo"]))
                 .flatMap { parser.supportedURL($0, relativeTo: parser.baseURL) }
             let groups = parser.categoryNames(from: entry.attributes["group-title"] ?? defaultGroups)
             let groupDescription = groups.isEmpty ? "Other" : groups.joined(separator: " • ")
             let digestInput = [tvgID ?? "", entry.name, streamURL.absoluteString].joined(separator: "\u{1F}")
             let digest = DigestHex.encode(SHA256.hash(data: Data(digestInput.utf8)))
             let channelID = "iptv-\(digest)"
-            guard indexesCatalog || importedIDs.insert(channelID).inserted else { skippedEntryCount += 1; return }
+            if !indexesCatalog, let index = importedIndexes[channelID] {
+                let existing = channels[index]
+                if existing.streamURL?.absoluteString == streamURL.absoluteString,
+                   existing.httpHeaders == entry.headers {
+                    var seen = Set(existing.groups.map { $0.lowercased() })
+                    let mergedGroups = existing.groups + groups.filter {
+                        seen.insert($0.lowercased()).inserted
+                    }
+                    if mergedGroups.count != existing.groups.count {
+                        channels[index] = M3UPlaylistChannel(
+                            id: existing.id, number: existing.number, name: existing.name,
+                            category: existing.category, symbol: existing.symbol,
+                            accent: existing.accent, tagline: existing.tagline,
+                            logoURL: existing.logoURL, streamURL: existing.streamURL,
+                            logoNeedsDarkBackground: existing.logoNeedsDarkBackground,
+                            guideID: existing.guideID, guideName: existing.guideName,
+                            httpHeaders: existing.httpHeaders, language: existing.language,
+                            country: existing.country, groups: mergedGroups
+                        )
+                    }
+                }
+                skippedEntryCount += 1
+                return
+            }
             let channel = M3UPlaylistChannel(
-                id: channelID, number: parser.validChannelNumber(entry.attributes["tvg-chno"]) ?? fallbackNumber,
+                id: channelID, number: parser.validChannelNumber(entry.attributes["tvg-chno"])
+                    ?? parser.validChannelNumber(entry.attributes["channel-number"]) ?? fallbackNumber,
                 name: entry.name.isEmpty ? String(localized: "Channel \(fallbackNumber)") : entry.name, // l10n:content - fallback channel title stored in the imported catalogue.
                 category: groups.first ?? "Other", symbol: parser.symbol(for: groupDescription),
                 accent: parser.accent(for: digest), tagline: groupDescription,
                 logoURL: logoURL, streamURL: streamURL,
                 logoNeedsDarkBackground: logoURL.map(M3UPlaylistParser.darkLogoURLs.contains) ?? false,
-                guideID: tvgID, guideName: parser.clean(entry.attributes["tvg-name"]), httpHeaders: entry.headers,
+                guideID: tvgID ?? parser.clean(entry.attributes["channel-id"]),
+                guideName: parser.clean(entry.attributes["tvg-name"]), httpHeaders: entry.headers,
                 language: parser.clean(entry.attributes["tvg-language"]),
                 country: parser.clean(entry.attributes["tvg-country"]), groups: groups
             )
@@ -368,6 +408,7 @@ public struct M3UPlaylistParser: Sendable {
                     hasExplicitName: !entry.name.isEmpty
                 ))
             } else {
+                importedIndexes[channelID] = channels.count
                 channels.append(channel)
             }
         }
@@ -392,6 +433,17 @@ public struct M3UPlaylistParser: Sendable {
         let attributes: [String: String]
         let duration: TimeInterval?
         var headers: [String: String] = [:]
+    }
+
+    private func directive(in line: String) -> String {
+        guard line.hasPrefix("#") else { return "" }
+        var token = ""
+        for character in line.prefix(64) {
+            if character.isWhitespace { break }
+            token.append(character)
+            if character == ":" { break }
+        }
+        return token.uppercased()
     }
 
     private func parseEXTINF(_ line: String) -> PendingEntry? {
@@ -504,8 +556,11 @@ public struct M3UPlaylistParser: Sendable {
         let prefix = "#EXTVLCOPT:"
         guard let separator = line.firstIndex(of: "=") else { return nil }
         let keyStart = line.index(line.startIndex, offsetBy: prefix.count)
-        let key = line[keyStart..<separator].lowercased()
-        let value = line[line.index(after: separator)...]
+        let key = line[keyStart..<separator].trimmingCharacters(in: .whitespaces).lowercased()
+        var value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespaces)
+        if value.count >= 2, let quote = value.first, quote == "\"" || quote == "'", value.last == quote {
+            value = String(value.dropFirst().dropLast())
+        }
         switch key {
         case "http-referrer", "http-referer":
             return header(named: "Referer", value: String(value))

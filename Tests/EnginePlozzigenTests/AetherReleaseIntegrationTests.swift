@@ -1,16 +1,41 @@
-import AetherEngine
+@testable import AetherEngine
 import CoreModels
 import FeaturePlayback
 import XCTest
 @testable import EnginePlozzigen
 
 final class AetherReleaseIntegrationTests: XCTestCase {
-    func testResolvedEngineAndSourceCreditIdentifyPinnedDTSXIntegration() throws {
-        XCTAssertEqual(AetherEngine.version, "7.36.0")
+    func testNativeAudioMenuTrackKeepsObservedCodecChannelsAndSelectionIdentity() {
+        let id = PlozzigenVideoEngine.bypassAudioIDBase + 2
+        let track = PlozzigenVideoEngine.bypassAudioTrack(
+            id: id, title: "English", language: "en", isDefault: true, codec: "opus", channels: 6
+        )
+        XCTAssertEqual(track.id, id)
+        XCTAssertEqual(track.codec, "opus")
+        XCTAssertEqual(track.channels, 6)
+        XCTAssertTrue(track.isDefault)
+        XCTAssertEqual(
+            TrackLabeling.audioLabel(displayTitle: track.displayTitle, language: track.language, codec: track.codec,
+                                    channels: track.channels, trackID: track.id, locale: Locale(identifier: "en")),
+            TrackLabel(base: .content("English"), qualifiers: [.format("Opus 5.1")])
+        )
+    }
+
+    func testResolvedEngineAndSourceCreditIdentifyPinnedReleaseIntegration() throws {
+        XCTAssertEqual(AetherEngine.version, "7.53.1")
         let credit = try XCTUnwrap(PlozzAttributions.entries.first { $0.title == "AetherEngine" })
-        XCTAssertTrue(credit.detail.contains(
-            "https://github.com/brandomoore/AetherEngine/tree/299a3d9ea767e2382158c2a3d137c4b1d302ab4a"
+        // The metadata guard compares the exact revision with Package.resolved.
+        XCTAssertNotNil(credit.detail.range(
+            of: #"https://github\.com/brandomoore/AetherEngine/tree/[0-9a-f]{40}"#,
+            options: .regularExpression
         ))
+    }
+
+    @MainActor
+    func testPlaybackLabelUsesTheLinkedEngineVersion() throws {
+        let engine = try PlozzigenVideoEngine()
+        defer { engine.stop() }
+        XCTAssertEqual(engine.displayName, "AetherEngine v\(AetherEngine.version)")
     }
 
     func testEngineLivesInItsOwnDynamicFramework() {
@@ -21,26 +46,102 @@ final class AetherReleaseIntegrationTests: XCTestCase {
 
     func testUpstreamDefaultsRemainOptIn() {
         let options = LoadOptions()
+        XCTAssertEqual(options.stereoPresentation, .automatic)
         XCTAssertEqual(options.objectAudioRendering, .off)
         XCTAssertFalse(options.progressiveSegmentDelivery)
+        XCTAssertFalse(options.preferDualLayerDolbyVision)
+        XCTAssertFalse(options.upscalesLowResolutionVideo)
+        XCTAssertFalse(options.audioShaping.isActive)
+        XCTAssertFalse(PlozzigenVideoEngine.onDemandLoadOptions().preferDualLayerDolbyVision)
     }
 
-    func testPlozzAutomaticallyRequestsSpatialAudioOnSupportedTVOS() {
-        for channels in [0, 2, 6, 8] {
-            let options = PlozzigenVideoEngine.onDemandLoadOptions(audioChannels: channels)
-            #if os(tvOS)
-            if #available(tvOS 26.0, *) {
-                XCTAssertEqual(options.objectAudioRendering, .apac(.l714))
-            } else {
+    @MainActor
+    func testReleasedHostControlsPreserveExistingDefaults() throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        XCTAssertTrue(engine.rendererAudioSessionActivationEnabled)
+        XCTAssertFalse(engine.retainsVideoPipelineWhenBackgrounded)
+        XCTAssertFalse(engine.ownsSoftwareNowPlaying)
+    }
+
+    func testRetainedSubtitleCorrectionDoesNotInventAnASSCueDuration() {
+        XCTAssertNil(SubtitleCueEndOffset.resolve(
+            decodedMilliseconds: 0, packetDuration: nil, timeBaseSeconds: 0.001,
+            isASS: true, fallback: 5
+        ))
+        XCTAssertEqual(SubtitleCueEndOffset.resolve(
+            decodedMilliseconds: 0, packetDuration: nil, timeBaseSeconds: 0.001,
+            isASS: false, fallback: 5
+        ), 5)
+    }
+
+    func testSoftwareSpatialStreamCopyUsesTheReleasedEncodingLabel() {
+        let track = TrackInfo(
+            id: 0, name: "English", codec: "eac3", language: "en",
+            channels: 6, isDefault: true
+        )
+        let pipeline = AetherEngine.softwareAudioDecoderLabel(
+            audioTracks: [track], activeIndex: 0, route: .compressedEAC3JOC
+        )
+        let diagnostics = PlaybackDiagnostics(audioPipelineDescription: pipeline, mode: .plozzigen)
+        XCTAssertEqual(diagnostics.audioEncodingDescription, "No re-encoding")
+    }
+
+    func testOnDemandOptionsKeepStandardDolbyVisionAndAudioWithoutFEL() {
+        let options = PlozzigenVideoEngine.onDemandLoadOptions()
+        XCTAssertFalse(options.preferDualLayerDolbyVision)
+        XCTAssertEqual(options.dolbyVisionHandling, .automatic)
+        XCTAssertFalse(options.isLive)
+        XCTAssertTrue(options.matchContentEnabled)
+        XCTAssertEqual(options.audioBridgeMode, .lossless)
+        XCTAssertEqual(options.objectAudioRendering, .off)
+    }
+
+    @MainActor
+    func testResolvedRequestsNeverEnableFELOrHeightConversionAcrossProviders() throws {
+        let engine = try PlozzigenVideoEngine()
+        defer { engine.stop() }
+        for provider in [ProviderKind.plex, .jellyfin, .emby, .mediaShare, .silo] {
+            for url in [
+                URL(string: "https://media.example/movie.mkv")!,
+                URL(fileURLWithPath: "/fixture/download.mkv")
+            ] {
+                var request = PlaybackRequest(
+                    item: MediaItem(id: "fel", title: "FEL fixture", kind: .movie), streamURL: url
+                )
+                request.sourceProvider = provider
+                let options = engine.onDemandLoadOptions(for: request)
+                XCTAssertFalse(options.preferDualLayerDolbyVision)
+                XCTAssertEqual(options.dolbyVisionHandling, .automatic)
                 XCTAssertEqual(options.objectAudioRendering, .off)
             }
-            #else
+        }
+    }
+
+    func testLivePlaybackNeverRequestsFEL() {
+        for suffix in ["ts", "m3u8", ""] {
+            let options = PlozzigenVideoEngine.liveLoadOptions(
+                httpHeaders: [:], url: URL(string: "https://media.example/live.\(suffix)")!
+            )
+            XCTAssertTrue(options.isLive)
+            XCTAssertFalse(options.preferDualLayerDolbyVision)
             XCTAssertEqual(options.objectAudioRendering, .off)
-            #endif
-            XCTAssertEqual(options.audioBridgeMode, channels > 6 ? .lossless : .surroundCompat)
-            XCTAssertTrue(options.matchContentEnabled)
-            XCTAssertFalse(options.isLive)
-            XCTAssertFalse(options.progressiveSegmentDelivery)
+        }
+    }
+
+    func testOnDemandPlaybackPreservesChannelBridgeAndBufferingWithoutHeightConversion() {
+        for lossless in [false, true] {
+            for buffer in PlaybackReadAhead.allCases {
+                let options = PlozzigenVideoEngine.onDemandLoadOptions(
+                    losslessAudioEnabled: lossless, readAhead: buffer
+                )
+                XCTAssertEqual(options.objectAudioRendering, .off)
+                XCTAssertEqual(options.audioBridgeMode, lossless ? .lossless : .surroundCompat)
+                XCTAssertEqual(options.sessionCacheByteBudget, buffer == .automatic ? nil : Int.max)
+                XCTAssertTrue(options.matchContentEnabled)
+                XCTAssertFalse(options.isLive)
+                XCTAssertFalse(options.progressiveSegmentDelivery)
+            }
         }
     }
 
@@ -50,30 +151,29 @@ final class AetherReleaseIntegrationTests: XCTestCase {
             .init(isAudible: true, sharesAudioSession: true),
             .init(isAudible: false, sharesAudioSession: true, suppressesDisplayMatching: true)
         ] {
-            let options = PlozzigenVideoEngine.onDemandLoadOptions(audioChannels: 8, outputPolicy: policy)
+            let options = PlozzigenVideoEngine.onDemandLoadOptions(
+                outputPolicy: policy
+            )
             XCTAssertEqual(options.objectAudioRendering, .off)
+            XCTAssertFalse(options.preferDualLayerDolbyVision)
             XCTAssertEqual(options.audioBridgeMode, .lossless)
             XCTAssertEqual(options.suppressDisplayCriteria, policy.suppressesDisplayMatching)
             XCTAssertEqual(options.matchContentEnabled, !policy.suppressesDisplayMatching)
         }
     }
 
-    func testDisablingSpatialAudioKeepsTheExistingChannelBridge() {
-        for channels in [0, 2, 6, 8] {
-            let options = PlozzigenVideoEngine.onDemandLoadOptions(
-                audioChannels: channels, trueHDAtmosEnabled: false
-            )
-            XCTAssertEqual(options.objectAudioRendering, .off)
-            XCTAssertEqual(options.audioBridgeMode, channels > 6 ? .lossless : .surroundCompat)
-            XCTAssertTrue(options.matchContentEnabled)
-            XCTAssertFalse(options.isLive)
-        }
+    func testDisplaySuppressedPreviewDoesNotRequestFEL() {
+        let options = PlozzigenVideoEngine.onDemandLoadOptions(
+            outputPolicy: .init(isAudible: true, suppressesDisplayMatching: true)
+        )
+        XCTAssertFalse(options.preferDualLayerDolbyVision)
     }
 
     func testTrueHDLegalCreditIncludesSourceAndBothLicenses() throws {
         let credit = try XCTUnwrap(PlozzAttributions.entries.first { $0.title == "LibTrueHD" })
+        XCTAssertTrue(credit.detail.contains("not linked in this build"))
         XCTAssertTrue(credit.detail.contains(
-            "https://github.com/superuser404notfound/LibTrueHD/tree/2.3.0"
+            "https://github.com/superuser404notfound/LibTrueHD/tree/3.1.0"
         ))
         XCTAssertTrue(credit.detail.contains("Quick104"))
         XCTAssertTrue(credit.detail.contains("Rainbaby"))
@@ -81,16 +181,9 @@ final class AetherReleaseIntegrationTests: XCTestCase {
         XCTAssertEqual(Set(credit.licenses.map(\.label)), ["MIT", "Apache-2.0"])
     }
 
-    func testDTSXLegalCreditIncludesSourceAndLicense() throws {
-        let credit = try XCTUnwrap(PlozzAttributions.entries.first { $0.title == "LibDTSX" })
-        XCTAssertTrue(credit.detail.contains(
-            "https://github.com/superuser404notfound/LibDTSX/tree/1.0.1"
-        ))
-        XCTAssertTrue(credit.detail.contains("kristofferR"))
-        XCTAssertTrue(credit.detail.contains("harletty"))
-        XCTAssertTrue(credit.detail.contains("LibDTSXNotices.txt"))
-        XCTAssertTrue(credit.detail.contains("LibDTSXLicense.txt"))
-        XCTAssertEqual(credit.licenses.map(\.label), ["Apache-2.0"])
+    func testFFmpegCreditRemainsWithoutTheRetiredLibDTSXCredit() {
+        XCTAssertFalse(PlozzAttributions.entries.contains { $0.title == "LibDTSX" })
+        XCTAssertTrue(PlozzAttributions.entries.contains { $0.title == "FFmpeg" })
     }
 
     func testReleasedProbeCancellationAPIIsAvailable() {
@@ -124,5 +217,40 @@ final class AetherReleaseIntegrationTests: XCTestCase {
             XCTAssertEqual(mapped.first?.isCommentary, true)
             XCTAssertEqual(mapped.first?.isDefault, true)
         }
+    }
+
+    func testSourceAudioUsesConfirmedTrackAndCarriesAllAvailableFacts() throws {
+        let tracks = [
+            TrackInfo(id: 3, name: "English", codec: "truehd", language: "en", channels: 8,
+                      bitrate: 4_000_000, isDefault: true, sampleRate: 48_000,
+                      channelLayout: "7.1", profile: "Dolby TrueHD + Dolby Atmos"),
+            TrackInfo(id: 9, name: "French", codec: "ac3", language: "fr", channels: 2, isDefault: false),
+            TrackInfo(id: 12, name: "Japanese", codec: "dca", language: "ja", channels: 8,
+                      isDefault: false, profile: "MA + DTS:X IMAX"),
+            TrackInfo(id: 15, name: "English", codec: "dca", language: "en", channels: 8,
+                      isDefault: false, profile: "DTS-HD MA", isDTSX: true)
+        ]
+        XCTAssertNil(PlozzigenVideoEngine.activeSourceAudio(from: tracks, selectedID: nil))
+        XCTAssertNil(PlozzigenVideoEngine.activeSourceAudio(from: tracks, selectedID: 1))
+        let first = try XCTUnwrap(PlozzigenVideoEngine.activeSourceAudio(from: tracks, selectedID: 3))
+        XCTAssertEqual(first.profile, "Dolby TrueHD + Dolby Atmos")
+        XCTAssertEqual(first.channels, 8)
+        XCTAssertEqual(first.channelLayout, "7.1")
+        XCTAssertEqual(first.sampleRate, 48_000)
+        XCTAssertEqual(first.bitrate, 4_000_000)
+        let switched = try XCTUnwrap(PlozzigenVideoEngine.activeSourceAudio(from: tracks, selectedID: 9))
+        XCTAssertEqual(switched.codec, "ac3")
+        XCTAssertEqual(switched.channels, 2)
+        XCTAssertNil(switched.profile)
+        XCTAssertNil(switched.channelLayout)
+        XCTAssertNil(switched.sampleRate)
+        XCTAssertNil(switched.bitrate)
+        XCTAssertEqual(PlozzigenVideoEngine.activeSourceAudio(from: tracks, selectedID: 15)?.profile,
+                       "DTS-HD MA DTS:X")
+        let menu = PlozzigenVideoEngine.selectableAudioTracks(from: tracks, route: .loopback)
+        XCTAssertEqual(menu[0].profile, first.profile)
+        XCTAssertEqual(menu[2].profile, "MA + DTS:X IMAX")
+        XCTAssertTrue(menu[2].isDTSX)
+        XCTAssertTrue(menu[3].isDTSX)
     }
 }

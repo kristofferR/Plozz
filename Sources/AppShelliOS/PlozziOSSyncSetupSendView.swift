@@ -90,9 +90,6 @@ struct SyncSetupCodeEntryScreen: View {
                 }
             }
         }
-        // Match the sheet's chrome (nav title, text field, keyboard) to the active
-        // theme so text never lands dark-on-dark (or light-on-light).
-        .preferredColorScheme(palette.isLight ? .light : .dark)
     }
 }
 
