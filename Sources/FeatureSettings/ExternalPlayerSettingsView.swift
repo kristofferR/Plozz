@@ -23,6 +23,11 @@ public struct PlaybackAdvancedSettingsView: View {
                 .settingsActionRow()
                 .accessibilityIdentifier("playback-external-player")
             }
+            if #available(iOS 26.0, *) {
+                SettingsSectionGroup {
+                    HeightChannelControl()
+                }
+            }
         }
         .settingsPageSurface()
         .navigationTitle("Advanced")
@@ -33,7 +38,7 @@ public struct PlaybackAdvancedSettingsView: View {
     }
 
     static func rows(model: ExternalPlayerSettingsModel = .shared) -> [SettingsSplitRow] {
-        ExternalPlayerSettingsRows.advanced(model: model)
+        ExternalPlayerSettingsRows.advanced(model: model) + HeightChannelControl.advancedRows
     }
 }
 

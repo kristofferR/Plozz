@@ -1206,7 +1206,7 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
             readAhead: isLocalFile || request.suppressOrdinaryWatchReporting
                 ? .default : readAheadPreference()
         )
-        return options
+        return Self.requestingHeightChannels(options, outputPolicy: outputPolicy)
     }
 
     nonisolated static func onDemandLoadOptions(
